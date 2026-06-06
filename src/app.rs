@@ -168,6 +168,19 @@ impl eframe::App for FerxApp {
         crate::ui::models_tab::advance_queue(&mut self.state);
         // Lazily trigger R model inspection for the currently selected model.
         trigger_r_inspect(&mut self.state, ctx);
+        // Fire the vpc package version check once at startup so the result is
+        // available everywhere (About popup, VPC tab banner) without requiring
+        // the user to visit the VPC tab first.
+        if self.state.ui.vpc_pkg_status.is_none() && !self.state.ui.vpc_pkg_checking {
+            self.state.ui.vpc_pkg_checking = true;
+            let tx  = self.state.worker_tx.clone();
+            let ctx2 = ctx.clone();
+            std::thread::spawn(move || {
+                let res = crate::io::r_extract::vpc_package_version();
+                let _ = tx.send(crate::workers::messages::WorkerMsg::VpcPkgStatus(res));
+                ctx2.request_repaint();
+            });
+        }
 
         // Apply theme.
         match self.state.workspace.theme() {
