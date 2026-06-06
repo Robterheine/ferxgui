@@ -5,7 +5,7 @@
 /// * Windows — PowerShell `New-BurntToastNotification` or a msg box fallback
 
 pub fn send(model_stem: &str, success: bool) {
-    let title = "FerX GUI";
+    let title = "FeRx GUI";
     let body = if success {
         format!("✓  {model_stem} completed")
     } else {
@@ -43,7 +43,7 @@ pub fn send(model_stem: &str, success: bool) {
                $x = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent($t); `
                $x.GetElementsByTagName('text')[0].AppendChild($x.CreateTextNode('{title}')) | Out-Null; `
                $x.GetElementsByTagName('text')[1].AppendChild($x.CreateTextNode('{body}')) | Out-Null; `
-               [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('FerxGUI').Show([Windows.UI.Notifications.ToastNotification]::new($x))"#
+               [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('FeRxGUI').Show([Windows.UI.Notifications.ToastNotification]::new($x))"#
         );
         std::thread::spawn(move || {
             let mut cmd = std::process::Command::new("powershell");

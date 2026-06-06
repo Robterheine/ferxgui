@@ -2,7 +2,7 @@
 name = "ferxgui"
 version = "0.2.0"
 edition = "2021"
-description = "FerX GUI — desktop application for FerX NLME modelling"
+description = "FeRx GUI — desktop application for FeRx NLME modelling"
 license = "MIT"
 
 [[bin]]

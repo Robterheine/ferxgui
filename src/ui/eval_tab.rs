@@ -1207,7 +1207,7 @@ fn no_predictions(ui: &mut egui::Ui, dark: bool) {
             ui.add_space(6.0);
             ui.label(egui::RichText::new(
                 "predictions.csv was not found in the .fitrx bundle.\n\
-                 This may be an older FerX version. Re-run the model to generate it.")
+                 This may be an older FeRx version. Re-run the model to generate it.")
                 .color(dim).size(12.0));
         });
     });

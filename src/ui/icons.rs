@@ -1,16 +1,16 @@
 use eframe::egui;
 use crate::state::Tab;
 
-// ── FerxGUI brand mark ──────────────────────────────────────────────────────
+// ── FeRxGUI brand mark ──────────────────────────────────────────────────────
 
-/// Renders the FerxGUI brand inline: a small PK-curve mark followed by the
-/// "FerxGUI" wordmark.  Mirrors the application icon.
+/// Renders the FeRxGUI brand inline: a small PK-curve mark followed by the
+/// "FeRxGUI" wordmark.  Mirrors the application icon.
 ///
 /// `font_size` is the point size of the wordmark text; the mark scales with it.
 pub fn show_ferx_logo(ui: &mut egui::Ui, font_size: f32) {
     let dark = ui.visuals().dark_mode;
 
-    // "Ferx" is dark navy on light, near-white on dark.
+    // "FeRx" is dark navy on light, near-white on dark.
     let fe_color = if dark {
         egui::Color32::from_rgb(0xdd, 0xe2, 0xf0)
     } else {
@@ -31,11 +31,11 @@ pub fn show_ferx_logo(ui: &mut egui::Ui, font_size: f32) {
     );
     paint_pk_mark(ui.painter(), rect, rx_color, axis_color);
 
-    // ── "FerxGUI" wordmark ──
+    // ── "FeRxGUI" wordmark ──
     let prev = ui.spacing().item_spacing.x;
     ui.spacing_mut().item_spacing.x = 4.0;
     ui.label(
-        egui::RichText::new("Ferx").size(font_size).strong().color(fe_color),
+        egui::RichText::new("FeRx").size(font_size).strong().color(fe_color),
     );
     ui.spacing_mut().item_spacing.x = 0.0;
     ui.label(

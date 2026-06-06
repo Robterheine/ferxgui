@@ -1,8 +1,37 @@
+# ── Rust build output ─────────────────────────────────────────────────────────
 /target
-.DS_Store
-Thumbs.db
+Cargo.lock
+
+# ── IDE / editor files ────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.iml
 *.swp
 *.swo
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# ── Windows ───────────────────────────────────────────────────────────────────
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# ── Linux ─────────────────────────────────────────────────────────────────────
+*~
+.nfs*
+
+# ── Secrets / environment ─────────────────────────────────────────────────────
+.env
+.env.*
+secrets.*
+
+# ── Project-specific ─────────────────────────────────────────────────────────
 .claude/
 skill.zip
 HANDOFF.md
@@ -10,3 +39,7 @@ CLAUDE.md
 CODE_REVIEW_HANDOFF.md
 *.json.bak
 *.tmp
+
+# ── Temporary test / log artefacts ────────────────────────────────────────────
+*.log
+ferxgui_vpc_cache/

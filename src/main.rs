@@ -9,14 +9,14 @@ mod workers;
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("FerX GUI")
+            .with_title("FeRx GUI")
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([900.0, 600.0])
             .with_icon(build_icon()),
         ..Default::default()
     };
     eframe::run_native(
-        "FerX GUI",
+        "FeRx GUI",
         options,
         Box::new(|cc| Ok(Box::new(app::FerxApp::new(cc)))),
     )
@@ -25,7 +25,7 @@ fn main() -> eframe::Result {
 // ── Icon renderer ─────────────────────────────────────────────────────────────
 //
 // Draws a pharmacokinetic concentration–time curve with observation points on a
-// rounded dark-navy tile, with the small "ferxGUI" wordmark beneath it.  Every
+// rounded dark-navy tile, with the small "FeRxGUI" wordmark beneath it.  Every
 // shape is rendered with SDF-based antialiasing so it stays smooth at any dock /
 // taskbar size.  No external image or font crate needed.
 
@@ -92,7 +92,7 @@ fn build_icon() -> std::sync::Arc<eframe::egui::viewport::IconData> {
         disc(&mut buf, x, y, 3.5, ICON_ORANGE);
     }
 
-    // ── Wordmark "ferxGUI" ──────────────────────────────────────────────────
+    // ── Wordmark "FeRxGUI" ──────────────────────────────────────────────────
     draw_wordmark(&mut buf);
 
     std::sync::Arc::new(eframe::egui::viewport::IconData {
@@ -105,7 +105,7 @@ fn build_icon() -> std::sync::Arc<eframe::egui::viewport::IconData> {
 // ── Wordmark ────────────────────────────────────────────────────────────────
 
 fn draw_wordmark(buf: &mut [u8]) {
-    let glyphs = ['f', 'e', 'r', 'x', 'G', 'U', 'I'];
+    let glyphs = ['F', 'e', 'R', 'x', 'G', 'U', 'I'];
     let ch = 60.0_f32;          // glyph cell height
     let cw = 37.0_f32;          // glyph cell width
     let gap = 8.0_f32;
@@ -127,6 +127,19 @@ fn draw_wordmark(buf: &mut [u8]) {
 /// Stroke polylines for each needed glyph in a unit cell (x,y ∈ 0..1, y down).
 fn glyph_strokes(g: char) -> Vec<Vec<(f32, f32)>> {
     match g {
+        // ── Uppercase glyphs ──────────────────────────────────────────────
+        'F' => vec![
+            vec![(0.24,0.06),(0.24,0.95)],           // stem
+            vec![(0.24,0.06),(0.78,0.06)],            // top bar
+            vec![(0.24,0.47),(0.68,0.47)],            // mid bar
+        ],
+        'R' => vec![
+            vec![(0.22,0.06),(0.22,0.95)],            // stem
+            vec![(0.22,0.06),(0.62,0.06),(0.80,0.19), // bowl (top half)
+                 (0.80,0.38),(0.62,0.52),(0.22,0.52)],
+            vec![(0.52,0.52),(0.80,0.95)],            // diagonal leg
+        ],
+        // ── Lowercase glyphs ──────────────────────────────────────────────
         'f' => vec![
             vec![(0.42,0.10),(0.42,0.95)],
             vec![(0.42,0.13),(0.52,0.04),(0.66,0.07)],

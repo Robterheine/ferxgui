@@ -1,5 +1,5 @@
 /// Run manifest — written atomically to disk before a ferx process is
-/// launched so that FerxGUI can reconnect to it after a restart.
+/// launched so that FeRxGUI can reconnect to it after a restart.
 ///
 /// Layout:  `{app_dir}/running/{run_id}.runmfst`
 /// Strategy: write to `{path}.tmp`, then `fs::rename` (atomic on same FS).

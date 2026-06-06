@@ -1,6 +1,6 @@
-# FerX GUI
+# FeRx GUI
 
-A desktop application for building and evaluating population pharmacokinetic / pharmacodynamic (PK/PD) models with [FerX NLME](https://ferx-nlme.github.io/).
+A desktop application for building and evaluating population pharmacokinetic / pharmacodynamic (PK/PD) models with [FeRx NLME](https://ferx-nlme.github.io/).
 
 Built with Rust + [egui](https://github.com/emilk/egui). Runs on macOS, Windows, and Linux.
 
@@ -23,7 +23,7 @@ Built with Rust + [egui](https://github.com/emilk/egui). Runs on macOS, Windows,
 - Parameter correlation heatmap from the covariance matrix
 
 ### Visual Predictive Check (VPC)
-Powered by the R [vpc package](https://vpc.ronkeizer.com/) — all two-stage statistics, binning, and confidence bands are computed by the package; FerX GUI renders them natively and interactively.
+Powered by the R [vpc package](https://vpc.ronkeizer.com/) — all two-stage statistics, binning, and confidence bands are computed by the package; FeRx GUI renders them natively and interactively.
 
 - **Continuous VPC** with configurable prediction intervals (5/95, 10/90, 25/75, custom), confidence intervals, and multiple binning methods (Jenks, k-means, density, time, data, manual)
 - **Prediction-corrected VPC (pcVPC)** — normalises by population predictions from `fit$sdtab`
@@ -49,7 +49,7 @@ Scrollable in-app run report with parameter tables, DW statistic, IWRES lag-1 r,
 ## Requirements
 
 ### R (required)
-FerX NLME runs entirely inside R. FerX GUI calls `Rscript` for all modelling operations.
+FeRx NLME runs entirely inside R. FeRx GUI calls `Rscript` for all modelling operations.
 
 | Software | Minimum version | Notes |
 |---|---|---|
@@ -95,7 +95,7 @@ brew install --cask r
 brew install rustup
 rustup-init          # follow the prompts; choose default install
 
-# 4. Clone and build FerX GUI
+# 4. Clone and build FeRx GUI
 git clone https://github.com/robterheine/ferxgui.git
 cd ferxgui
 cargo build --release
@@ -124,7 +124,7 @@ The first launch auto-detects `Rscript` and the `ferx` package. If detection fai
    .\target\release\ferxgui.exe
    ```
 
-> **Note for Windows:** FerX processes are spawned with `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` so they survive terminal close and SSH sessions. If your environment uses Job Objects that prevent breakaway (e.g. some CI runners), set `loginctl enable-linger` or run as a normal desktop user.
+> **Note for Windows:** FeRx processes are spawned with `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` so they survive terminal close and SSH sessions. If your environment uses Job Objects that prevent breakaway (e.g. some CI runners), set `loginctl enable-linger` or run as a normal desktop user.
 
 ### Linux (Ubuntu / Debian)
 
@@ -153,13 +153,13 @@ cargo build --release
 ./target/release/ferxgui
 ```
 
-> **Linux SSH note:** If you use FerX GUI over SSH/X11, model runs are spawned with `setsid()` so they are immune to SIGHUP. However, if your system uses `KillUserProcesses=yes` in `/etc/systemd/logind.conf`, background processes may be killed when your session ends. Ask your administrator to run `loginctl enable-linger <your-username>` to allow lingering processes.
+> **Linux SSH note:** If you use FeRx GUI over SSH/X11, model runs are spawned with `setsid()` so they are immune to SIGHUP. However, if your system uses `KillUserProcesses=yes` in `/etc/systemd/logind.conf`, background processes may be killed when your session ends. Ask your administrator to run `loginctl enable-linger <your-username>` to allow lingering processes.
 
 ---
 
 ## Quick start
 
-1. Launch FerX GUI and go to **Settings** to confirm R / ferx are detected (shown in green).
+1. Launch FeRx GUI and go to **Settings** to confirm R / ferx are detected (shown in green).
 2. Set your **working directory** — the folder containing your `.ferx` model files.
 3. Select a model in the **Models** tab, choose your data file in the Run pill, and click **Run**.
 4. After a successful run, explore **Evaluation**, **VPC**, and **SIR** tabs for diagnostics.
@@ -170,7 +170,7 @@ Test models and data for the warfarin example are included in the `ferx` R packa
 
 ## Configuration
 
-FerX GUI stores its settings in `~/.ferxgui/settings.json`. You can edit this file directly or use the **Settings** tab in the application. Key fields:
+FeRx GUI stores its settings in `~/.ferxgui/settings.json`. You can edit this file directly or use the **Settings** tab in the application. Key fields:
 
 | Field | Description |
 |---|---|
@@ -232,7 +232,7 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Acknowledgements
 
-- **FerX NLME** by the FerX-NLME team — [ferx-nlme.github.io](https://ferx-nlme.github.io/)
+- **FeRx NLME** by the FeRx-NLME team — [ferx-nlme.github.io](https://ferx-nlme.github.io/)
 - **vpc R package** by Ronkeizer et al. — [vpc.ronkeizer.com](https://vpc.ronkeizer.com/)
 - **egui / eframe** by Emil Ernerfeldt and contributors
 

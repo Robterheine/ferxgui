@@ -248,7 +248,7 @@ impl eframe::App for FerxApp {
 
 fn render_header(ctx: &egui::Context, state: &mut AppState) {
     // 32 px — just enough for context + run indicators.
-    // The window title bar already shows "FerX GUI", so we don't repeat it.
+    // The window title bar already shows "FeRx GUI", so we don't repeat it.
     egui::TopBottomPanel::top("header")
         .exact_height(32.0)
         .show(ctx, |ui| {
@@ -512,8 +512,8 @@ fn render_settings(ui: &mut egui::Ui, state: &mut AppState) {
         });
         ui.add_space(16.0);
 
-        // ── FerX Engine (via R) ──────────────────────────────────────────────
-        settings_section_label(ui, "FerX Engine (R package)");
+        // ── FeRx Engine (via R) ──────────────────────────────────────────────
+        settings_section_label(ui, "FeRx Engine (R package)");
         ui.group(|ui| {
             ui.set_width(440.0);
 
@@ -997,7 +997,7 @@ fn render_about_popup(ctx: &egui::Context, state: &mut AppState) {
     ctx.show_viewport_immediate(
         egui::ViewportId::from_hash_of("about_popup"),
         egui::ViewportBuilder::default()
-            .with_title("About FerX GUI")
+            .with_title("About FeRx GUI")
             .with_inner_size(egui::vec2(460.0, 490.0))
             .with_resizable(true)
             .with_min_inner_size(egui::vec2(380.0, 420.0)),
@@ -1023,7 +1023,7 @@ fn render_about_popup(ctx: &egui::Context, state: &mut AppState) {
                     ui.vertical_centered(|ui| {
                         crate::ui::icons::show_ferx_logo(ui, 36.0);
                         ui.add_space(6.0);
-                        ui.label(egui::RichText::new("FerX GUI").size(22.0).strong());
+                        ui.label(egui::RichText::new("FeRx GUI").size(22.0).strong());
                         ui.label(egui::RichText::new(
                             format!("v{}  ·  Population PK/PD modelling",
                                     env!("CARGO_PKG_VERSION")))
@@ -1072,12 +1072,12 @@ fn render_about_popup(ctx: &egui::Context, state: &mut AppState) {
                             .size(11.0).color(dim));
                         ui.add_space(8.0);
                         ui.hyperlink_to(
-                            "github.com/Robterheine/ferxgui  —  FerX GUI source code",
+                            "github.com/Robterheine/ferxgui  —  FeRx GUI source code",
                             "https://github.com/Robterheine/ferxgui",
                         );
                         ui.add_space(6.0);
                         ui.hyperlink_to(
-                            "ferx-nlme.github.io  —  FerX NLME documentation",
+                            "ferx-nlme.github.io  —  FeRx NLME documentation",
                             "https://ferx-nlme.github.io/",
                         );
                         ui.add_space(6.0);
