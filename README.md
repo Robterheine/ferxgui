@@ -196,6 +196,40 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ---
 
+## Changelog
+
+### v0.2.0 (2026-06-06) — bug-fix release
+
+**Security**
+- Fixed ZIP path traversal in `.fitrx` reader: entry names containing `..` or absolute paths are now rejected.
+- Added per-entry and per-R-output size limits (256 MB / 10 MB) to prevent memory exhaustion.
+
+**Correctness**
+- SIR: fixed duplicate auto-trigger when a run finished while SIR was already running; added cancellation support (closing the popup now stops a queued SIR sleep).
+- SIR: fixed context-string ambiguity that caused error messages to be attributed to the wrong run.
+- VPC bins: NaN and Inf are no longer accepted as valid manual bin values.
+- VPC R script: emits a warning when a requested stratification column is not found in the data.
+- Worker threads: panics are now caught and reported as run errors instead of leaving the run stuck.
+- `.ferx` model files with non-UTF-8 bytes are loaded with replacement characters instead of silently skipped.
+- Non-UTF-8 paths passed to Rscript now produce an explicit error rather than silent data loss.
+- Windows R path search: `bin/x64` is now joined correctly on all platforms.
+
+**Reliability**
+- Corrupt `settings.json` is backed up to `.json.bak` and defaults are used with a visible warning; write failures are also surfaced.
+- Startup warnings (missing home directory, corrupt settings) are shown in the status bar.
+- Per-frame log-text allocation eliminated: `log_text` is rebuilt only when new lines arrive.
+- Syntax highlighter in the model editor is now cached across frames.
+- All `open::that()` errors (open in Finder, open log, open RStudio, etc.) are shown in the status bar.
+- Duplicate model stems can no longer be added to the run queue.
+- `save_settings()` and `save_bookmarks()` failures are surfaced to the status bar.
+- Windows desktop notification: fixed PowerShell line-continuation character (`\` → `` ` ``).
+
+**Cleanup**
+- Removed unused `notify` (filesystem watcher) crate and dead `FsEvent` message variant.
+- Removed dead `is_terminal()` method; cleaned up `#[allow(dead_code)]` attributes.
+
+---
+
 ## Acknowledgements
 
 - **FerX NLME** by the FerX-NLME team — [ferx-nlme.github.io](https://ferx-nlme.github.io/)

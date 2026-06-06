@@ -124,6 +124,11 @@ impl FerxApp {
         // Reconnect any ferx processes that outlived the previous GUI session.
         reconnect_orphaned_runs(&mut state);
 
+        // Surface any startup warnings (missing home dir, corrupt settings file, etc.).
+        if !state.workspace.startup_warnings.is_empty() {
+            state.ui.status_message = state.workspace.startup_warnings.join("; ");
+        }
+
         // Detect the ferx package via R on a background thread so the UI stays
         // responsive.  Skipped when the user has set a custom path.
         if state.workspace.ferx_binary_source == crate::io::persistence::FerxBinarySource::Detecting {
@@ -157,8 +162,8 @@ impl eframe::App for FerxApp {
                 })
             });
             if let Some(img) = screenshot {
-                save_tree_png(&img, canvas_rect, ppp, &self.state);
                 self.state.ui.tree_export_awaiting = false;
+                save_tree_png(&img, canvas_rect, ppp, &mut self.state);
             }
         }
 
@@ -308,7 +313,7 @@ fn render_header(ctx: &egui::Context, state: &mut AppState) {
                 }
 
                 // Update available badge.
-                if let Some(ver) = &state.ui.update_available.clone() {
+                if let Some(ver) = &state.ui.update_available {
                     ui.add_space(8.0);
                     ui.label(
                         egui::RichText::new(format!("Update available: {}", ver))
@@ -327,7 +332,9 @@ fn render_header(ctx: &egui::Context, state: &mut AppState) {
                         && ui.small_button("Open RStudio").clicked()
                     {
                         if let Some(path) = &state.workspace.settings.rstudio_path {
-                            let _ = open::that(path);
+                            if let Err(e) = open::that(path) {
+                                state.ui.status_message = format!("Could not open RStudio: {e}");
+                            }
                         }
                     }
                 });
@@ -435,7 +442,7 @@ fn render_sidebar(ctx: &egui::Context, state: &mut AppState) {
                     {
                         state.ui.sidebar_collapsed = !state.ui.sidebar_collapsed;
                         state.workspace.settings.sidebar_collapsed = state.ui.sidebar_collapsed;
-                        state.workspace.save_settings();
+                        if let Some(w) = state.workspace.save_settings() { state.ui.status_message = w; }
                     }
                 });
             });
@@ -591,7 +598,7 @@ fn render_settings(ui: &mut egui::Ui, state: &mut AppState) {
                         state.workspace.settings.ferx_binary = Some(path);
                         state.workspace.settings.ferx_binary_custom = true;
                         state.workspace.ferx_binary_source = FerxBinarySource::Custom;
-                        state.workspace.save_settings();
+                        if let Some(w) = state.workspace.save_settings() { state.ui.status_message = w; }
                     }
                 }
 
@@ -605,7 +612,7 @@ fn render_settings(ui: &mut egui::Ui, state: &mut AppState) {
                         state.workspace.settings.ferx_binary_custom = false;
                         state.workspace.settings.ferx_binary = None;
                         state.workspace.ferx_binary_source = FerxBinarySource::Detecting;
-                        state.workspace.save_settings();
+                        if let Some(w) = state.workspace.save_settings() { state.ui.status_message = w; }
                         // Kick off background R detection
                         let tx  = state.worker_tx.clone();
                         let ctx = ui.ctx().clone();
@@ -632,11 +639,11 @@ fn render_settings(ui: &mut egui::Ui, state: &mut AppState) {
                 let is_dark = state.workspace.settings.theme == crate::io::persistence::Theme::Dark;
                 if ui.selectable_label(is_dark, "  Dark  ").clicked() {
                     state.workspace.settings.theme = crate::io::persistence::Theme::Dark;
-                    state.workspace.save_settings();
+                    if let Some(w) = state.workspace.save_settings() { state.ui.status_message = w; }
                 }
                 if ui.selectable_label(!is_dark, "  Light  ").clicked() {
                     state.workspace.settings.theme = crate::io::persistence::Theme::Light;
-                    state.workspace.save_settings();
+                    if let Some(w) = state.workspace.save_settings() { state.ui.status_message = w; }
                 }
             });
         });
@@ -675,7 +682,7 @@ fn render_run_popup(ctx: &egui::Context, state: &mut AppState) {
     let (dot_color, stem, elapsed, status_text) = run_panel_status(state);
     let has_active  = state.run.active_run.is_some();
     let queue_len   = state.run.run_queue.len();
-    let log_text    = state.run.log_buffer.iter().cloned().collect::<Vec<_>>().join("\n");
+    let log_text    = state.run.log_text.clone();
     let log_path    = state.run.active_run.as_ref()
         .map(|r| r.log_path.to_string_lossy().to_string())
         .unwrap_or_default();
@@ -697,6 +704,10 @@ fn render_run_popup(ctx: &egui::Context, state: &mut AppState) {
 
     // Use a real OS viewport so the close button matches the host OS (native
     // red circle on macOS, standard × on Windows / Linux).
+    // Note: show_viewport_immediate spawns a child OS window, which requires a
+    // display server that supports multiple windows. On Wayland without XWayland
+    // this may silently no-op; users running native Wayland should set
+    // WINIT_UNIX_BACKEND=x11 or enable XWayland as a workaround.
     ctx.show_viewport_immediate(
         egui::ViewportId::from_hash_of("run_popup"),
         egui::ViewportBuilder::default()
@@ -973,6 +984,7 @@ fn render_sir_popup(ctx: &egui::Context, state: &mut AppState) {
     }
     if do_close {
         state.ui.sir_popup_open = false;
+        state.ui.sir_popup_last_stem = None;
     }
 }
 
@@ -1171,12 +1183,12 @@ fn reconnect_orphaned_runs(state: &mut AppState) {
 
     // We can only track one active run in the current UI.  Pick the most
     // recently modified manifest if there are several.
-    let (mfst_path, manifest) = manifests
+    let Some((mfst_path, manifest)) = manifests
         .into_iter()
         .max_by_key(|(p, _)| {
             p.metadata().and_then(|m| m.modified()).ok()
         })
-        .unwrap();
+    else { return };
 
     if !RunManifest::is_pid_alive(manifest.pid) {
         // Process already gone — remove stale manifest.
@@ -1234,7 +1246,7 @@ fn save_tree_png(
     screenshot: &egui::ColorImage,
     canvas_rect: egui::Rect,
     ppp: f32,
-    state: &AppState,
+    state: &mut AppState,
 ) {
     // Convert logical rect → physical pixels, clamped to image bounds.
     let img_w = screenshot.width() as u32;
@@ -1271,12 +1283,14 @@ fn save_tree_png(
     match image::RgbaImage::from_raw(cw, ch, rgba) {
         Some(img) => {
             if let Err(e) = img.save(&path) {
-                eprintln!("tree PNG save error: {e}");
+                state.ui.status_message = format!("Tree export failed: {e}");
+            } else if let Err(e) = open::that(&path) {
+                state.ui.status_message = format!("Tree saved to {} (could not open: {e})", path.display());
             } else {
-                let _ = open::that(&path);
+                state.ui.status_message = format!("Tree exported → {}", path.display());
             }
         }
-        None => eprintln!("tree PNG: failed to build image buffer"),
+        None => state.ui.status_message = "Tree export failed: could not build image".to_string(),
     }
 }
 

@@ -7,3 +7,6 @@ Thumbs.db
 skill.zip
 HANDOFF.md
 CLAUDE.md
+CODE_REVIEW_HANDOFF.md
+*.json.bak
+*.tmp

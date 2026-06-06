@@ -128,6 +128,25 @@ struct FitWire {
 
 
 // ---------------------------------------------------------------------------
+// Safety helpers
+// ---------------------------------------------------------------------------
+
+/// Maximum bytes read from a single ZIP entry into memory.
+const MAX_ENTRY_BYTES: u64 = 256 * 1024 * 1024; // 256 MB
+
+/// Validate a ZIP entry name before using it as a filesystem path component.
+///
+/// Rejects names that contain `..` segments or are absolute paths — both could
+/// allow path traversal outside the intended directory.
+fn safe_entry_name(name: &str) -> Option<&str> {
+    if name.contains("..") { return None; }
+    if name.starts_with('/') || name.starts_with('\\') { return None; }
+    // Windows: reject names starting with a drive letter (e.g. "C:")
+    if name.len() >= 2 && name.as_bytes()[1] == b':' { return None; }
+    Some(name)
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -321,14 +340,21 @@ pub fn extract_output_tables(fitrx_path: &Path) -> Result<Vec<PathBuf>, FitrxErr
 
     let mut written = Vec::new();
     for (entry_name, out_name) in &entries {
-        let mut buf = String::new();
-        match zip.by_name(entry_name) {
-            Ok(mut entry) => { entry.read_to_string(&mut buf)?; }
-            Err(_)        => continue, // not in this bundle
+        let mut entry = match zip.by_name(entry_name) {
+            Ok(e)  => e,
+            Err(_) => continue, // not in this bundle
+        };
+        if entry.size() > MAX_ENTRY_BYTES {
+            return Err(FitrxError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{entry_name} exceeds {MAX_ENTRY_BYTES} bytes"),
+            )));
         }
+        let mut buf = String::new();
+        entry.read_to_string(&mut buf)?;
         let out_path = dir.join(out_name);
         std::fs::write(&out_path, buf.as_bytes())
-            .map_err(|e| FitrxError::Io(e))?;
+            .map_err(FitrxError::Io)?;
         written.push(out_path);
     }
     Ok(written)
@@ -393,6 +419,12 @@ fn read_fit_json(zip: &mut zip::ZipArchive<std::fs::File>) -> Result<FitWire, Fi
     let mut entry = zip.by_name("fit.json").map_err(|_| {
         FitrxError::MissingEntry("fit.json".to_string())
     })?;
+    if entry.size() > MAX_ENTRY_BYTES {
+        return Err(FitrxError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "fit.json entry exceeds size limit",
+        )));
+    }
     let mut buf = String::new();
     entry.read_to_string(&mut buf)?;
     serde_json::from_str(&buf).map_err(|e| FitrxError::Json {
@@ -403,6 +435,7 @@ fn read_fit_json(zip: &mut zip::ZipArchive<std::fs::File>) -> Result<FitWire, Fi
 
 fn read_warnings(zip: &mut zip::ZipArchive<std::fs::File>) -> Option<Vec<String>> {
     let mut entry = zip.by_name("warnings.txt").ok()?;
+    if entry.size() > MAX_ENTRY_BYTES { return None; }
     let mut buf = String::new();
     entry.read_to_string(&mut buf).ok()?;
     Some(buf.lines().filter(|l| !l.is_empty()).map(str::to_owned).collect())
@@ -413,9 +446,20 @@ fn read_text_entry(
     zip: &mut zip::ZipArchive<std::fs::File>,
     name: &str,
 ) -> Result<String, FitrxError> {
+    // Validate that the requested name is a safe path component.
+    safe_entry_name(name).ok_or_else(|| FitrxError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!("unsafe ZIP entry name: {name}"),
+    )))?;
     let mut entry = zip
         .by_name(name)
         .map_err(|_| FitrxError::MissingEntry(name.to_string()))?;
+    if entry.size() > MAX_ENTRY_BYTES {
+        return Err(FitrxError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{name} entry exceeds size limit"),
+        )));
+    }
     let mut buf = String::new();
     entry.read_to_string(&mut buf)?;
     Ok(buf)

@@ -13,7 +13,6 @@ pub enum CancelMode {
 /// Every worker sends one of these variants back to the main thread.
 /// The egui update() loop drains the channel with try_recv() — never blocks.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum WorkerMsg {
     /// Directory scan completed; full refreshed model list.
     ScanComplete(Vec<ModelEntry>),
@@ -32,9 +31,6 @@ pub enum WorkerMsg {
 
     /// The ferx subprocess could not be spawned or was killed with an error.
     RunError(String),
-
-    /// A file-system event in the watched directory.
-    FsEvent(PathBuf),
 
     /// GitHub version check result: `Some(version_string)` when a newer release exists.
     VersionCheckResult(Option<String>),

@@ -151,6 +151,7 @@ names(sim_dat) <- tolower(names(sim_dat))
 dv_col <- if ("dv_sim" %in% names(sim_dat)) "dv_sim" else "dv"
 
 # ---- Stratification: merge columns from the original data if needed --------
+vpc_warnings <- character(0)
 strat_arg <- NULL
 if (!is.null(cfg$stratify) && length(cfg$stratify) > 0) {
   strat_cols <- cfg$stratify[nchar(trimws(cfg$stratify)) > 0]
@@ -172,6 +173,13 @@ if (!is.null(cfg$stratify) && length(cfg$stratify) > 0) {
       }
     }
     strat_arg <- strat_cols[strat_cols %in% names(obs) & strat_cols %in% names(sim_dat)]
+    missing_cols <- setdiff(strat_cols, strat_arg)
+    if (length(missing_cols) > 0) {
+      vpc_warnings <- c(vpc_warnings, paste0(
+        "Stratification column(s) not found in data: ",
+        paste(missing_cols, collapse = ", "), " — stratification ignored for these columns."
+      ))
+    }
     if (length(strat_arg) == 0) strat_arg <- NULL
   }
 }
@@ -243,7 +251,8 @@ result <- list(
   uloq        = if (!is.null(uloq_val)) uloq_val else NA_real_,
   strat_names = if (!is.null(strat_arg)) as.list(strat_arg) else list(),
   pi_lo       = cfg$pi_lo,
-  pi_hi       = cfg$pi_hi
+  pi_hi       = cfg$pi_hi,
+  warnings    = as.list(vpc_warnings)
 )
 
 cat(toJSON(result, auto_unbox = TRUE, na = "null", digits = 6))
@@ -530,7 +539,7 @@ pub fn ensure_run_script(app_dir: &Path) -> std::io::Result<std::path::PathBuf> 
 /// Call `ferx_model_inspect(model_path)` via R and return the parsed result.
 /// Blocking — run from a background thread.
 pub fn inspect_model(model_path: &Path) -> Result<RModelInfo, String> {
-    let json = run_script(INSPECT_R, &[model_path.to_string_lossy().as_ref()])?;
+    let json = run_script(INSPECT_R, &[path_as_str(model_path)?])?;
     serde_json::from_str(&json)
         .map_err(|e| format!("inspect JSON parse error: {e}\nR output: {json}"))
 }
@@ -539,8 +548,8 @@ pub fn inspect_model(model_path: &Path) -> Result<RModelInfo, String> {
 /// Blocking — run from a background thread.
 pub fn compute_check_init(model_path: &Path, data_path: &Path) -> Result<CheckInitResult, String> {
     let json = run_script(CHECK_INIT_R, &[
-        model_path.to_string_lossy().as_ref(),
-        data_path.to_string_lossy().as_ref(),
+        path_as_str(model_path)?,
+        path_as_str(data_path)?,
     ])?;
     serde_json::from_str(&json)
         .map_err(|e| format!("check_init JSON parse error: {e}\nR output: {}", &json[..json.len().min(500)]))
@@ -564,7 +573,8 @@ pub fn compute_vpc(cfg: &VpcConfig) -> Result<VpcResult, String> {
     std::fs::write(&cfg_path, cfg_json)
         .map_err(|e| format!("could not write VPC config: {e}"))?;
 
-    let json = run_script(VPC_R, &[cfg_path.to_string_lossy().as_ref()]);
+    let cfg_path_str = path_as_str(&cfg_path)?;
+    let json = run_script(VPC_R, &[cfg_path_str]);
     let _ = std::fs::remove_file(&cfg_path);
     let json = json?;
 
@@ -718,10 +728,9 @@ pub fn export_vpc_plot(cfg: &VpcConfig, png_path: &Path, script: &str) -> Result
     std::fs::write(&cfg_path, cfg_json)
         .map_err(|e| format!("could not write VPC config: {e}"))?;
 
-    let res = run_script(script, &[
-        cfg_path.to_string_lossy().as_ref(),
-        png_path.to_string_lossy().as_ref(),
-    ]);
+    let cfg_str = path_as_str(&cfg_path)?;
+    let png_str = path_as_str(png_path)?;
+    let res = run_script(script, &[cfg_str, png_str]);
     let _ = std::fs::remove_file(&cfg_path);
     res.map(|_| ())
 }
@@ -781,7 +790,7 @@ pub fn compute_sir(
     keep_samples: bool,
 ) -> Result<SirResult, String> {
     let json = run_script(SIR_R, &[
-        fitrx_path.to_string_lossy().as_ref(),
+        path_as_str(fitrx_path)?,
         &n_samples.to_string(),
         &n_resamples.to_string(),
         &seed.to_string(),
@@ -837,8 +846,8 @@ fn parse_sir_result(json: &str) -> Result<SirResult, serde_json::Error> {
 /// Blocking — run from a background thread.
 pub fn compute_eta_cov(fitrx_path: &Path, data_path: &Path) -> Result<EtaCovResult, String> {
     let json = run_script(ETA_COV_R, &[
-        fitrx_path.to_string_lossy().as_ref(),
-        data_path.to_string_lossy().as_ref(),
+        path_as_str(fitrx_path)?,
+        path_as_str(data_path)?,
     ])?;
     serde_json::from_str(&json)
         .map_err(|e| format!("eta_cov JSON parse error: {e}\nR output: {}", &json[..json.len().min(500)]))
@@ -858,8 +867,8 @@ pub fn export_gof(
     ci_lines:      bool,
 ) -> Result<String, String> {
     let out = run_script(GOF_EXPORT_R, &[
-        data_csv.to_string_lossy().as_ref(),
-        output_path.to_string_lossy().as_ref(),
+        path_as_str(data_csv)?,
+        path_as_str(output_path)?,
         format,
         &width_mm.to_string(),
         cwres_x_1,
@@ -875,7 +884,7 @@ pub fn export_gof(
 /// Blocking — run from a background thread or directly on user action.
 pub fn create_model_from_template(out_path: &Path, template: &str) -> Result<(), String> {
     let _ = run_script(CREATE_MODEL_R, &[
-        out_path.to_string_lossy().as_ref(),
+        path_as_str(out_path)?,
         template,
     ])?;
     Ok(())
@@ -884,6 +893,14 @@ pub fn create_model_from_template(out_path: &Path, template: &str) -> Result<(),
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/// Convert a `Path` to `&str`, returning a descriptive error on non-UTF-8 paths.
+fn path_as_str(p: &std::path::Path) -> Result<&str, String> {
+    p.to_str().ok_or_else(|| format!(
+        "path contains non-UTF-8 characters and cannot be passed to Rscript: {}",
+        p.display()
+    ))
+}
 
 /// Write `script` to a temp file, run `Rscript --vanilla <tmp> [args…]`,
 /// and return stdout on success or the stderr text as an Err.
@@ -912,6 +929,15 @@ fn run_script(script: &str, args: &[&str]) -> Result<String, String> {
         .map_err(|e| format!("failed to start {}: {e}", rscript.display()))?;
 
     let _ = std::fs::remove_file(&tmp_path);  // best-effort cleanup
+
+    // Guard against pathological R output that could exhaust memory.
+    const MAX_OUTPUT_BYTES: usize = 10 * 1024 * 1024; // 10 MB
+    if output.stdout.len() > MAX_OUTPUT_BYTES {
+        return Err(format!(
+            "R output too large ({} bytes > {MAX_OUTPUT_BYTES} byte limit)",
+            output.stdout.len(),
+        ));
+    }
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -960,8 +986,7 @@ pub fn find_rscript() -> Option<std::path::PathBuf> {
     // 2. R_HOME/bin (and bin/x64 on Windows) if the env var is set.
     if let Some(home) = std::env::var_os("R_HOME") {
         let home = std::path::PathBuf::from(home);
-        for sub in ["bin", "bin/x64"] {
-            let p = home.join(sub).join(exe);
+        for p in [home.join("bin").join(exe), home.join("bin").join("x64").join(exe)] {
             if p.is_file() { return Some(p); }
         }
     }

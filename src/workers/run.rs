@@ -146,6 +146,28 @@ pub fn reconnect_orphan(
 
 /// Monitor + tailer for a freshly spawned Child.
 fn fresh_run_worker(
+    child: std::process::Child,
+    pid: u32,
+    record: RunRecord,
+    log_path: PathBuf,
+    manifest_path: PathBuf,
+    tx: Sender<WorkerMsg>,
+    cancel_rx: Receiver<CancelMode>,
+) {
+    let mp  = manifest_path.clone();
+    let tx2 = tx.clone();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        fresh_run_worker_inner(child, pid, record, log_path, manifest_path, tx, cancel_rx);
+    }));
+    if result.is_err() {
+        RunManifest::remove(&mp);
+        let _ = tx2.send(WorkerMsg::RunError(
+            "Internal error: run worker thread panicked unexpectedly".to_string(),
+        ));
+    }
+}
+
+fn fresh_run_worker_inner(
     mut child: std::process::Child,
     pid: u32,
     record: RunRecord,
@@ -195,6 +217,27 @@ fn fresh_run_worker(
 
 /// Monitor + tailer for a reconnected orphan (no Child handle).
 fn orphan_worker(
+    pid: u32,
+    record: RunRecord,
+    log_path: PathBuf,
+    manifest_path: PathBuf,
+    tx: Sender<WorkerMsg>,
+    cancel_rx: Receiver<CancelMode>,
+) {
+    let mp  = manifest_path.clone();
+    let tx2 = tx.clone();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        orphan_worker_inner(pid, record, log_path, manifest_path, tx, cancel_rx);
+    }));
+    if result.is_err() {
+        RunManifest::remove(&mp);
+        let _ = tx2.send(WorkerMsg::RunError(
+            "Internal error: orphan worker thread panicked unexpectedly".to_string(),
+        ));
+    }
+}
+
+fn orphan_worker_inner(
     pid: u32,
     record: RunRecord,
     log_path: PathBuf,
@@ -356,7 +399,7 @@ impl LogReader {
                 Err(_) => break,
             }
         }
-        self.pos = reader.into_inner().seek(SeekFrom::Current(0)).unwrap_or(self.pos);
+        self.pos = reader.into_inner().stream_position().unwrap_or(self.pos);
     }
 }
 

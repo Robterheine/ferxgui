@@ -43,7 +43,8 @@ fn collect_models(dir: &Path, meta_map: &HashMap<String, ModelMeta>) -> Vec<Mode
 
 fn build_entry(ferx_path: PathBuf, meta_map: &HashMap<String, ModelMeta>) -> Option<ModelEntry> {
     let stem = ferx_path.file_stem()?.to_string_lossy().to_string();
-    let source = std::fs::read_to_string(&ferx_path).ok()?;
+    let bytes = std::fs::read(&ferx_path).ok()?;
+    let source = String::from_utf8_lossy(&bytes).into_owned();
     let params = ferx_file::parse_params(&source);
 
     // File creation time (falls back to modified time on Linux which lacks st_birthtime).

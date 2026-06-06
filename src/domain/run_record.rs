@@ -36,7 +36,6 @@ pub enum JobStatus {
     Cancelled,
 }
 
-#[allow(dead_code)]
 impl JobStatus {
     pub fn label(&self) -> &'static str {
         match self {
@@ -45,10 +44,6 @@ impl JobStatus {
             JobStatus::Failed     => "Failed",
             JobStatus::Cancelled  => "Cancelled",
         }
-    }
-
-    pub fn is_terminal(&self) -> bool {
-        !matches!(self, JobStatus::Running)
     }
 }
 
@@ -76,7 +71,6 @@ pub struct QueuedRun {
 
 /// State of an actively running subprocess, held in `RunState`.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct ActiveRun {
     pub record:        RunRecord,
     /// Wall-clock instant the run was launched (for elapsed-time display).

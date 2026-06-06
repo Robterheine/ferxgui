@@ -366,9 +366,10 @@ fn show_options(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
                 .hint_text("0, 4, 8, 12, 24, 48, 96, 120")
                 .desired_width(ui.available_width()));
             let n_valid = o.manual_bins.split(',')
-                .filter(|s| s.trim().parse::<f64>().is_ok()).count();
+                .filter(|s| s.trim().parse::<f64>().map_or(false, |v| v.is_finite()))
+                .count();
             if !o.manual_bins.trim().is_empty() && n_valid < 2 {
-                ui.label(egui::RichText::new("Enter ≥ 2 comma-separated numbers.")
+                ui.label(egui::RichText::new("Enter ≥ 2 comma-separated finite numbers (no NaN/Inf).")
                     .size(10.0).color(theme::ORANGE));
             }
         } else {
@@ -869,7 +870,9 @@ fn read_csv_header(path: &std::path::Path) -> Vec<String> {
 
 fn manual_bins_valid(o: &VpcOpts) -> bool {
     if o.bins_type != "manual" { return true; }
-    o.manual_bins.split(',').filter(|s| s.trim().parse::<f64>().is_ok()).count() >= 2
+    o.manual_bins.split(',')
+        .filter(|s| s.trim().parse::<f64>().map_or(false, |v| v.is_finite()))
+        .count() >= 2
 }
 
 fn lloq_valid(o: &VpcOpts) -> bool {

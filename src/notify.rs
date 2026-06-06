@@ -38,11 +38,11 @@ pub fn send(model_stem: &str, success: bool) {
     {
         // PowerShell balloon / toast — works without extra crates.
         let script = format!(
-            r#"[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null; \
-               $t = [Windows.UI.Notifications.ToastTemplateType]::ToastText02; \
-               $x = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent($t); \
-               $x.GetElementsByTagName('text')[0].AppendChild($x.CreateTextNode('{title}')) | Out-Null; \
-               $x.GetElementsByTagName('text')[1].AppendChild($x.CreateTextNode('{body}')) | Out-Null; \
+            r#"[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null; `
+               $t = [Windows.UI.Notifications.ToastTemplateType]::ToastText02; `
+               $x = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent($t); `
+               $x.GetElementsByTagName('text')[0].AppendChild($x.CreateTextNode('{title}')) | Out-Null; `
+               $x.GetElementsByTagName('text')[1].AppendChild($x.CreateTextNode('{body}')) | Out-Null; `
                [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('FerxGUI').Show([Windows.UI.Notifications.ToastNotification]::new($x))"#
         );
         std::thread::spawn(move || {

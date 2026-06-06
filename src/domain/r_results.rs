@@ -135,6 +135,8 @@ pub struct VpcResult {
     #[serde(default)] pub strat_names: Vec<String>,
     #[allow(dead_code)] #[serde(default)] pub pi_lo: f64,
     #[allow(dead_code)] #[serde(default)] pub pi_hi: f64,
+    /// Non-fatal warnings from the R bridge (e.g. strat column not found).
+    #[serde(default)] pub warnings: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------

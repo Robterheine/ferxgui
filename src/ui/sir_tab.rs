@@ -105,7 +105,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                                 }
                                 Err(e) => {
                                     let _ = tx.send(WorkerMsg::RTaskError {
-                                        context: format!("sir {stem_cl}"),
+                                        context: format!("sir:manual:{stem_cl}"),
                                         message: e,
                                     });
                                 }

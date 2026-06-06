@@ -259,6 +259,9 @@ pub struct UiState {
     pub editor_dirty: bool,
     /// Which model stem is currently loaded in the editor (used to detect selection change).
     pub editor_loaded_stem: Option<String>,
+    /// Cached syntax-highlighted layout job: (text_snapshot, dark_mode, job).
+    /// Recomputed only when the buffer or theme changes.
+    pub editor_layout_cache: Option<(String, bool, egui::text::LayoutJob)>,
 
     // ---- Run pill ----
     pub run_method: String,
@@ -455,6 +458,7 @@ impl Default for UiState {
             editor_buffer: String::new(),
             editor_dirty: false,
             editor_loaded_stem: None,
+            editor_layout_cache: None,
             run_method: "focei".to_string(),
             run_covariance: true,
             run_threads: 0,
@@ -555,6 +559,8 @@ pub struct WorkspaceState {
     pub settings: Settings,
     /// App-level data directory (`~/.ferxgui/`).
     pub app_dir: Option<PathBuf>,
+    /// Warnings collected during startup (e.g. corrupt settings file). Displayed once then cleared.
+    pub startup_warnings: Vec<String>,
     /// Scanning in progress flag.
     pub scanning: bool,
     /// How the ferx binary was located this session (not persisted).
@@ -582,6 +588,8 @@ pub struct WorkspaceState {
     pub sir_running: HashSet<String>,
     /// Wall-clock start time for each in-flight SIR run (drives elapsed display in popup).
     pub sir_started_at: HashMap<String, std::time::Instant>,
+    /// Cancellation senders for in-flight SIR threads. Send `()` to request cancellation.
+    pub sir_cancel_tx: HashMap<String, std::sync::mpsc::SyncSender<()>>,
     /// Cached ETA-covariate correlation results keyed by model stem.
     pub eta_cov_results: HashMap<String, crate::domain::EtaCovResult>,
     /// Stems for which an ETA-cov computation is currently in flight.
@@ -591,7 +599,12 @@ pub struct WorkspaceState {
 impl WorkspaceState {
     pub fn load() -> Self {
         let app_dir = app_dir();
-        let settings = app_dir
+
+        if app_dir.is_none() {
+            eprintln!("ferxgui: could not resolve home directory — persistent data will not be saved");
+        }
+
+        let (settings, settings_warn) = app_dir
             .as_deref()
             .map(load_settings)
             .unwrap_or_default();
@@ -599,6 +612,16 @@ impl WorkspaceState {
             .as_deref()
             .map(load_bookmarks)
             .unwrap_or_default();
+
+        let mut startup_warnings = Vec::new();
+        if app_dir.is_none() {
+            startup_warnings.push(
+                "Warning: home directory unavailable — settings and run history will not be saved.".to_string(),
+            );
+        }
+        if let Some(w) = settings_warn {
+            startup_warnings.push(w);
+        }
         // If the user explicitly set a custom path, honour it; otherwise we
         // will probe for the binary in the background and update the source.
         let ferx_binary_source = if settings.ferx_binary_custom {
@@ -612,6 +635,7 @@ impl WorkspaceState {
             bookmarks,
             settings,
             app_dir,
+            startup_warnings,
             scanning: false,
             ferx_binary_source,
             ferx_version: None,
@@ -626,15 +650,17 @@ impl WorkspaceState {
             sir_results:        HashMap::new(),
             sir_running:        HashSet::new(),
             sir_started_at:     HashMap::new(),
+            sir_cancel_tx:      HashMap::new(),
             eta_cov_results:    HashMap::new(),
             eta_cov_running:    HashSet::new(),
         }
     }
 
-    pub fn save_settings(&self) {
-        if let Some(dir) = &self.app_dir {
-            let _ = crate::io::persistence::save_settings(dir, &self.settings);
-        }
+    pub fn save_settings(&self) -> Option<String> {
+        let dir = self.app_dir.as_ref()?;
+        crate::io::persistence::save_settings(dir, &self.settings)
+            .err()
+            .map(|e| format!("Warning: could not save settings — {e}"))
     }
 
     pub fn theme(&self) -> &Theme {
@@ -650,6 +676,9 @@ pub struct RunState {
     pub active_run: Option<ActiveRun>,
     /// Ring buffer of stdout/stderr lines from the current / last run.
     pub log_buffer: VecDeque<String>,
+    /// Pre-joined version of log_buffer — rebuilt only when a new line arrives,
+    /// not every frame, avoiding a ~500 KB allocation at 60 fps.
+    pub log_text: String,
     pub run_history: Vec<RunRecord>,
     /// Sequential run queue — items are started one by one as the previous run finishes.
     pub run_queue: VecDeque<QueuedRun>,
@@ -663,6 +692,7 @@ impl RunState {
         Self {
             active_run: None,
             log_buffer: VecDeque::with_capacity(Self::LOG_CAPACITY),
+            log_text: String::new(),
             run_history,
             run_queue: VecDeque::new(),
         }
@@ -673,12 +703,15 @@ impl RunState {
             self.log_buffer.pop_front();
         }
         self.log_buffer.push_back(line);
+        // Rebuild the cached join only on change, not every frame.
+        self.log_text = self.log_buffer.iter().cloned().collect::<Vec<_>>().join("\n");
     }
 
-    pub fn save_history(&self, app_dir: Option<&PathBuf>) {
-        if let Some(dir) = app_dir {
-            let _ = crate::io::persistence::save_runs(dir, &self.run_history);
-        }
+    pub fn save_history(&self, app_dir: Option<&PathBuf>) -> Option<String> {
+        let dir = app_dir?;
+        crate::io::persistence::save_runs(dir, &self.run_history)
+            .err()
+            .map(|e| format!("Warning: could not save run history — {e}"))
     }
 }
 
@@ -790,7 +823,9 @@ impl AppState {
                 };
                 self.run.run_history.push(record.clone());
                 self.run.active_run = None;
-                self.run.save_history(self.workspace.app_dir.as_ref());
+                if let Some(warn) = self.run.save_history(self.workspace.app_dir.as_ref()) {
+                    self.ui.status_message = warn;
+                }
                 // Re-scan to pick up new .fitrx.  Brief delay so the OS has
                 // time to flush the zip to disk before we try to open it.
                 let tx = self.worker_tx.clone();
@@ -827,8 +862,8 @@ impl AppState {
                 // System notification — fires even when the app is in the background.
                 crate::notify::send(&stem, success);
 
-                // Auto-trigger SIR when requested and run succeeded.
-                if success && run_sir_after {
+                // Auto-trigger SIR when requested, run succeeded, and SIR is not already running.
+                if success && run_sir_after && !self.workspace.sir_running.contains(&stem) {
                     let fitrx       = record.directory.join(format!("{stem}.fitrx"));
                     let stem_sir    = stem.clone();
                     let tx_sir      = self.worker_tx.clone();
@@ -836,13 +871,19 @@ impl AppState {
                     let n_resamples = self.ui.sir_n_resamples;
                     let seed        = self.ui.sir_seed;
                     let keep        = self.ui.sir_keep_samples;
+                    let (cancel_tx, cancel_rx) = std::sync::mpsc::sync_channel::<()>(1);
                     self.workspace.sir_running.insert(stem.clone());
                     self.workspace.sir_started_at.insert(stem.clone(), std::time::Instant::now());
+                    self.workspace.sir_cancel_tx.insert(stem.clone(), cancel_tx);
                     self.ui.sir_popup_open      = true;
                     self.ui.sir_popup_last_stem = Some(stem.clone());
                     std::thread::spawn(move || {
-                        // Wait for the .fitrx to be fully flushed before SIR reads it.
-                        std::thread::sleep(std::time::Duration::from_millis(800));
+                        // Cancellable wait for the .fitrx to be fully flushed.
+                        // 8 × 100 ms = 800 ms total, but interrupts on cancel.
+                        for _ in 0..8 {
+                            if cancel_rx.try_recv().is_ok() { return; }
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
                         match crate::io::r_extract::compute_sir(&fitrx, n_samples, n_resamples, seed, keep) {
                             Ok(result) => {
                                 let _ = tx_sir.send(WorkerMsg::SirComplete {
@@ -851,7 +892,7 @@ impl AppState {
                             }
                             Err(e) => {
                                 let _ = tx_sir.send(WorkerMsg::RTaskError {
-                                    context: format!("sir (auto) {stem_sir}"),
+                                    context: format!("sir:auto:{stem_sir}"),
                                     message: e,
                                 });
                             }
@@ -864,13 +905,6 @@ impl AppState {
                 self.run.active_run = None;
                 self.ui.status_message = format!("Run error: {}", msg);
             }
-            FsEvent(path) => {
-                // Lightweight: only re-scan if a .ferx or .fitrx changed.
-                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                if matches!(ext, "ferx" | "fitrx") {
-                    self.trigger_scan();
-                }
-            }
             VersionCheckResult(ver) => {
                 self.ui.update_available = ver;
             }
@@ -880,7 +914,14 @@ impl AppState {
             }
             RVpcComplete { stem, data } => {
                 self.workspace.vpc_computing.remove(&stem);
-                self.ui.status_message = format!("VPC ready: {stem}");
+                if data.warnings.is_empty() {
+                    self.ui.status_message = format!("VPC ready: {stem}");
+                } else {
+                    self.ui.status_message = format!(
+                        "VPC ready: {stem} (warning: {})",
+                        data.warnings.join("; ")
+                    );
+                }
                 self.workspace.vpc_data.insert(stem, *data);
             }
             VpcPkgStatus(status) => {
@@ -889,8 +930,11 @@ impl AppState {
             }
             VpcPlotExported { path } => {
                 self.ui.vpc_exporting = false;
-                self.ui.status_message = format!("Opened R ggplot → {path}");
-                let _ = open::that(&path);
+                if let Err(e) = open::that(&path) {
+                    self.ui.status_message = format!("Exported R ggplot → {path} (could not open: {e})");
+                } else {
+                    self.ui.status_message = format!("Opened R ggplot → {path}");
+                }
             }
             GofExportComplete { path } => {
                 self.ui.status_message = format!("Exported → {path}");
@@ -919,6 +963,7 @@ impl AppState {
             SirComplete { stem, result } => {
                 self.workspace.sir_running.remove(&stem);
                 self.workspace.sir_started_at.remove(&stem);
+                self.workspace.sir_cancel_tx.remove(&stem);
                 // Auto-select first parameter for distribution histogram.
                 if self.ui.sir_selected_param.is_empty() {
                     if let Some(first) = result.corr_names.first() {
@@ -964,15 +1009,15 @@ impl AppState {
                 if let Some(stem) = context.strip_prefix("check_init ") {
                     self.workspace.check_init_running.remove(stem);
                 }
-                if let Some(stem) = context.strip_prefix("sir ") {
-                    self.workspace.sir_running.remove(stem);
-                    self.workspace.sir_started_at.remove(stem);
+                if let Some(stem) = context.strip_prefix("sir:manual:") {
+                    self.workspace.sir_running.remove(stem.trim());
+                    self.workspace.sir_started_at.remove(stem.trim());
+                    self.workspace.sir_cancel_tx.remove(stem.trim());
                 }
-                if let Some(stem) = context.strip_prefix("sir (auto) ") {
-                    // Strip trailing error detail that may follow the stem.
-                    let stem = stem.split(':').next().unwrap_or(stem).trim();
-                    self.workspace.sir_running.remove(stem);
-                    self.workspace.sir_started_at.remove(stem);
+                if let Some(stem) = context.strip_prefix("sir:auto:") {
+                    self.workspace.sir_running.remove(stem.trim());
+                    self.workspace.sir_started_at.remove(stem.trim());
+                    self.workspace.sir_cancel_tx.remove(stem.trim());
                 }
                 if let Some(stem) = context.strip_prefix("eta_cov ") {
                     self.workspace.eta_cov_running.remove(stem);
@@ -1021,14 +1066,10 @@ impl AppState {
     pub fn set_directory(&mut self, dir: PathBuf) {
         self.workspace.directory = Some(dir.clone());
         self.workspace.settings.working_directory = Some(dir);
-        self.workspace.save_settings();
+        if let Some(warn) = self.workspace.save_settings() {
+            self.ui.status_message = warn;
+        }
         self.trigger_scan();
-    }
-
-    /// Currently selected model, if any.
-    #[allow(dead_code)]
-    pub fn selected_model(&self) -> Option<&ModelEntry> {
-        self.ui.selected_model.and_then(|i| self.workspace.models.get(i))
     }
 
     /// Reference model OFV for ΔOFV column.

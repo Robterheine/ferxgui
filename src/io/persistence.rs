@@ -136,8 +136,9 @@ pub enum Theme {
     Light,
 }
 
-pub fn load_settings(app_dir: &Path) -> Settings {
-    load_json(app_dir.join("settings.json")).unwrap_or_default()
+/// Returns `(Settings, Option<warning>)` — warning is `Some` when the file exists but is corrupt.
+pub fn load_settings(app_dir: &Path) -> (Settings, Option<String>) {
+    load_json_or_warn(app_dir.join("settings.json"))
 }
 
 pub fn save_settings(app_dir: &Path, s: &Settings) -> std::io::Result<()> {
@@ -195,6 +196,33 @@ pub fn save_runs(app_dir: &Path, runs: &[RunRecord]) -> std::io::Result<()> {
 // ---------------------------------------------------------------------------
 // Atomic JSON helpers
 // ---------------------------------------------------------------------------
+
+/// Returns `(default, None)` when the file is absent, `(default, Some(warning))` when corrupt,
+/// and `(value, None)` on success.
+fn load_json_or_warn<T: for<'de> Deserialize<'de> + Default>(path: PathBuf) -> (T, Option<String>) {
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (T::default(), None),
+        Err(_) => return (T::default(), None),
+    };
+    match serde_json::from_str::<T>(&text) {
+        Ok(v) => (v, None),
+        Err(e) => {
+            let name = path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("data file");
+            // Back up the corrupt file so it can be inspected.
+            let bak = path.with_extension("json.bak");
+            let _ = std::fs::copy(&path, &bak);
+            let warn = format!(
+                "Warning: {name} was corrupted and could not be loaded (backed up as {}.bak). \
+                 Defaults will be used. Error: {e}",
+                path.file_stem().and_then(|s| s.to_str()).unwrap_or(name),
+            );
+            (T::default(), Some(warn))
+        }
+    }
+}
 
 fn load_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> Option<T> {
     let text = std::fs::read_to_string(path).ok()?;

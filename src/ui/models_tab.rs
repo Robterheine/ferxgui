@@ -118,10 +118,9 @@ fn show_top_bar(ui: &mut egui::Ui, state: &mut AppState) {
                     );
                 }
                 if let Some(app_dir) = &state.workspace.app_dir.clone() {
-                    let _ = crate::io::persistence::save_bookmarks(
-                        app_dir,
-                        &state.workspace.bookmarks,
-                    );
+                    if let Err(e) = crate::io::persistence::save_bookmarks(app_dir, &state.workspace.bookmarks) {
+                        state.ui.status_message = format!("Could not save bookmarks: {e}");
+                    }
                 }
             }
         }
@@ -165,10 +164,9 @@ fn show_top_bar(ui: &mut egui::Ui, state: &mut AppState) {
                     if let Some(i) = remove_idx {
                         state.workspace.bookmarks.remove(i);
                         if let Some(app_dir) = &state.workspace.app_dir.clone() {
-                            let _ = crate::io::persistence::save_bookmarks(
-                                app_dir,
-                                &state.workspace.bookmarks,
-                            );
+                            if let Err(e) = crate::io::persistence::save_bookmarks(app_dir, &state.workspace.bookmarks) {
+                                state.ui.status_message = format!("Could not save bookmarks: {e}");
+                            }
                         }
                     }
                 }
@@ -856,9 +854,16 @@ fn show_editor_pill(ui: &mut egui::Ui, state: &mut AppState) {
                 ui.add_space(4.0);
 
                 // Text editor with syntax highlighting.
-                let mut layouter = |ui: &egui::Ui, text: &str, _wrap: f32| {
-                    let job = highlight_ferx(text, dark);
-                    ui.fonts(|f| f.layout_job(job))
+                // Cache the layout job across frames; only recompute when the buffer or theme changes.
+                let cache_valid = state.ui.editor_layout_cache.as_ref()
+                    .map_or(false, |(t, d, _)| t == &state.ui.editor_buffer && *d == dark);
+                if !cache_valid {
+                    let job = highlight_ferx(&state.ui.editor_buffer, dark);
+                    state.ui.editor_layout_cache = Some((state.ui.editor_buffer.clone(), dark, job));
+                }
+                let cached_job = state.ui.editor_layout_cache.as_ref().unwrap().2.clone();
+                let mut layouter = move |ui: &egui::Ui, _text: &str, _wrap: f32| {
+                    ui.fonts(|f| f.layout_job(cached_job.clone()))
                 };
 
                 let buf = &mut state.ui.editor_buffer;
@@ -1106,6 +1111,10 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
                     .on_hover_text("Add to the sequential run queue — starts automatically when the current run finishes")
                     .clicked()
                 {
+                    let already_queued = state.run.run_queue.iter().any(|q| q.stem == stem);
+                    if already_queued {
+                        state.ui.status_message = format!("{stem} is already in the queue");
+                    } else {
                     let model_path = state.workspace.models[idx].model.path.clone();
                     let data_path = state.ui.run_data_path.clone().unwrap();
                     state.run.run_queue.push_back(crate::domain::QueuedRun {
@@ -1123,6 +1132,7 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
                     });
                     let n = state.run.run_queue.len();
                     state.ui.status_message = format!("Queued {stem} ({n} in queue)");
+                    } // else: already_queued
                 }
 
                 if running {
@@ -1517,7 +1527,7 @@ pub fn do_launch_queued(state: &mut AppState, queued: crate::domain::QueuedRun) 
         started: now_iso(),
         completed: None,
         duration_secs: None,
-        command: format!("{} {}", rscript.display(), args.join(" ")),
+        command: format!("\"{}\" {}", rscript.display(), args.join(" ")),
         directory: cwd.clone(),
         data_path: Some(queued.data_path),
         file_hashes: HashMap::new(),
@@ -2537,7 +2547,9 @@ fn apply_ctx_action(
         CtxAction::OpenInFinder => {
             if let Some(m) = state.workspace.models.get(idx) {
                 if let Some(parent) = m.model.path.parent() {
-                    let _ = open::that(parent);
+                    if let Err(e) = open::that(parent) {
+                        state.ui.status_message = format!("Could not open folder: {e}");
+                    }
                 }
             }
         }
@@ -2568,7 +2580,9 @@ fn apply_ctx_action(
                 if let Some(parent) = m.model.path.parent() {
                     let log = parent.join(format!("{}_run.log", m.model.stem));
                     if log.exists() {
-                        let _ = open::that(&log);
+                        if let Err(e) = open::that(&log) {
+                            state.ui.status_message = format!("Could not open log: {e}");
+                        }
                     } else {
                         state.ui.status_message = format!("Run log not found: {}", log.display());
                     }

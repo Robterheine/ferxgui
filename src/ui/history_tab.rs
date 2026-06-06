@@ -236,7 +236,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         if let Some(&hist_idx) = indices.get(view_idx) {
             if let Some(rec) = state.run.run_history.get(hist_idx) {
                 let rec = rec.clone(); // clone to end the borrow
-                show_detail(ui, &rec, dark, &mut navigate_to_stem, &mut rerun_stem);
+                show_detail(ui, &rec, dark, &mut navigate_to_stem, &mut rerun_stem, &mut state.ui.status_message);
             }
         }
     }
@@ -439,6 +439,7 @@ fn show_detail(
     dark: bool,
     navigate_to_stem: &mut Option<String>,
     _rerun_stem: &mut Option<String>,
+    status_msg: &mut String,
 ) {
     let border = if dark { theme::BG3 } else { egui::Color32::from_gray(210) };
     ui.separator();
@@ -520,7 +521,9 @@ fn show_detail(
                     .on_hover_text("Open in Finder / Explorer")
                     .clicked()
                 {
-                    let _ = open::that(&rec.directory);
+                    if let Err(e) = open::that(&rec.directory) {
+                        *status_msg = format!("Could not open folder: {e}");
+                    }
                 }
             });
         });

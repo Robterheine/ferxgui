@@ -63,8 +63,12 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                 .save_file()
             {
                 match export_publication_png(&state.sim, result, &path, &x_lbl, &y_lbl) {
-                    Ok(()) => { let _ = open::that(&path); }
-                    Err(e) => { eprintln!("Sim plot export failed: {e}"); }
+                    Ok(()) => {
+                        if let Err(e) = open::that(&path) {
+                            state.ui.status_message = format!("Sim plot saved (could not open: {e})");
+                        }
+                    }
+                    Err(e) => { state.ui.status_message = format!("Sim plot export failed: {e}"); }
                 }
             }
         }
