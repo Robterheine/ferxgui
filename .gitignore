@@ -1,0 +1,9 @@
+/target
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.claude/
+skill.zip
+HANDOFF.md
+CLAUDE.md

@@ -1,0 +1,3166 @@
+use std::collections::HashMap;
+
+use eframe::egui;
+use egui_extras::{Column, TableBuilder};
+
+use crate::app::theme;
+use crate::domain::{JobStatus, ModelDecision, ModelStatus, RunRecord, RunStatus};
+use crate::io::ferx_file::{tokenise_line, TokenKind};
+use crate::io::persistence::save_model_meta;
+use crate::state::{AppState, ModelPill, ModelStatusFilter};
+use crate::workers::{
+    messages::CancelMode,
+    run::spawn_detached_run,
+    run_manifest::{manifest_path, running_dir},
+};
+
+// ── Column widths ────────────────────────────────────────────────────────────
+
+const W_STAR:   f32 = 22.0;
+const W_NAME:   f32 = 140.0;
+const W_DESC:   f32 = 190.0;
+const W_OFV:    f32 = 78.0;
+const W_DOFV:   f32 = 70.0;
+const W_COV:    f32 = 36.0;
+const W_AIC:    f32 = 75.0;
+const W_CN:     f32 = 55.0;
+const W_METH:   f32 = 70.0;
+const W_INDOBS: f32 = 75.0;
+const W_ETA:    f32 = 72.0;
+const W_EPS:    f32 = 65.0;
+const W_NPAR:   f32 = 42.0;
+const W_TIME:   f32 = 60.0;
+const W_FLAG:   f32 = 20.0;
+
+// ── Public entry point ───────────────────────────────────────────────────────
+
+pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
+    // If selected model changed, reload editor buffer.
+    sync_editor_buffer(state);
+
+    show_top_bar(ui, state);
+    ui.separator();
+
+    egui::SidePanel::left("model_list_panel")
+        .default_width(650.0)
+        .width_range(280.0..=1100.0)
+        .resizable(true)
+        .show_inside(ui, |ui| {
+            show_model_list(ui, state);
+        });
+
+    egui::CentralPanel::default().show_inside(ui, |ui| {
+        show_detail_panel(ui, state);
+    });
+
+    // Modal dialogs float over all panels.
+    show_duplicate_dialog(ui.ctx(), state);
+    show_delete_dialog(ui.ctx(), state);
+    show_new_model_dialog(ui.ctx(), state);
+    show_compare_dialog(ui.ctx(), state);
+}
+
+// ── Top bar ──────────────────────────────────────────────────────────────────
+
+fn show_top_bar(ui: &mut egui::Ui, state: &mut AppState) {
+    let dark = ui.visuals().dark_mode;
+    let label_fg = if dark { theme::FG2 } else { egui::Color32::from_gray(100) };
+    let path_fg  = if dark { theme::FG  } else { egui::Color32::from_gray(30)  };
+
+    // Row 1: directory breadcrumb + bookmark star + bookmarks dropdown.
+    ui.horizontal(|ui| {
+        if let Some(dir) = state.workspace.directory.as_ref() {
+            let name = dir.file_name().unwrap_or_default().to_string_lossy().to_string();
+            ui.add(egui::Label::new(
+                egui::RichText::new(name).color(path_fg).strong().size(12.0),
+            ).truncate());
+        } else {
+            ui.label(egui::RichText::new("No directory").color(label_fg).size(12.0));
+        }
+        if ui.small_button("Change…").clicked() {
+            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                state.set_directory(dir);
+            }
+        }
+        if state.workspace.directory.is_some() && ui.small_button("Rescan").clicked() {
+            state.trigger_scan();
+        }
+
+        // Bookmark star — always visible when a directory is open.
+        if let Some(dir) = state.workspace.directory.clone() {
+            let already_bookmarked = state.workspace.bookmarks
+                .iter()
+                .any(|b| b.path == dir);
+            let star = if already_bookmarked { "★" } else { "☆" };
+            let star_color = if already_bookmarked {
+                theme::STAR
+            } else {
+                if dark { theme::FG3 } else { egui::Color32::from_gray(170) }
+            };
+            let tip = if already_bookmarked {
+                "Remove bookmark for this directory"
+            } else {
+                "Bookmark this directory"
+            };
+            if ui.add(
+                egui::Button::new(egui::RichText::new(star).color(star_color).size(14.0))
+                    .frame(false),
+            ).on_hover_text(tip).clicked() {
+                if already_bookmarked {
+                    state.workspace.bookmarks.retain(|b| b.path != dir);
+                } else {
+                    let label = dir.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    state.workspace.bookmarks.push(
+                        crate::io::persistence::Bookmark { label, path: dir },
+                    );
+                }
+                if let Some(app_dir) = &state.workspace.app_dir.clone() {
+                    let _ = crate::io::persistence::save_bookmarks(
+                        app_dir,
+                        &state.workspace.bookmarks,
+                    );
+                }
+            }
+        }
+
+        // Bookmarks dropdown — always shown (even when empty, as a hint).
+        let bm_label = if state.workspace.bookmarks.is_empty() {
+            "Bookmarks"
+        } else {
+            "Bookmarks ▾"
+        };
+        egui::ComboBox::from_id_salt("bookmarks_combo")
+            .selected_text(egui::RichText::new(bm_label).size(12.0).color(label_fg))
+            .width(110.0)
+            .show_ui(ui, |ui| {
+                if state.workspace.bookmarks.is_empty() {
+                    ui.label(
+                        egui::RichText::new("No bookmarks yet — click ☆ to add one")
+                            .color(label_fg)
+                            .size(11.0),
+                    );
+                } else {
+                    let bookmarks = state.workspace.bookmarks.clone();
+                    let mut remove_idx: Option<usize> = None;
+                    for (i, bm) in bookmarks.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            if ui.selectable_label(
+                                state.workspace.directory.as_deref() == Some(&bm.path),
+                                egui::RichText::new(&bm.label).size(12.0),
+                            ).clicked() {
+                                state.set_directory(bm.path.clone());
+                            }
+                            let x_color = if dark { theme::FG3 } else { egui::Color32::from_gray(160) };
+                            if ui.add(
+                                egui::Button::new(egui::RichText::new("✕").size(10.0).color(x_color))
+                                    .frame(false),
+                            ).on_hover_text("Remove bookmark").clicked() {
+                                remove_idx = Some(i);
+                            }
+                        });
+                    }
+                    if let Some(i) = remove_idx {
+                        state.workspace.bookmarks.remove(i);
+                        if let Some(app_dir) = &state.workspace.app_dir.clone() {
+                            let _ = crate::io::persistence::save_bookmarks(
+                                app_dir,
+                                &state.workspace.bookmarks,
+                            );
+                        }
+                    }
+                }
+            });
+    });
+
+    // Row 2: search + status filter + new model.
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Filter:").color(label_fg).size(12.0));
+        ui.add(
+            egui::TextEdit::singleline(&mut state.ui.model_filter)
+                .desired_width(180.0)
+                .hint_text("model name…"),
+        );
+
+        // Status pills — theme-aware fills so they don't appear black in light mode.
+        let inactive_fill = if dark { theme::BG3 } else { egui::Color32::TRANSPARENT };
+        let inactive_fg   = if dark { theme::FG2 } else { ui.visuals().text_color() };
+        for (label, val) in [
+            ("All", ModelStatusFilter::All),
+            ("Completed", ModelStatusFilter::Completed),
+            ("Failed", ModelStatusFilter::Failed),
+        ] {
+            let active = state.ui.model_status_filter == val;
+            let btn = egui::Button::new(
+                egui::RichText::new(label)
+                    .size(11.0)
+                    .color(if active { egui::Color32::WHITE } else { inactive_fg }),
+            )
+            .fill(if active { theme::ACCENT } else { inactive_fill })
+            .min_size(egui::vec2(70.0, 22.0));
+            if ui.add(btn).clicked() {
+                state.ui.model_status_filter = val;
+            }
+        }
+
+        // "New Model…" only appears once a directory is set (it's inert until then).
+        if state.workspace.directory.is_some() {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add(
+                        egui::Button::new(egui::RichText::new("New Model…").size(12.0))
+                            .fill(theme::ACCENT)
+                            .min_size(egui::vec2(90.0, 22.0)),
+                    )
+                    .clicked()
+                {
+                    state.ui.new_model_stem.clear();
+                    state.ui.new_model_dialog = true;
+                }
+            });
+        }
+    });
+}
+
+// ── Model list table ─────────────────────────────────────────────────────────
+
+/// Flat data extracted from ModelEntry for rendering without borrow issues.
+struct ModelRow {
+    idx: usize,
+    stem: String,
+    description: String,
+    starred: bool,
+    is_reference: bool,
+    run_status: RunStatus,
+    ofv: f64,
+    delta_ofv: f64,
+    cov_ok: Option<bool>,
+    aic: f64,
+    cn: f64,
+    method: String,
+    n_subjects: usize,
+    n_obs: usize,
+    max_eta_shrink: f64,
+    eps_shrink: f64,
+    n_parameters: usize,
+    wall_time_secs: f64,
+    has_boundary: bool,
+}
+
+fn build_rows(state: &AppState) -> Vec<ModelRow> {
+    let ref_ofv = state.reference_ofv();
+    let filter = state.ui.model_filter.to_lowercase();
+    state
+        .workspace
+        .models
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            // text filter
+            (filter.is_empty() || e.model.stem.to_lowercase().contains(&filter))
+            // status filter
+            && match state.ui.model_status_filter {
+                ModelStatusFilter::All => true,
+                ModelStatusFilter::Completed => e.run_status() == RunStatus::Converged,
+                ModelStatusFilter::Failed => e.run_status() == RunStatus::Failed,
+            }
+        })
+        .map(|(idx, e)| {
+            let fit = e.fit.as_ref();
+            ModelRow {
+                idx,
+                stem: e.model.stem.clone(),
+                description: e.description().to_string(),
+                starred: e.meta.starred,
+                is_reference: state.ui.reference_model == Some(idx),
+                run_status: e.run_status(),
+                ofv: fit.map(|f| f.ofv).unwrap_or(f64::NAN),
+                delta_ofv: e.delta_ofv(ref_ofv),
+                cov_ok: fit.map(|f| f.covariance_ok),
+                aic: fit.map(|f| f.aic).unwrap_or(f64::NAN),
+                cn: fit.map(|f| f.cov_condition_number).unwrap_or(f64::NAN),
+                method: fit.map(|f| f.method.clone()).unwrap_or_default(),
+                n_subjects: fit.map(|f| f.n_subjects).unwrap_or(0),
+                n_obs: fit.map(|f| f.n_obs).unwrap_or(0),
+                max_eta_shrink: fit
+                    .map(|f| {
+                        f.eta_shrinkage
+                            .iter()
+                            .cloned()
+                            .fold(f64::NAN, f64::max)
+                    })
+                    .unwrap_or(f64::NAN),
+                eps_shrink: fit
+                    .map(|f| f.eps_shrinkage.first().copied().unwrap_or(f64::NAN))
+                    .unwrap_or(f64::NAN),
+                n_parameters: fit.map(|f| f.n_parameters).unwrap_or(0),
+                wall_time_secs: fit.map(|f| f.wall_time_secs).unwrap_or(0.0),
+                has_boundary: fit.map(|f| f.has_boundary_hit()).unwrap_or(false),
+            }
+        })
+        .collect()
+}
+
+fn show_empty_state_no_directory(ui: &mut egui::Ui, state: &mut AppState) {
+    let dim = if ui.visuals().dark_mode { theme::FG2 } else { egui::Color32::from_gray(120) };
+    let top = (ui.available_height() - 130.0) * 0.38;
+    ui.add_space(top.max(0.0));
+    ui.vertical_centered(|ui| {
+        ui.label(egui::RichText::new("No working directory").size(18.0).strong());
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new("Choose a folder that contains .ferx model files.")
+                .color(dim)
+                .size(13.0),
+        );
+        ui.add_space(20.0);
+        if ui
+            .add(
+                egui::Button::new(
+                    egui::RichText::new("Choose Directory…")
+                        .size(13.0)
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(theme::ACCENT)
+                .min_size(egui::vec2(160.0, 30.0)),
+            )
+            .clicked()
+        {
+            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                state.set_directory(dir);
+            }
+        }
+    });
+}
+
+fn show_empty_state_no_models(ui: &mut egui::Ui, state: &AppState) {
+    let dim = if ui.visuals().dark_mode { theme::FG2 } else { egui::Color32::from_gray(120) };
+    let dir_name = state
+        .workspace
+        .directory
+        .as_ref()
+        .and_then(|d| d.file_name())
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let top = (ui.available_height() - 100.0) * 0.38;
+    ui.add_space(top.max(0.0));
+    ui.vertical_centered(|ui| {
+        ui.label(egui::RichText::new("No models found").size(18.0).strong());
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new(format!("No .ferx files found in '{}'.", dir_name))
+                .color(dim)
+                .size(13.0),
+        );
+    });
+}
+
+fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
+    let dark = ui.visuals().dark_mode;
+    // ── Zero states ───────────────────────────────────────────────────────────
+    if state.workspace.directory.is_none() {
+        show_empty_state_no_directory(ui, state);
+        return;
+    }
+    if state.workspace.models.is_empty() {
+        if state.workspace.scanning {
+            ui.centered_and_justified(|ui| { ui.spinner(); });
+        } else {
+            show_empty_state_no_models(ui, state);
+        }
+        return;
+    }
+
+    let rows = build_rows(state);
+
+    if rows.is_empty() {
+        let dim = if ui.visuals().dark_mode { theme::FG3 } else { egui::Color32::from_gray(140) };
+        ui.centered_and_justified(|ui| {
+            ui.label(egui::RichText::new("No models match the current filter.").color(dim).size(13.0));
+        });
+        return;
+    }
+
+    // `new_selection` is written during the TableBuilder pass and read by
+    // `tr.set_selected()` in the *same* pass — so we must apply it to the
+    // real state immediately (not deferred) so the highlight appears the same
+    // frame the click is registered.
+    let mut new_selection = state.ui.selected_model;
+    let mut toggle_star: Option<usize> = None;
+    let mut switch_to_output: Option<usize> = None;
+    let mut ctx_action: Option<(usize, CtxAction)> = None;
+
+    egui::ScrollArea::horizontal().show(ui, |ui| {
+        TableBuilder::new(ui)
+            .striped(true)
+            .resizable(true)
+            .sense(egui::Sense::click())
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .column(Column::exact(W_STAR))
+            .column(Column::exact(W_NAME).resizable(true))
+            .column(Column::exact(W_DESC).resizable(true))
+            .column(Column::exact(W_OFV))
+            .column(Column::exact(W_DOFV))
+            .column(Column::exact(W_COV))
+            .column(Column::exact(W_AIC))
+            .column(Column::exact(W_CN))
+            .column(Column::exact(W_METH))
+            .column(Column::exact(W_INDOBS))
+            .column(Column::exact(W_ETA))
+            .column(Column::exact(W_EPS))
+            .column(Column::exact(W_NPAR))
+            .column(Column::exact(W_TIME))
+            .column(Column::exact(W_FLAG))
+            .header(22.0, |mut h| {
+                for label in ["★","NAME","DESCRIPTION","OFV","ΔOFV","COV","AIC","CN",
+                              "METHOD","IND/OBS","ETA%","EPS%","nPAR","TIME","⚠"] {
+                    h.col(|ui| {
+                        ui.label(egui::RichText::new(label).color(theme::fg2(dark)).size(11.0).strong());
+                    });
+                }
+            })
+            .body(|mut body| {
+                for row in &rows {
+                    let selected = new_selection == Some(row.idx);
+                    body.row(24.0, |mut tr| {
+                        tr.set_selected(selected);
+
+                        // ★
+                        tr.col(|ui| {
+                            if row.starred {
+                                if ui
+                                    .add(
+                                        egui::Label::new(
+                                            egui::RichText::new("★").color(theme::STAR).size(14.0),
+                                        )
+                                        .sense(egui::Sense::click()),
+                                    )
+                                    .clicked()
+                                {
+                                    toggle_star = Some(row.idx);
+                                }
+                            } else if ui
+                                .add(
+                                    egui::Label::new(
+                                        egui::RichText::new("☆").color(theme::fg3(dark)).size(14.0),
+                                    )
+                                    .sense(egui::Sense::click()),
+                                )
+                                .clicked()
+                            {
+                                toggle_star = Some(row.idx);
+                            }
+                        });
+
+                        // NAME (coloured by run status, "(ref)" badge, context menu)
+                        tr.col(|ui| {
+                            let color = match row.run_status {
+                                RunStatus::Converged => theme::GREEN,
+                                RunStatus::Failed    => theme::RED,
+                                RunStatus::Stale     => theme::ORANGE,
+                                // Not-run models use the secondary text colour so they
+                                // don't compete visually with converged models.
+                                RunStatus::NotRun    => theme::fg2(dark),
+                            };
+                            // Build label text, appending a "(ref)" marker when relevant.
+                            let label_text = if row.is_reference {
+                                format!("{} ◆", row.stem)
+                            } else {
+                                row.stem.clone()
+                            };
+                            let resp = ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(&label_text).color(color).size(12.0),
+                                )
+                                .sense(egui::Sense::click())
+                                .truncate(),
+                            );
+                            if resp.clicked() {
+                                new_selection = Some(row.idx);
+                            }
+                            if resp.double_clicked() {
+                                new_selection = Some(row.idx);
+                                switch_to_output = Some(row.idx);
+                            }
+                            // ── Right-click context menu ─────────────────────
+                            let row_idx = row.idx;
+                            let is_ref  = row.is_reference;
+                            resp.context_menu(|ui| {
+                                ui.set_min_width(190.0);
+
+                                // ── Model actions ─────────────────────────
+                                if ui.button("Duplicate as child…").clicked() {
+                                    ctx_action = Some((row_idx, CtxAction::Duplicate));
+                                    ui.close_menu();
+                                }
+                                let ref_label = if is_ref { "Clear Reference" } else { "Set as Reference" };
+                                if ui.button(ref_label).clicked() {
+                                    ctx_action = Some((row_idx, CtxAction::ToggleReference));
+                                    ui.close_menu();
+                                }
+
+                                // ── Compare with… (submenu) ───────────────
+                                let other_models: Vec<(usize, String)> = state.workspace.models
+                                    .iter().enumerate()
+                                    .filter(|(i, m)| *i != row_idx && m.fit.is_some())
+                                    .map(|(i, m)| (i, m.model.stem.clone()))
+                                    .collect();
+                                if !other_models.is_empty() {
+                                    ui.menu_button("Compare with…  ▶", |ui| {
+                                        ui.set_min_width(160.0);
+                                        for (_i, stem) in &other_models {
+                                            if ui.button(stem).clicked() {
+                                                ctx_action = Some((row_idx, CtxAction::CompareWith(stem.clone())));
+                                                ui.close_menu();
+                                            }
+                                        }
+                                    });
+                                }
+
+                                ui.separator();
+
+                                // ── File / folder ─────────────────────────
+                                if ui.button("Open in Finder").clicked() {
+                                    ctx_action = Some((row_idx, CtxAction::OpenInFinder));
+                                    ui.close_menu();
+                                }
+                                if ui.button("View run log").clicked() {
+                                    ctx_action = Some((row_idx, CtxAction::ViewRunLog));
+                                    ui.close_menu();
+                                }
+                                if ui.button("Copy model path").clicked() {
+                                    ctx_action = Some((row_idx, CtxAction::CopyModelPath));
+                                    ui.close_menu();
+                                }
+                                if ui.button("Copy folder path").clicked() {
+                                    ctx_action = Some((row_idx, CtxAction::CopyFolderPath));
+                                    ui.close_menu();
+                                }
+                                if ui.button("Copy Name").clicked() {
+                                    ctx_action = Some((row_idx, CtxAction::CopyName));
+                                    ui.close_menu();
+                                }
+
+                                ui.separator();
+
+                                // ── History ───────────────────────────────
+                                if ui.button("View run record…").clicked() {
+                                    ctx_action = Some((row_idx, CtxAction::ViewRunRecord));
+                                    ui.close_menu();
+                                }
+
+                                ui.separator();
+
+                                // ── Destructive ───────────────────────────
+                                if ui.add(
+                                    egui::Button::new(
+                                        egui::RichText::new("Delete…").color(theme::RED),
+                                    )
+                                    .fill(egui::Color32::TRANSPARENT),
+                                ).clicked() {
+                                    ctx_action = Some((row_idx, CtxAction::Delete));
+                                    ui.close_menu();
+                                }
+                            });
+                        });
+
+                        // DESCRIPTION
+                        tr.col(|ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(&row.description)
+                                        .color(theme::fg2(dark))
+                                        .size(12.0),
+                                )
+                                .truncate(),
+                            );
+                        });
+
+                        // OFV
+                        tr.col(|ui| {
+                            ui.label(fmt_f64_4dp(row.ofv));
+                        });
+
+                        // ΔOFV
+                        tr.col(|ui| {
+                            let txt = fmt_f64_2dp(row.delta_ofv);
+                            let color = if row.delta_ofv.is_nan() {
+                                theme::fg3(dark)
+                            } else if row.delta_ofv <= -3.84 {
+                                theme::GREEN
+                            } else if row.delta_ofv > 0.0 {
+                                theme::RED
+                            } else {
+                                theme::fg(dark)
+                            };
+                            ui.label(egui::RichText::new(txt).color(color).size(12.0));
+                        });
+
+                        // COV
+                        tr.col(|ui| {
+                            match row.cov_ok {
+                                Some(true) => {
+                                    ui.label(
+                                        egui::RichText::new("✓").color(theme::GREEN).size(13.0),
+                                    );
+                                }
+                                Some(false) => {
+                                    ui.label(
+                                        egui::RichText::new("✗").color(theme::RED).size(13.0),
+                                    );
+                                }
+                                None => {
+                                    ui.label(egui::RichText::new("—").color(theme::fg3(dark)).size(12.0));
+                                }
+                            }
+                        });
+
+                        // AIC
+                        tr.col(|ui| {
+                            ui.label(fmt_f64_1dp(row.aic));
+                        });
+
+                        // CN (orange when > 1000)
+                        tr.col(|ui| {
+                            if row.cn.is_finite() && row.cn > 1000.0 {
+                                ui.label(
+                                    egui::RichText::new(format!("! {:.0}", row.cn))
+                                        .color(theme::ORANGE)
+                                        .size(12.0),
+                                );
+                            } else {
+                                ui.label(fmt_f64_0dp(row.cn));
+                            }
+                        });
+
+                        // METHOD
+                        tr.col(|ui| {
+                            ui.label(
+                                egui::RichText::new(&row.method).color(theme::fg2(dark)).size(12.0),
+                            );
+                        });
+
+                        // IND/OBS
+                        tr.col(|ui| {
+                            if row.n_subjects > 0 {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{} / {}",
+                                        row.n_subjects, row.n_obs
+                                    ))
+                                    .size(12.0),
+                                );
+                            }
+                        });
+
+                        // ETA shrinkage
+                        tr.col(|ui| {
+                            shrink_label(ui, row.max_eta_shrink);
+                        });
+
+                        // EPS shrinkage
+                        tr.col(|ui| {
+                            shrink_label(ui, row.eps_shrink);
+                        });
+
+                        // nPAR
+                        tr.col(|ui| {
+                            if row.n_parameters > 0 {
+                                ui.label(
+                                    egui::RichText::new(row.n_parameters.to_string()).size(12.0),
+                                );
+                            }
+                        });
+
+                        // TIME
+                        tr.col(|ui| {
+                            if row.wall_time_secs > 0.0 {
+                                ui.label(
+                                    egui::RichText::new(fmt_duration(row.wall_time_secs))
+                                        .color(theme::fg2(dark))
+                                        .size(11.0),
+                                );
+                            }
+                        });
+
+                        // ⚠ boundary flag
+                        tr.col(|ui| {
+                            if row.has_boundary {
+                                ui.label(
+                                    egui::RichText::new("⚠").color(theme::ORANGE).size(13.0),
+                                )
+                                .on_hover_text("Parameter(s) at lower bound");
+                            }
+                        });
+
+                        // Row-level click — selects the model when the user clicks
+                        // anywhere in the row that isn't captured by a child widget
+                        // (i.e. every column except NAME and ★).
+                        if tr.response().clicked() {
+                            new_selection = Some(row.idx);
+                        }
+                    });
+                }
+            });
+    });
+
+    // Apply deferred mutations.
+    if let Some(idx) = new_selection {
+        state.ui.selected_model = Some(idx);
+    }
+    if let Some(idx) = switch_to_output {
+        state.ui.selected_model = Some(idx);
+        state.ui.active_model_pill = ModelPill::Output;
+    }
+    if let Some(idx) = toggle_star {
+        state.workspace.models[idx].meta.starred ^= true;
+        save_meta_for(state, idx);
+    }
+    if let Some((idx, action)) = ctx_action {
+        apply_ctx_action(ui, state, idx, action);
+    }
+
+    // Keyboard: Space = toggle star, Enter = switch to Output pill.
+    if let Some(sel) = state.ui.selected_model {
+        let space = ui.input(|i| i.key_pressed(egui::Key::Space));
+        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if space {
+            state.workspace.models[sel].meta.starred ^= true;
+            save_meta_for(state, sel);
+        }
+        if enter {
+            state.ui.active_model_pill = ModelPill::Output;
+        }
+    }
+}
+
+// ── Detail panel ─────────────────────────────────────────────────────────────
+
+fn show_detail_panel(ui: &mut egui::Ui, state: &mut AppState) {
+    if state.ui.selected_model.is_none() {
+        let dim = if ui.visuals().dark_mode { theme::FG3 } else { egui::Color32::from_gray(160) };
+        ui.centered_and_justified(|ui| {
+            ui.label(egui::RichText::new("Select a model from the list").color(dim).size(14.0));
+        });
+        return;
+    }
+
+    // Pill tab bar.
+    let dark = ui.visuals().dark_mode;
+    let inactive_fill = if dark { theme::BG3 } else { egui::Color32::TRANSPARENT };
+    let inactive_fg   = if dark { theme::FG2 } else { ui.visuals().text_color() };
+    ui.horizontal(|ui| {
+        for pill in ModelPill::ALL {
+            let active = state.ui.active_model_pill == *pill;
+            let btn = egui::Button::new(
+                egui::RichText::new(pill.label())
+                    .size(12.0)
+                    .color(if active { egui::Color32::WHITE } else { inactive_fg }),
+            )
+            .fill(if active { theme::ACCENT } else { inactive_fill })
+            .corner_radius(egui::CornerRadius::same(12))
+            .min_size(egui::vec2(70.0, 24.0));
+            if ui.add(btn).clicked() {
+                state.ui.active_model_pill = *pill;
+            }
+        }
+    });
+    ui.separator();
+
+    match state.ui.active_model_pill {
+        ModelPill::Editor => show_editor_pill(ui, state),
+        ModelPill::Run => show_run_pill(ui, state),
+        ModelPill::Output => show_output_pill(ui, state),
+        ModelPill::Parameters => show_params_pill(ui, state),
+        ModelPill::Info   => show_info_pill(ui, state),
+        ModelPill::Report => crate::ui::report::show(ui, state),
+    }
+}
+
+// ── Editor pill ───────────────────────────────────────────────────────────────
+
+fn show_editor_pill(ui: &mut egui::Ui, state: &mut AppState) {
+    let dark = ui.visuals().dark_mode;
+    let Some(idx) = state.ui.selected_model else { return };
+
+    // Toolbar.
+    ui.horizontal(|ui| {
+        let stem = &state.workspace.models[idx].model.stem;
+        ui.label(egui::RichText::new(stem).color(theme::fg2(dark)).size(12.0).monospace());
+        if state.ui.editor_dirty {
+            ui.label(egui::RichText::new("●").color(theme::ORANGE).size(12.0))
+                .on_hover_text("Unsaved changes");
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if state.ui.editor_dirty {
+                if ui
+                    .add(
+                        egui::Button::new(egui::RichText::new("Discard").size(12.0))
+                            .fill(theme::elevated_fill(dark)),
+                    )
+                    .clicked()
+                {
+                    // Reload from disk.
+                    let source = state.workspace.models[idx].model.source.clone();
+                    state.ui.editor_buffer = source;
+                    state.ui.editor_dirty = false;
+                }
+                if ui
+                    .add(
+                        egui::Button::new(egui::RichText::new("Save").size(12.0))
+                            .fill(theme::GREEN),
+                    )
+                    .clicked()
+                {
+                    save_editor(state, idx);
+                }
+            }
+        });
+    });
+
+    // Ctrl+S.
+    if ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::S)) && state.ui.editor_dirty {
+        save_editor(state, idx);
+    }
+
+    // Editor body: line numbers + text area.
+    egui::ScrollArea::both()
+        .auto_shrink([false; 2])
+        .show(ui, |ui| {
+            ui.horizontal_top(|ui| {
+                // Line number gutter.
+                let line_count = state.ui.editor_buffer.lines().count().max(1);
+                let gutter: String = (1..=line_count)
+                    .map(|n| format!("{:>4}\n", n))
+                    .collect();
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(gutter)
+                            .font(egui::FontId::monospace(12.0))
+                            .color(theme::fg3(dark)),
+                    )
+                    .wrap(),
+                );
+
+                // Thin separator.
+                let sep_rect = ui.available_rect_before_wrap();
+                ui.painter().line_segment(
+                    [
+                        egui::pos2(sep_rect.left(), sep_rect.top()),
+                        egui::pos2(sep_rect.left(), sep_rect.bottom()),
+                    ],
+                    egui::Stroke::new(1.0, theme::BORDER),
+                );
+                ui.add_space(4.0);
+
+                // Text editor with syntax highlighting.
+                let mut layouter = |ui: &egui::Ui, text: &str, _wrap: f32| {
+                    let job = highlight_ferx(text, dark);
+                    ui.fonts(|f| f.layout_job(job))
+                };
+
+                let buf = &mut state.ui.editor_buffer;
+                let resp = ui.add(
+                    egui::TextEdit::multiline(buf)
+                        .font(egui::FontId::monospace(12.0))
+                        .desired_rows(40)
+                        .desired_width(f32::INFINITY)
+                        .layouter(&mut layouter),
+                );
+                if resp.changed() {
+                    state.ui.editor_dirty = true;
+                }
+            });
+        });
+}
+
+fn save_editor(state: &mut AppState, idx: usize) {
+    let path = state.workspace.models[idx].model.path.clone();
+    let buf = state.ui.editor_buffer.clone();
+    if std::fs::write(&path, &buf).is_ok() {
+        state.workspace.models[idx].model.source = buf;
+        state.ui.editor_dirty = false;
+        state.ui.status_message = format!("Saved {}", path.display());
+    } else {
+        state.ui.status_message = format!("Save failed: {}", path.display());
+    }
+}
+
+// ── Run pill ──────────────────────────────────────────────────────────────────
+
+fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
+    let dark = ui.visuals().dark_mode;
+    let Some(idx) = state.ui.selected_model else { return };
+    let stem = state.workspace.models[idx].model.stem.clone();
+
+    // Auto-populate the data path from the most recent run for this model
+    // so the Run button is ready immediately after restart.
+    if state.ui.run_data_path.is_none() {
+        state.ui.run_data_path = state.run.run_history
+            .iter()
+            .rev()
+            .find(|r| {
+                r.model_stem == stem
+                    && r.data_path.as_ref().map_or(false, |p| p.exists())
+            })
+            .and_then(|r| r.data_path.clone());
+    }
+
+    let running = state.run.active_run.is_some();
+
+    egui::ScrollArea::vertical()
+        .auto_shrink([false; 2])
+        .show(ui, |ui| {
+            // ── Configuration ──
+            egui::Frame::new()
+                .fill(theme::card_fill(dark))
+                .inner_margin(egui::Margin::same(10))
+                .corner_radius(egui::CornerRadius::same(6))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+
+                    ui.label(
+                        egui::RichText::new("Run configuration").color(theme::fg2(dark)).size(11.0),
+                    );
+                    ui.add_space(6.0);
+
+                    // Data file.
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Data file:").color(theme::fg2(dark)).size(12.0));
+                        let data_str = state
+                            .ui
+                            .run_data_path
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default();
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(if data_str.is_empty() {
+                                    "— not set —"
+                                } else {
+                                    &data_str
+                                })
+                                .color(if data_str.is_empty() { theme::fg3(dark) } else { theme::fg(dark) })
+                                .size(12.0)
+                                .monospace(),
+                            )
+                            .truncate(),
+                        );
+                        if ui.small_button("Browse…").clicked() {
+                            if let Some(p) = rfd::FileDialog::new()
+                                .add_filter("CSV / NONMEM", &["csv", "txt"])
+                                .pick_file()
+                            {
+                                state.ui.run_data_path = Some(p);
+                            }
+                        }
+                    });
+
+                    // Method (text field for chains) + quick-pick dropdown + gradient.
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Method:").color(theme::fg2(dark)).size(12.0));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut state.ui.run_method)
+                                .desired_width(100.0)
+                                .hint_text("focei"),
+                        ).on_hover_text("Single method (focei) or chain with +, e.g. saem+focei");
+                        // Quick-pick dropdown.
+                        egui::ComboBox::from_id_salt("run_method_combo")
+                            .selected_text("▾")
+                            .width(32.0)
+                            .show_ui(ui, |ui| {
+                                for m in ["foce","focei","saem","gn","gn_hybrid",
+                                          "saem+focei","focei+imp"] {
+                                    if ui.selectable_label(false,
+                                        egui::RichText::new(m).size(12.0)).clicked() {
+                                        state.ui.run_method = m.to_string();
+                                    }
+                                }
+                            });
+                        ui.add_space(8.0);
+                        ui.label(egui::RichText::new("Gradient:").color(theme::fg2(dark)).size(12.0));
+                        egui::ComboBox::from_id_salt("run_gradient_combo")
+                            .selected_text(&state.ui.run_gradient)
+                            .width(70.0)
+                            .show_ui(ui, |ui| {
+                                for g in ["auto", "ad", "fd"] {
+                                    ui.selectable_value(
+                                        &mut state.ui.run_gradient, g.to_string(), g);
+                                }
+                            });
+                    });
+
+                    // Covariance + threads + optimizer trace.
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut state.ui.run_covariance, "Covariance step");
+                        ui.add_space(12.0);
+                        ui.label(egui::RichText::new("Threads:").color(theme::fg2(dark)).size(12.0));
+                        let suffix = if state.ui.run_threads == 0 { " (auto)" } else { "" };
+                        ui.add(
+                            egui::DragValue::new(&mut state.ui.run_threads)
+                                .range(0..=64)
+                                .suffix(suffix),
+                        );
+                        ui.add_space(12.0);
+                        ui.checkbox(&mut state.ui.run_optimizer_trace, "Optimizer trace")
+                            .on_hover_text(
+                                "Write convergence trace CSV — enables the Convergence tab \
+                                 in the Evaluation view",
+                            );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut state.ui.run_export_tables, "Save output tables")
+                            .on_hover_text(
+                                "After run: write {stem}_sdtab.csv (predictions) and \
+                                 {stem}_patab.csv (EBEs) next to the model — \
+                                 equivalent to NONMEM's sdtab/patab",
+                            );
+                    });
+
+                    // ── Post-fit actions ──────────────────────────────────
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new("Post-fit actions")
+                            .color(theme::fg2(dark))
+                            .size(11.0),
+                    );
+                    ui.add_space(4.0);
+                    let cov_on = state.ui.run_covariance;
+                    ui.add_enabled_ui(cov_on, |ui| {
+                        ui.checkbox(&mut state.ui.run_sir_after_fit, "Run SIR after fit")
+                            .on_hover_text(if cov_on {
+                                "Sampling Importance Resampling — non-parametric uncertainty \
+                                 intervals after fitting. Uses the settings on the SIR tab. \
+                                 A progress popup appears while SIR is running."
+                            } else {
+                                "Requires the covariance step — tick Covariance step above."
+                            });
+                    });
+                    if state.ui.run_sir_after_fit && cov_on {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "  {} samples · {} resamples · seed {}",
+                                state.ui.sir_n_samples,
+                                state.ui.sir_n_resamples,
+                                state.ui.sir_seed,
+                            ))
+                            .color(theme::fg3(dark))
+                            .size(10.0),
+                        );
+                        if ui.add(
+                            egui::Label::new(
+                                egui::RichText::new("  Edit SIR settings →")
+                                    .color(theme::ACCENT)
+                                    .size(10.0),
+                            )
+                            .sense(egui::Sense::click()),
+                        ).clicked() {
+                            state.ui.active_tab = crate::state::Tab::Uncertainty;
+                        }
+                    }
+
+                    // Settings passthrough.
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Settings (JSON):").color(theme::fg2(dark)).size(12.0));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut state.ui.run_extra_args)
+                                .desired_width(f32::INFINITY)
+                                .hint_text(r#"e.g. {"optimizer":"bobyqa"}"#),
+                        );
+                    });
+                });
+
+            ui.add_space(8.0);
+
+            // ── Action buttons ──
+            ui.horizontal(|ui| {
+                let can_run = !running
+                    && state.workspace.settings.ferx_binary.is_some()
+                    && state.ui.run_data_path.is_some();
+                let can_queue = state.workspace.settings.ferx_binary.is_some()
+                    && state.ui.run_data_path.is_some();
+
+                if ui
+                    .add_enabled(
+                        can_run,
+                        egui::Button::new(egui::RichText::new("▶  Run").size(13.0))
+                            .fill(theme::ACCENT)
+                            .min_size(egui::vec2(90.0, 28.0)),
+                    )
+                    .clicked()
+                {
+                    launch_run(state, idx, &stem);
+                }
+
+                if ui
+                    .add_enabled(
+                        can_queue,
+                        egui::Button::new(egui::RichText::new("+ Queue").size(13.0))
+                            .fill(theme::elevated_fill(dark))
+                            .min_size(egui::vec2(80.0, 28.0)),
+                    )
+                    .on_hover_text("Add to the sequential run queue — starts automatically when the current run finishes")
+                    .clicked()
+                {
+                    let model_path = state.workspace.models[idx].model.path.clone();
+                    let data_path = state.ui.run_data_path.clone().unwrap();
+                    state.run.run_queue.push_back(crate::domain::QueuedRun {
+                        stem: stem.clone(),
+                        model_path,
+                        data_path,
+                        method: state.ui.run_method.clone(),
+                        covariance: state.ui.run_covariance,
+                        gradient: state.ui.run_gradient.clone(),
+                        settings: state.ui.run_extra_args.clone(),
+                        threads: state.ui.run_threads,
+                        optimizer_trace: state.ui.run_optimizer_trace,
+                        export_tables: state.ui.run_export_tables,
+                        run_sir_after: state.ui.run_sir_after_fit,
+                    });
+                    let n = state.run.run_queue.len();
+                    state.ui.status_message = format!("Queued {stem} ({n} in queue)");
+                }
+
+                if running {
+                    if ui
+                        .add(
+                            egui::Button::new(egui::RichText::new("■  Stop").size(13.0))
+                                .fill(theme::card_fill(dark))
+                                .min_size(egui::vec2(80.0, 28.0)),
+                        )
+                        .on_hover_text(if cfg!(unix) { "Graceful stop (SIGTERM → kill after 5 s)" } else { "Graceful stop (CTRL_BREAK → kill after 5 s)" })
+                        .clicked()
+                    {
+                        if let Some(run) = &state.run.active_run {
+                            let _ = run.cancel_tx.send(CancelMode::Graceful);
+                        }
+                    }
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("✕  Kill").size(13.0).color(theme::RED),
+                            )
+                            .stroke(egui::Stroke::new(1.0, theme::RED))
+                            .fill(theme::card_fill(dark))
+                            .min_size(egui::vec2(76.0, 28.0)),
+                        )
+                        .on_hover_text("Kill immediately (SIGKILL)")
+                        .clicked()
+                    {
+                        if let Some(run) = &state.run.active_run {
+                            let _ = run.cancel_tx.send(CancelMode::Kill);
+                        }
+                    }
+                }
+
+                // Hint when prerequisites are missing.
+                if state.workspace.settings.ferx_binary.is_none() {
+                    ui.label(
+                        egui::RichText::new("ferx binary not found — set path in Settings")
+                            .color(theme::ORANGE)
+                            .size(11.0),
+                    );
+                } else if state.ui.run_data_path.is_none() {
+                    ui.label(
+                        egui::RichText::new("Select a data file above")
+                            .color(theme::fg3(dark))
+                            .size(11.0),
+                    );
+                }
+            });
+
+            // ── Init check ──
+            {
+                let checking = state.workspace.check_init_running.contains(&stem);
+                let can_check = state.workspace.settings.ferx_binary.is_some()
+                    && state.ui.run_data_path.is_some()
+                    && !checking;
+                let model_path  = state.workspace.models[idx].model.path.clone();
+                let data_path   = state.ui.run_data_path.clone();
+                let dark        = ui.visuals().dark_mode;
+                let dim         = if dark { theme::FG2 } else { egui::Color32::from_gray(100) };
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            can_check,
+                            egui::Button::new(
+                                egui::RichText::new("⚡ Check inits").size(12.0),
+                            )
+                            .fill(theme::elevated_fill(dark))
+                            .min_size(egui::vec2(110.0, 24.0)),
+                        )
+                        .on_hover_text(
+                            "Run 5 FOCEI iterations to verify initial estimates are healthy \
+                             before committing to a full fit",
+                        )
+                        .clicked()
+                    {
+                        if let Some(dp) = data_path {
+                            // Clear any previous result for this stem.
+                            state.workspace.check_init_results.remove(&stem);
+                            state.workspace.check_init_running.insert(stem.clone());
+                            let tx      = state.worker_tx.clone();
+                            let ctx     = ui.ctx().clone();
+                            let stem_cl = stem.clone();
+                            std::thread::spawn(move || {
+                                match crate::io::r_extract::compute_check_init(&model_path, &dp) {
+                                    Ok(result) => {
+                                        let _ = tx.send(crate::workers::messages::WorkerMsg::RCheckInitComplete {
+                                            stem: stem_cl,
+                                            result: Box::new(result),
+                                        });
+                                    }
+                                    Err(e) => {
+                                        let _ = tx.send(crate::workers::messages::WorkerMsg::RTaskError {
+                                            context: format!("check_init {stem_cl}"),
+                                            message: e,
+                                        });
+                                    }
+                                }
+                                ctx.request_repaint();
+                            });
+                        }
+                    }
+
+                    if checking {
+                        ui.add_space(8.0);
+                        ui.spinner();
+                        ui.label(
+                            egui::RichText::new("Running 5 iterations…")
+                                .color(dim)
+                                .size(11.0),
+                        );
+                    }
+                });
+
+                // Result card.
+                if let Some(ci) = state.workspace.check_init_results.get(&stem).cloned() {
+                    ui.add_space(6.0);
+                    let (card_fill, status_color, status_icon, status_msg) =
+                        if !ci.start_finite() {
+                            (
+                                egui::Color32::from_rgba_unmultiplied(0xe8, 0x55, 0x55, 20),
+                                theme::RED,
+                                "✗",
+                                "Non-finite start OFV — check model structure or data",
+                            )
+                        } else if ci.dropping() {
+                            (
+                                egui::Color32::from_rgba_unmultiplied(0x3e, 0xc9, 0x7a, 20),
+                                theme::GREEN,
+                                "✓",
+                                "Gradient pointing down — inits look healthy",
+                            )
+                        } else {
+                            (
+                                egui::Color32::from_rgba_unmultiplied(0xe8, 0x95, 0x40, 20),
+                                theme::ORANGE,
+                                "⚠",
+                                "OFV not decreasing — consider tightening bounds or rescaling",
+                            )
+                        };
+
+                    egui::Frame::new()
+                        .fill(card_fill)
+                        .inner_margin(egui::Margin::same(8))
+                        .corner_radius(egui::CornerRadius::same(5))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(status_icon)
+                                        .color(status_color)
+                                        .size(13.0)
+                                        .strong(),
+                                );
+                                ui.label(
+                                    egui::RichText::new(status_msg)
+                                        .color(status_color)
+                                        .size(11.0),
+                                );
+                            });
+                            ui.add_space(4.0);
+                            egui::Grid::new("check_init_grid")
+                                .num_columns(4)
+                                .spacing([16.0, 2.0])
+                                .show(ui, |ui| {
+                                    let fmt = |v: Option<f64>| {
+                                        v.map(|x| format!("{x:.2}"))
+                                            .unwrap_or_else(|| "—".to_string())
+                                    };
+                                    ui.label(egui::RichText::new("Start OFV").color(dim).size(11.0));
+                                    ui.label(egui::RichText::new(fmt(ci.ofv_start)).size(11.0).monospace());
+                                    ui.label(egui::RichText::new("End OFV").color(dim).size(11.0));
+                                    ui.label(egui::RichText::new(fmt(ci.ofv_end)).size(11.0).monospace());
+                                    ui.end_row();
+
+                                    let drop_str = ci.ofv_drop
+                                        .map(|d| format!("{:+.2}", d))
+                                        .unwrap_or_else(|| "—".to_string());
+                                    let drop_color = if ci.dropping() { theme::GREEN } else { theme::ORANGE };
+                                    ui.label(egui::RichText::new("OFV drop").color(dim).size(11.0));
+                                    ui.label(
+                                        egui::RichText::new(drop_str)
+                                            .size(11.0)
+                                            .color(drop_color)
+                                            .monospace(),
+                                    );
+                                    ui.label(egui::RichText::new("Iterations").color(dim).size(11.0));
+                                    ui.label(
+                                        egui::RichText::new(ci.n_iter.to_string())
+                                            .size(11.0)
+                                            .monospace(),
+                                    );
+                                    ui.end_row();
+                                });
+                        });
+                }
+            }
+
+            // ── Queue list ──
+            if !state.run.run_queue.is_empty() {
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+                let dark = ui.visuals().dark_mode;
+                let dim = if dark { theme::FG2 } else { egui::Color32::from_gray(100) };
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(
+                            format!("Queue  ({} pending)", state.run.run_queue.len()),
+                        )
+                        .color(dim)
+                        .size(11.0)
+                        .strong(),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(egui::RichText::new("Clear all").size(11.0))
+                                    .fill(theme::elevated_fill(dark))
+                                    .min_size(egui::vec2(60.0, 18.0)),
+                            )
+                            .clicked()
+                        {
+                            state.run.run_queue.clear();
+                        }
+                    });
+                });
+                let mut remove_idx: Option<usize> = None;
+                let queue_snapshot: Vec<(usize, String, String)> = state.run.run_queue
+                    .iter()
+                    .enumerate()
+                    .map(|(i, q)| (i, q.stem.clone(), q.method.clone()))
+                    .collect();
+                for (i, stem_q, method_q) in &queue_snapshot {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{}.", i + 1))
+                                .color(dim)
+                                .size(11.0)
+                                .monospace(),
+                        );
+                        ui.label(
+                            egui::RichText::new(stem_q)
+                                .color(if dark { theme::FG } else { egui::Color32::from_gray(30) })
+                                .size(12.0),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!("— {method_q}"))
+                                .color(dim)
+                                .size(11.0),
+                        );
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("✕").size(10.0).color(theme::fg3(dark)),
+                                )
+                                .frame(false),
+                            )
+                            .on_hover_text("Remove from queue")
+                            .clicked()
+                        {
+                            remove_idx = Some(*i);
+                        }
+                    });
+                }
+                if let Some(i) = remove_idx {
+                    state.run.run_queue.remove(i);
+                }
+            }
+
+            ui.add_space(8.0);
+
+            // Output lives in the bottom run panel (visible across all tabs).
+            let note_fg = if ui.visuals().dark_mode { theme::FG3 } else { egui::Color32::from_gray(150) };
+            ui.label(
+                egui::RichText::new("▼  Live output appears in the run panel at the bottom of the window")
+                    .color(note_fg)
+                    .size(11.0),
+            );
+        });
+}
+
+fn launch_run(state: &mut AppState, idx: usize, stem: &str) {
+    let model_path = state.workspace.models[idx].model.path.clone();
+    let data = match state.ui.run_data_path.clone() {
+        Some(p) => p,
+        None => {
+            state.ui.status_message = "Select a data file before running".to_string();
+            return;
+        }
+    };
+    do_launch_queued(state, crate::domain::QueuedRun {
+        stem: stem.to_string(),
+        model_path,
+        data_path: data,
+        method: state.ui.run_method.clone(),
+        covariance: state.ui.run_covariance,
+        gradient: state.ui.run_gradient.clone(),
+        settings: state.ui.run_extra_args.clone(),
+        threads: state.ui.run_threads,
+        optimizer_trace: state.ui.run_optimizer_trace,
+        export_tables: state.ui.run_export_tables,
+        run_sir_after: state.ui.run_sir_after_fit,
+    });
+}
+
+/// Pop the next item from the run queue and start it.  No-op when idle queue is empty
+/// or another run is already active.  Called every frame by the app update loop.
+pub fn advance_queue(state: &mut AppState) {
+    if state.run.active_run.is_some() { return; }
+    let Some(queued) = state.run.run_queue.pop_front() else { return };
+    do_launch_queued(state, queued);
+}
+
+/// Core launch logic: start a run described by `queued`.  Sets `active_run` on success;
+/// writes an error to `status_message` on failure.
+pub fn do_launch_queued(state: &mut AppState, queued: crate::domain::QueuedRun) {
+    // ferx runs through R: the stored "binary" is actually the Rscript path.
+    let rscript = match state.workspace.settings.ferx_binary.clone() {
+        Some(p) => p,
+        None => {
+            state.ui.status_message =
+                "ferx is not available — check R + the ferx package in Settings".to_string();
+            return;
+        }
+    };
+
+    let cwd = queued.model_path
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
+
+    // Ensure the embedded R run script exists on disk (in ~/.ferxgui/).
+    let run_script = match state.workspace.app_dir.as_deref() {
+        Some(d) => match crate::io::r_extract::ensure_run_script(d) {
+            Ok(p) => p,
+            Err(e) => {
+                state.ui.status_message = format!("Could not write run script: {e}");
+                return;
+            }
+        },
+        None => {
+            state.ui.status_message = "No app data directory available".to_string();
+            return;
+        }
+    };
+
+    // Output bundle next to the model so the scanner pairs it with the model.
+    let out_fitrx = cwd.join(format!("{}.fitrx", queued.stem));
+
+    // Rscript --vanilla run_ferx.R <model> <data> <method> <covariance> <out.fitrx>
+    //   [gradient] [settings_json] [threads] [optimizer_trace]
+    let threads_str = if queued.threads == 0 { String::new() } else { queued.threads.to_string() };
+    let args = vec![
+        "--vanilla".to_string(),
+        run_script.to_string_lossy().to_string(),
+        queued.model_path.to_string_lossy().to_string(),
+        queued.data_path.to_string_lossy().to_string(),
+        queued.method.clone(),
+        queued.covariance.to_string(),
+        out_fitrx.to_string_lossy().to_string(),
+        queued.gradient.clone(),
+        queued.settings.clone(),
+        threads_str,
+        queued.optimizer_trace.to_string(),
+    ];
+
+    let run_id = format!("{}-{}", queued.stem, now_unix());
+
+    // Log file: next to the model so it's easy to find in the file browser.
+    let log_path = cwd.join(format!("{}_run.log", queued.stem));
+
+    // Manifest: in ~/.ferxgui/running/ (centralised for startup reconnect scan).
+    let mfst_path = state.workspace.app_dir
+        .as_deref()
+        .and_then(|d| manifest_path(d, &run_id))
+        .unwrap_or_else(|| cwd.join(format!("{run_id}.runmfst")));
+
+    // Ensure the running/ dir exists (manifest_path() does this, but fallback may not).
+    if let Some(app_dir) = &state.workspace.app_dir {
+        let _ = running_dir(app_dir);
+    }
+
+    let record = RunRecord {
+        id: run_id,
+        model_stem: queued.stem.clone(),
+        tool: "ferx".to_string(),
+        method: Some(queued.method.clone()),
+        status: JobStatus::Running,
+        started: now_iso(),
+        completed: None,
+        duration_secs: None,
+        command: format!("{} {}", rscript.display(), args.join(" ")),
+        directory: cwd.clone(),
+        data_path: Some(queued.data_path),
+        file_hashes: HashMap::new(),
+    };
+
+    let (cancel_tx, cancel_rx) = std::sync::mpsc::channel::<CancelMode>();
+    let tx = state.worker_tx.clone();
+
+    match spawn_detached_run(
+        record.clone(),
+        rscript,
+        args,
+        cwd,
+        log_path.clone(),
+        mfst_path.clone(),
+        tx,
+        cancel_rx,
+    ) {
+        Ok(spawned) => {
+            state.run.active_run = Some(crate::domain::ActiveRun {
+                record,
+                started_at: std::time::Instant::now(),
+                pid: spawned.pid,
+                log_path: spawned.log_path,
+                manifest_path: spawned.manifest_path,
+                cancel_tx,
+                export_tables: queued.export_tables,
+                run_sir_after: queued.run_sir_after,
+            });
+            state.run.log_buffer.clear();
+            state.ui.status_message = format!("Running {}", queued.stem);
+        }
+        Err(e) => {
+            state.ui.status_message = format!("Failed to start run: {e}");
+        }
+    }
+}
+
+// ── Output pill ───────────────────────────────────────────────────────────────
+
+fn show_output_pill(ui: &mut egui::Ui, state: &mut AppState) {
+    let dark = ui.visuals().dark_mode;
+    let Some(idx) = state.ui.selected_model else { return };
+
+    let fit = match &state.workspace.models[idx].fit {
+        Some(f) => f.clone(),
+        None => {
+            ui.centered_and_justified(|ui| {
+                ui.label(
+                    egui::RichText::new("No run output yet\nRun the model from the Run tab")
+                        .color(theme::fg3(dark))
+                        .size(13.0),
+                );
+            });
+            return;
+        }
+    };
+
+    egui::ScrollArea::vertical()
+        .auto_shrink([false; 2])
+        .show(ui, |ui| {
+            // ── Summary grid ──
+            egui::Frame::new()
+                .fill(theme::card_fill(dark))
+                .inner_margin(egui::Margin::same(12))
+                .corner_radius(egui::CornerRadius::same(6))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    egui::Grid::new("output_summary")
+                        .num_columns(4)
+                        .spacing([24.0, 6.0])
+                        .show(ui, |ui| {
+                            // Row 1
+                            kv(ui, "Status", if fit.converged { "✓ Converged" } else { "✗ Not converged" },
+                               if fit.converged { theme::GREEN } else { theme::RED });
+                            kv(ui, "Method", &fit.method.to_uppercase(), theme::fg(dark));
+                            ui.end_row();
+
+                            // Row 2
+                            kv(ui, "OFV", &fmt_f64_4dp(fit.ofv), theme::fg(dark));
+                            kv(ui, "AIC", &fmt_f64_2dp(fit.aic), theme::fg(dark));
+                            kv(ui, "BIC", &fmt_f64_2dp(fit.bic), theme::fg(dark));
+                            kv(ui, "nPar", &fit.n_parameters.to_string(), theme::fg(dark));
+                            ui.end_row();
+
+                            // Row 3
+                            kv(ui, "Subjects", &fit.n_subjects.to_string(), theme::fg(dark));
+                            kv(ui, "Obs", &fit.n_obs.to_string(), theme::fg(dark));
+                            kv(ui, "Iterations", &fit.n_iterations.to_string(), theme::fg(dark));
+                            kv(ui, "Time", &fmt_duration(fit.wall_time_secs), theme::fg2(dark));
+                            ui.end_row();
+
+                            // Row 4: covariance
+                            kv(
+                                ui,
+                                "Covariance",
+                                if fit.covariance_ok { "✓ OK" } else { "✗ Failed" },
+                                if fit.covariance_ok { theme::GREEN } else { theme::RED },
+                            );
+                            if fit.cov_condition_number.is_finite() {
+                                let cn_color =
+                                    if fit.cn_high() { theme::ORANGE } else { theme::FG };
+                                kv(ui, "Cond. number", &fmt_f64_0dp(fit.cov_condition_number), cn_color);
+                            }
+                            ui.end_row();
+
+                            // Row 5: IWRES diagnostics (ferx >= 0.1.5 — only shown when available)
+                            if let Some(dw) = fit.dw_statistic {
+                                let dw_color = if dw < 1.5 || dw > 2.5 {
+                                    theme::ORANGE
+                                } else {
+                                    theme::GREEN
+                                };
+                                kv(ui, "Durbin-Watson", &format!("{dw:.3}"), dw_color);
+                                if let Some(r) = fit.iwres_lag1_r {
+                                    let r_color = if r.abs() > 0.2 { theme::ORANGE } else { theme::FG };
+                                    kv(ui, "IWRES lag-1 r", &format!("{r:.3}"), r_color);
+                                }
+                                ui.end_row();
+                            }
+                        });
+                });
+
+            // ── Warnings ──
+            if !fit.warnings_structured.is_empty() {
+                // Severity-grouped display (ferx >= 0.1.5).
+                for (severity, icon, color, bg) in [
+                    ("critical", "✗", theme::RED,    egui::Color32::from_rgba_unmultiplied(0xe8, 0x55, 0x55, 25)),
+                    ("warning",  "⚠", theme::ORANGE, egui::Color32::from_rgba_unmultiplied(0xe8, 0x95, 0x40, 25)),
+                    ("info",     "ℹ", theme::fg2(dark),    egui::Color32::from_rgba_unmultiplied(0x4c, 0x8a, 0xff, 15)),
+                ] {
+                    let group: Vec<_> = fit.warnings_structured.iter()
+                        .filter(|w| w.severity == severity)
+                        .collect();
+                    if group.is_empty() { continue; }
+                    ui.add_space(8.0);
+                    egui::Frame::new()
+                        .fill(bg)
+                        .inner_margin(egui::Margin::same(10))
+                        .corner_radius(egui::CornerRadius::same(6))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(egui::RichText::new(
+                                format!("{icon}  {} ({})", severity.to_uppercase(), group.len()))
+                                .color(color).size(11.0).strong());
+                            ui.add_space(4.0);
+                            for w in &group {
+                                let cat = if w.category.is_empty() { String::new() }
+                                          else { format!("[{}] ", w.category) };
+                                ui.label(egui::RichText::new(format!("• {}{}", cat, w.message))
+                                    .color(color).size(11.0));
+                            }
+                        });
+                }
+            } else if !fit.warnings.is_empty() {
+                // Flat fallback for older .fitrx bundles.
+                ui.add_space(10.0);
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgba_unmultiplied(0xe8, 0x95, 0x40, 30))
+                    .inner_margin(egui::Margin::same(10))
+                    .corner_radius(egui::CornerRadius::same(6))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(egui::RichText::new("⚠  Warnings")
+                            .color(theme::ORANGE).size(12.0).strong());
+                        for w in &fit.warnings {
+                            ui.label(egui::RichText::new(format!("• {}", w))
+                                .color(theme::ORANGE).size(12.0));
+                        }
+                    });
+            }
+
+            // ── Shrinkage ──
+            if !fit.eta_shrinkage.is_empty() || !fit.eps_shrinkage.is_empty() {
+                ui.add_space(10.0);
+                ui.label(egui::RichText::new("Shrinkage").color(theme::fg2(dark)).size(11.0).strong());
+                egui::Grid::new("shrinkage_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 4.0])
+                    .show(ui, |ui| {
+                        for (i, &s) in fit.eta_shrinkage.iter().enumerate() {
+                            let name = fit.omega_names.get(i).map(|n| n.as_str()).unwrap_or("ETA");
+                            ui.label(egui::RichText::new(format!("{} shrinkage:", name)).color(theme::fg2(dark)).size(12.0));
+                            shrink_label(ui, s);
+                            ui.end_row();
+                        }
+                        for (i, &s) in fit.eps_shrinkage.iter().enumerate() {
+                            let name = fit.sigma_names.get(i).map(|n| n.as_str()).unwrap_or("EPS");
+                            ui.label(egui::RichText::new(format!("{} shrinkage:", name)).color(theme::fg2(dark)).size(12.0));
+                            shrink_label(ui, s);
+                            ui.end_row();
+                        }
+                    });
+            }
+        });
+}
+
+// ── Parameters pill ───────────────────────────────────────────────────────────
+
+fn show_params_pill(ui: &mut egui::Ui, state: &mut AppState) {
+    let dark = ui.visuals().dark_mode;
+    let Some(idx) = state.ui.selected_model else { return };
+    let entry = &state.workspace.models[idx];
+
+    let fit = match &entry.fit {
+        Some(f) => f.clone(),
+        None => {
+            ui.centered_and_justified(|ui| {
+                ui.label(egui::RichText::new("No run output yet").color(theme::fg3(dark)).size(13.0));
+            });
+            return;
+        }
+    };
+    let params = entry.model.params.clone();
+
+    egui::ScrollArea::vertical()
+        .auto_shrink([false; 2])
+        .show(ui, |ui| {
+            // ── THETA ──
+            section_header(ui, &format!("THETA  ({})", fit.theta.len()));
+            params_table(ui, 7, |ui| {
+                theta_table_header(ui);
+                for i in 0..fit.theta.len() {
+                    let name = fit.theta_names.get(i).cloned()
+                        .unwrap_or_else(|| format!("THETA{}", i + 1));
+                    let init = params.theta_init.get(i).copied().unwrap_or(f64::NAN);
+                    let est  = fit.theta.get(i).copied().unwrap_or(f64::NAN);
+                    let se   = fit.se_theta.get(i).copied().unwrap_or(f64::NAN);
+                    let at_b = fit.at_lower_bound.get(i).copied().unwrap_or(false);
+                    theta_param_row(ui, &name, init, est, se, at_b, false);
+                }
+            });
+
+            ui.add_space(8.0);
+
+            // ── OMEGA ──
+            section_header(ui, &format!("OMEGA  ({} ETA)", fit.n_eta));
+            params_table(ui, 8, |ui| {
+                omega_table_header(ui);
+                for i in 0..fit.n_eta {
+                    let name = fit.omega_names.get(i).cloned()
+                        .unwrap_or_else(|| format!("OMEGA({},{})", i + 1, i + 1));
+                    let init = params.omega_init.get(i).copied().unwrap_or(f64::NAN);
+                    let est  = fit.omega_value(i, i).unwrap_or(f64::NAN);
+                    // se_omega from ferx has one entry per diagonal parameter.
+                    let se   = fit.se_omega.get(i).copied().unwrap_or(f64::NAN);
+                    let param_type = fit.eta_param_types.get(i).map(|s| s.as_str()).unwrap_or("log_normal");
+                    omega_param_row(ui, &name, init, est, se, param_type, false, false);
+                }
+            });
+            // Off-diagonal covariances (block omega) — rendered outside the grid.
+            // Note: se_omega in ferx 0.1.5 only carries diagonal SEs, so SE and
+            // 95% CI are not available for off-diagonal entries.
+            if fit.n_eta > 1 {
+                // Collect all off-diagonal entries that have a defined covariance.
+                let off_diag: Vec<(String, String, f64, f64)> = (1..fit.n_eta)
+                    .flat_map(|r| (0..r).map(move |c| (r, c)))
+                    .filter_map(|(r, c)| {
+                        let cov  = fit.omega_value(r, c)?;
+                        let corr = fit.omega_corr(r, c)?;
+                        let rn = fit.omega_names.get(r).cloned()
+                            .unwrap_or_else(|| format!("ETA{}", r + 1));
+                        let cn = fit.omega_names.get(c).cloned()
+                            .unwrap_or_else(|| format!("ETA{}", c + 1));
+                        Some((rn, cn, cov, corr))
+                    })
+                    .collect();
+
+                if !off_diag.is_empty() {
+                    let dark = ui.visuals().dark_mode;
+                    let dim  = if dark { theme::FG2 } else { egui::Color32::from_gray(100) };
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new("Covariances / correlations  (SE not available for off-diagonal)")
+                            .color(dim).size(10.0),
+                    );
+                    ui.add_space(3.0);
+                    egui::Grid::new("omega_offdiag")
+                        .num_columns(3)
+                        .spacing([16.0, 3.0])
+                        .show(ui, |ui| {
+                            for h in ["ETA PAIR", "COV", "CORR"] {
+                                ui.label(egui::RichText::new(h).color(theme::fg3(dark)).size(10.0).strong());
+                            }
+                            ui.end_row();
+                            for (rn, cn, cov, corr) in &off_diag {
+                                let pair = format!("{rn} ~ {cn}");
+                                ui.label(egui::RichText::new(pair).color(theme::fg2(dark)).size(11.0).monospace());
+                                ui.label(egui::RichText::new(fmt_sig4(*cov)).color(theme::fg(dark)).size(11.0));
+                                let cc = if corr.abs() > 0.5 { theme::ORANGE }
+                                         else if corr.abs() > 0.3 { theme::YELLOW }
+                                         else { theme::FG };
+                                ui.label(egui::RichText::new(format!("{corr:.3}")).color(cc).size(11.0));
+                                ui.end_row();
+                            }
+                        });
+                }
+            }
+
+            // ── KAPPA (IOV) ──
+            if fit.n_kappa > 0 {
+                ui.add_space(8.0);
+                section_header(ui, &format!("KAPPA  ({} IOV)", fit.n_kappa));
+                params_table(ui, 8, |ui| {
+                    omega_table_header(ui);
+                    for i in 0..fit.n_kappa {
+                        let name = fit.kappa_names.get(i).cloned()
+                            .unwrap_or_else(|| format!("KAPPA{}", i + 1));
+                        let est = fit.kappa_value(i, i).unwrap_or(f64::NAN);
+                        let se  = fit.se_kappa.get(i).copied().unwrap_or(f64::NAN);
+                        omega_param_row(ui, &name, f64::NAN, est, se, "log_normal", false, false);
+                    }
+                });
+
+                // Off-diagonal block_kappa covariances (if any).
+                if fit.n_kappa > 1 {
+                    let off_diag: Vec<(String, String, f64, f64)> = (1..fit.n_kappa)
+                        .flat_map(|r| (0..r).map(move |c| (r, c)))
+                        .filter_map(|(r, c)| {
+                            let cov  = fit.kappa_value(r, c)?;
+                            let corr = fit.kappa_corr(r, c)?;
+                            let rn = fit.kappa_names.get(r).cloned()
+                                .unwrap_or_else(|| format!("KAPPA{}", r + 1));
+                            let cn = fit.kappa_names.get(c).cloned()
+                                .unwrap_or_else(|| format!("KAPPA{}", c + 1));
+                            Some((rn, cn, cov, corr))
+                        })
+                        .collect();
+
+                    if !off_diag.is_empty() {
+                        let dim = if dark { theme::FG2 } else { egui::Color32::from_gray(100) };
+                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new(
+                                "Covariances / correlations  (SE not available for off-diagonal)")
+                                .color(dim).size(10.0),
+                        );
+                        ui.add_space(3.0);
+                        egui::Grid::new("kappa_offdiag")
+                            .num_columns(3)
+                            .spacing([16.0, 3.0])
+                            .show(ui, |ui| {
+                                for h in ["KAPPA PAIR", "COV", "CORR"] {
+                                    ui.label(egui::RichText::new(h).color(theme::fg3(dark))
+                                        .size(10.0).strong());
+                                }
+                                ui.end_row();
+                                for (rn, cn, cov, corr) in &off_diag {
+                                    let pair = format!("{rn} ~ {cn}");
+                                    ui.label(egui::RichText::new(pair).color(theme::fg2(dark))
+                                        .size(11.0).monospace());
+                                    ui.label(egui::RichText::new(fmt_sig4(*cov))
+                                        .color(theme::fg(dark)).size(11.0));
+                                    let cc = if corr.abs() > 0.5 { theme::ORANGE }
+                                             else if corr.abs() > 0.3 { theme::YELLOW }
+                                             else { theme::FG };
+                                    ui.label(egui::RichText::new(format!("{corr:.3}"))
+                                        .color(cc).size(11.0));
+                                    ui.end_row();
+                                }
+                            });
+                    }
+                }
+            }
+
+            ui.add_space(8.0);
+
+            // ── SIGMA ──
+            section_header(ui, &format!("SIGMA  ({})", fit.sigma.len()));
+            params_table(ui, 7, |ui| {
+                theta_table_header(ui);
+                for i in 0..fit.sigma.len() {
+                    let name = fit.sigma_names.get(i).cloned()
+                        .unwrap_or_else(|| format!("SIGMA{}", i + 1));
+                    let init = params.sigma_init.get(i).copied().unwrap_or(f64::NAN);
+                    let est  = fit.sigma.get(i).copied().unwrap_or(f64::NAN);
+                    let se   = fit.se_sigma.get(i).copied().unwrap_or(f64::NAN);
+                    theta_param_row(ui, &name, init, est, se, false, false);
+                }
+            });
+
+            // ── ETAbar test ──
+            if !fit.etabar.is_empty() {
+                ui.add_space(8.0);
+                section_header(ui, "ETAbar  (H₀: mean ETA = 0)");
+                egui::Grid::new("etabar_grid")
+                    .num_columns(3)
+                    .spacing([16.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("ETA").color(theme::fg3(dark)).size(11.0).strong());
+                        ui.label(egui::RichText::new("mean").color(theme::fg3(dark)).size(11.0).strong());
+                        ui.label(egui::RichText::new("p-value").color(theme::fg3(dark)).size(11.0).strong());
+                        ui.end_row();
+                        for i in 0..fit.etabar.len() {
+                            let name = fit.omega_names.get(i).map(|n| n.as_str()).unwrap_or("ETA");
+                            let p = fit.etabar_pvalue.get(i).copied().unwrap_or(f64::NAN);
+                            let pcolor = if p.is_nan() { theme::fg3(dark) } else if p > 0.05 { theme::GREEN } else { theme::RED };
+                            ui.label(egui::RichText::new(name).color(theme::fg2(dark)).size(12.0).monospace());
+                            ui.label(egui::RichText::new(fmt_f64_4dp(fit.etabar[i])).size(12.0));
+                            ui.label(egui::RichText::new(fmt_f64_4dp(p)).color(pcolor).size(12.0));
+                            ui.end_row();
+                        }
+                    });
+            }
+        });
+}
+
+fn section_header(ui: &mut egui::Ui, title: &str) {
+    let dark = ui.visuals().dark_mode;
+    ui.add_space(4.0);
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), 24.0),
+        egui::Sense::hover(),
+    );
+    ui.painter().rect_filled(rect, 0.0, theme::elevated_fill(dark));
+    ui.painter().text(
+        rect.left_center() + egui::vec2(8.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        title,
+        egui::FontId::proportional(12.0),
+        theme::fg2(dark),
+    );
+    ui.add_space(4.0);
+}
+
+fn params_table(ui: &mut egui::Ui, n_cols: usize, add_content: impl FnOnce(&mut egui::Ui)) {
+    egui::Grid::new(egui::Id::new(ui.next_auto_id()))
+        .num_columns(n_cols)
+        .spacing([8.0, 4.0])
+        .min_col_width(40.0)
+        .show(ui, add_content);
+}
+
+/// Header for THETA / SIGMA rows: no CV% column (CV% is not defined for fixed-effect
+/// parameters or residual error on the estimation scale).
+fn theta_table_header(ui: &mut egui::Ui) {
+    let dark = ui.visuals().dark_mode;
+    for h in ["PARAM","INIT→FINAL","ESTIMATE","SE","RSE%","95% LO","95% HI"] {
+        ui.label(egui::RichText::new(h).color(theme::fg2(dark)).size(10.0).strong());
+    }
+    ui.end_row();
+}
+
+fn omega_table_header(ui: &mut egui::Ui) {
+    let dark = ui.visuals().dark_mode;
+    for h in ["PARAM","INIT→FINAL","ESTIMATE","SE","CV%","RSE%","95% LO","95% HI"] {
+        ui.label(egui::RichText::new(h).color(theme::fg2(dark)).size(10.0).strong());
+    }
+    ui.end_row();
+}
+
+/// Row for THETA and SIGMA parameters — 7 columns, no CV%.
+fn theta_param_row(
+    ui: &mut egui::Ui,
+    name: &str,
+    initial: f64,
+    estimate: f64,
+    se: f64,
+    at_bound: bool,
+    fixed: bool,
+) {
+    let dark = ui.visuals().dark_mode;
+    ui.label(egui::RichText::new(name).color(theme::fg(dark)).size(12.0).monospace());
+    draw_init_final_cell(ui, initial, estimate, fixed, at_bound);
+    let est_color = if at_bound { theme::ORANGE } else { theme::fg(dark) };
+    ui.label(egui::RichText::new(fmt_sig4(estimate)).color(est_color).size(12.0));
+    ui.label(egui::RichText::new(fmt_sig4(se)).color(theme::fg2(dark)).size(12.0));
+    let rse = rse_pct(estimate, se);
+    let rse_color = rse_color(rse);
+    ui.label(egui::RichText::new(fmt_f64_1dp(rse)).color(rse_color).size(12.0));
+    ci_cells(ui, estimate, se);
+    ui.end_row();
+}
+
+/// Row for OMEGA diagonal entries — 8 columns with CV% after SE.
+///
+/// CV% formula depends on the ETA parameterisation:
+///   - Log-normal  (`CL = TVCL * exp(ETA)`): CV% = sqrt(exp(ω) − 1) × 100
+///   - Additive / normal (`CL = TVCL + ETA`): SD% = sqrt(ω) × 100
+///   - Logit / custom: shown as "—"
+fn omega_param_row(
+    ui: &mut egui::Ui,
+    name: &str,
+    initial: f64,
+    estimate: f64,
+    se: f64,
+    param_type: &str,
+    at_bound: bool,
+    fixed: bool,
+) {
+    let dark = ui.visuals().dark_mode;
+    ui.label(egui::RichText::new(name).color(theme::fg(dark)).size(12.0).monospace());
+    draw_init_final_cell(ui, initial, estimate, fixed, at_bound);
+    ui.label(egui::RichText::new(fmt_sig4(estimate)).color(theme::fg(dark)).size(12.0));
+    ui.label(egui::RichText::new(fmt_sig4(se)).color(theme::fg2(dark)).size(12.0));
+    let cv_cell: Option<(f64, &str)> = if estimate.is_finite() {
+        match param_type {
+            "log_normal"           => Some(((estimate.exp() - 1.0).sqrt() * 100.0, "CV%")),
+            "additive" | "normal"  => Some((estimate.sqrt() * 100.0, "SD%")),
+            _                      => None,
+        }
+    } else { None };
+    if let Some((val, label)) = cv_cell {
+        let col = if val > 100.0 { theme::RED } else if val > 50.0 { theme::ORANGE } else { theme::fg(dark) };
+        ui.label(egui::RichText::new(format!("{val:.1}% {label}")).color(col).size(12.0));
+    } else {
+        ui.label(egui::RichText::new("—").color(theme::fg3(dark)).size(12.0));
+    }
+    let rse = rse_pct(estimate, se);
+    ui.label(egui::RichText::new(fmt_f64_1dp(rse)).color(rse_color(rse)).size(12.0));
+    ci_cells(ui, estimate, se);
+    ui.end_row();
+}
+
+// ── Shared helpers ────────────────────────────────────────────────────────────
+
+fn rse_pct(estimate: f64, se: f64) -> f64 {
+    if estimate != 0.0 && se.is_finite() { (se / estimate).abs() * 100.0 } else { f64::NAN }
+}
+
+fn rse_color(rse: f64) -> egui::Color32 {
+    if rse.is_nan() { theme::FG3 }
+    else if rse < 20.0 { theme::GREEN }
+    else if rse < 30.0 { theme::ORANGE }
+    else { theme::RED }
+}
+
+fn ci_cells(ui: &mut egui::Ui, estimate: f64, se: f64) {
+    let dark = ui.visuals().dark_mode;
+    if se.is_finite() && estimate.is_finite() {
+        let ci_color = theme::fg2(dark);
+        ui.label(egui::RichText::new(fmt_sig4(estimate - 1.96 * se)).color(ci_color).size(11.0));
+        ui.label(egui::RichText::new(fmt_sig4(estimate + 1.96 * se)).color(ci_color).size(11.0));
+    } else {
+        ui.label(egui::RichText::new("—").color(theme::fg3(dark)).size(11.0));
+        ui.label(egui::RichText::new("—").color(theme::fg3(dark)).size(11.0));
+    }
+}
+
+/// Paints the Init→Final track cell (110px wide).
+fn draw_init_final_cell(
+    ui: &mut egui::Ui,
+    initial: f64,
+    estimate: f64,
+    fixed: bool,
+    at_bound: bool,
+) {
+    let desired = egui::vec2(110.0, 14.0);
+    let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::hover());
+
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+
+    let dark = ui.visuals().dark_mode;
+    let p = ui.painter_at(rect);
+
+    // Track background.
+    p.rect_filled(rect, 3.0, theme::elevated_fill(dark));
+
+    if fixed {
+        let fix_bg = if dark { theme::BG4 } else { egui::Color32::from_gray(210) };
+        p.rect_filled(rect, 3.0, fix_bg);
+        p.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "FIX",
+            egui::FontId::proportional(9.0),
+            theme::fg3(dark),
+        );
+        return;
+    }
+
+    // Tick marks at ×0.1 (−1), ×0.5 (−0.301), ×2 (+0.301), ×10 (+1).
+    let cx = rect.center().x;
+    for log_r in [-1.0_f32, -0.301, 0.0, 0.301, 1.0] {
+        let x = rect.left() + (log_r + 1.0) / 2.0 * rect.width();
+        let is_center = log_r == 0.0;
+        p.line_segment(
+            [
+                egui::pos2(x, rect.top() + if is_center { 1.0 } else { 3.0 }),
+                egui::pos2(x, rect.bottom() - if is_center { 1.0 } else { 3.0 }),
+            ],
+            egui::Stroke::new(
+                if is_center { 1.5 } else { 0.5 },
+                if is_center {
+                    egui::Color32::from_gray(180)
+                } else {
+                    egui::Color32::from_gray(100)
+                },
+            ),
+        );
+    }
+
+    let _ = cx; // suppress unused warning
+
+    // Can't draw marker without valid values.
+    if initial == 0.0 || initial.is_nan() || estimate.is_nan() {
+        return;
+    }
+    let same_sign = (initial > 0.0) == (estimate > 0.0);
+    if !same_sign {
+        return;
+    }
+
+    let log_ratio = (estimate / initial).abs().log10() as f32;
+    let off_scale = log_ratio.abs() > 1.0;
+    let clamped = log_ratio.clamp(-1.0, 1.0);
+    let marker_x = rect.left() + (clamped + 1.0) / 2.0 * rect.width();
+    let cy = rect.center().y;
+
+    // Bound wall.
+    if at_bound {
+        let wx = if log_ratio < 0.0 { rect.left() + 2.0 } else { rect.right() - 2.0 };
+        p.line_segment(
+            [egui::pos2(wx, rect.top()), egui::pos2(wx, rect.bottom())],
+            egui::Stroke::new(2.0, theme::RED),
+        );
+    }
+
+    // Marker color: blue for ≤ ×2, orange for >×2.
+    let color = if log_ratio.abs() <= 0.301 { theme::ACCENT } else { theme::ORANGE };
+
+    if off_scale {
+        let ch = if log_ratio > 0.0 { "▶" } else { "◀" };
+        let ex = if log_ratio > 0.0 { rect.right() - 6.0 } else { rect.left() + 6.0 };
+        p.text(egui::pos2(ex, cy), egui::Align2::CENTER_CENTER, ch, egui::FontId::proportional(10.0), color);
+    } else {
+        p.circle_filled(egui::pos2(marker_x, cy), 4.0, color);
+    }
+
+    // Hover tooltip: ratio value.
+    if response.hovered() {
+        let ratio = estimate / initial;
+        let tip = if ratio >= 1.0 {
+            format!("×{:.2}  (init {:.4} → final {:.4})", ratio, initial, estimate)
+        } else {
+            format!("×{:.2}  (init {:.4} → final {:.4})", ratio, initial, estimate)
+        };
+        response.on_hover_text(tip);
+    }
+}
+
+// ── Info pill ─────────────────────────────────────────────────────────────────
+
+fn show_info_pill(ui: &mut egui::Ui, state: &mut AppState) {
+    let dark = ui.visuals().dark_mode;
+    let Some(idx) = state.ui.selected_model else { return };
+
+    let mut changed = false;
+
+    egui::ScrollArea::vertical()
+        .auto_shrink([false; 2])
+        .show(ui, |ui| {
+            egui::Grid::new("info_grid")
+                .num_columns(2)
+                .spacing([12.0, 8.0])
+                .min_col_width(80.0)
+                .show(ui, |ui| {
+                    // Comment.
+                    ui.label(egui::RichText::new("Comment:").color(theme::fg2(dark)).size(12.0));
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(
+                            &mut state.workspace.models[idx].meta.comment,
+                        )
+                        .desired_width(f32::INFINITY),
+                    );
+                    if resp.changed() { changed = true; }
+                    ui.end_row();
+
+                    // Status.
+                    ui.label(egui::RichText::new("Status:").color(theme::fg2(dark)).size(12.0));
+                    let cur_status = state.workspace.models[idx].meta.status.clone();
+                    egui::ComboBox::from_id_salt("info_status")
+                        .selected_text(cur_status.label())
+                        .show_ui(ui, |ui| {
+                            for s in ModelStatus::all() {
+                                if ui.selectable_label(&cur_status == s, s.label()).clicked() {
+                                    state.workspace.models[idx].meta.status = s.clone();
+                                    changed = true;
+                                }
+                            }
+                        });
+                    ui.end_row();
+
+                    // Decision.
+                    ui.label(egui::RichText::new("Decision:").color(theme::fg2(dark)).size(12.0));
+                    let cur_dec = state.workspace.models[idx].meta.decision.clone();
+                    egui::ComboBox::from_id_salt("info_decision")
+                        .selected_text(cur_dec.label())
+                        .show_ui(ui, |ui| {
+                            for d in ModelDecision::all() {
+                                if ui.selectable_label(&cur_dec == d, d.label()).clicked() {
+                                    state.workspace.models[idx].meta.decision = d.clone();
+                                    changed = true;
+                                }
+                            }
+                        });
+                    ui.end_row();
+
+                    // Based on.
+                    ui.label(egui::RichText::new("Based on:").color(theme::fg2(dark)).size(12.0));
+                    let mut based_on = state.workspace.models[idx]
+                        .meta
+                        .based_on
+                        .clone()
+                        .unwrap_or_default();
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut based_on)
+                            .desired_width(200.0)
+                            .hint_text("parent model stem"),
+                    );
+                    if resp.changed() {
+                        state.workspace.models[idx].meta.based_on =
+                            if based_on.is_empty() { None } else { Some(based_on) };
+                        changed = true;
+                    }
+                    ui.end_row();
+
+                    // Tags.
+                    ui.label(egui::RichText::new("Tags:").color(theme::fg2(dark)).size(12.0));
+                    let mut tags_str = state.workspace.models[idx].meta.tags.join(", ");
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut tags_str)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("comma-separated"),
+                    );
+                    if resp.changed() {
+                        state.workspace.models[idx].meta.tags = tags_str
+                            .split(',')
+                            .map(|t| t.trim().to_string())
+                            .filter(|t| !t.is_empty())
+                            .collect();
+                        changed = true;
+                    }
+                    ui.end_row();
+                });
+
+            // Notes (multi-line).
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new("Notes:").color(theme::fg2(dark)).size(12.0));
+            let resp = ui.add(
+                egui::TextEdit::multiline(
+                    &mut state.workspace.models[idx].meta.notes,
+                )
+                .desired_rows(6)
+                .desired_width(f32::INFINITY),
+            );
+            if resp.changed() { changed = true; }
+
+            // ── Model Structure (from ferx_model_inspect via R) ──────────────
+            let stem = state.workspace.models[idx].model.stem.clone();
+            ui.add_space(12.0);
+            ui.separator();
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new("Model Structure").strong().size(12.0).color(theme::fg2(dark)));
+            ui.add_space(4.0);
+            if state.workspace.r_inspecting.contains(&stem) {
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new().size(14.0));
+                    ui.label(egui::RichText::new("Loading…").color(theme::fg3(dark)).size(11.0));
+                });
+            } else if state.workspace.r_inspect_failed.contains(&stem) {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("⚠").color(theme::ORANGE).size(11.0));
+                    ui.label(
+                        egui::RichText::new("Structure inspect failed")
+                            .color(theme::ORANGE)
+                            .size(11.0),
+                    );
+                    if ui.small_button("Retry").clicked() {
+                        state.workspace.r_inspect_failed.remove(&stem);
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "ferx_model_inspect() could not run. Possible causes:\n\
+                         • R or the ferx package is not installed\n\
+                         • The model file has a syntax error\n\
+                         Check the Settings tab for ferx detection status.",
+                    )
+                    .color(theme::fg3(dark))
+                    .size(11.0),
+                );
+            } else if let Some(info) = state.workspace.r_model_infos.get(&stem).cloned() {
+                egui::Grid::new("model_struct_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 4.0])
+                    .show(ui, |ui| {
+                        let lbl = |ui: &mut egui::Ui, s: &str| {
+                            ui.label(egui::RichText::new(s).color(theme::fg3(dark)).size(11.0).monospace());
+                        };
+                        let val = |ui: &mut egui::Ui, s: &str| {
+                            ui.label(egui::RichText::new(s).size(12.0));
+                        };
+
+                        if !info.model_type.is_empty() {
+                            lbl(ui, "Type");
+                            val(ui, &info.model_type);
+                            ui.end_row();
+                        }
+                        if !info.theta_names.is_empty() {
+                            lbl(ui, "Parameters");
+                            val(ui, &info.theta_names.join(", "));
+                            ui.end_row();
+                        }
+                        if !info.iiv.is_empty() {
+                            lbl(ui, "IIV");
+                            val(ui, &info.iiv.join(", "));
+                            ui.end_row();
+                        }
+                        if !info.residual.is_empty() {
+                            lbl(ui, "Residual");
+                            val(ui, &info.residual);
+                            ui.end_row();
+                        }
+                    });
+            } else {
+                ui.label(
+                    egui::RichText::new("R not available or ferx package not installed")
+                        .color(theme::fg3(dark))
+                        .size(11.0),
+                );
+            }
+        });
+
+    if changed {
+        save_meta_for(state, idx);
+    }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Reload editor buffer when the selected model changes.
+fn sync_editor_buffer(state: &mut AppState) {
+    let current_stem = state
+        .ui
+        .selected_model
+        .and_then(|i| state.workspace.models.get(i))
+        .map(|e| e.model.stem.clone());
+
+    if current_stem != state.ui.editor_loaded_stem {
+        if let Some(stem) = &current_stem {
+            if let Some(idx) = state.ui.selected_model {
+                state.ui.editor_buffer = state.workspace.models[idx].model.source.clone();
+                state.ui.editor_dirty = false;
+                state.ui.editor_loaded_stem = Some(stem.clone());
+            }
+        } else {
+            state.ui.editor_buffer.clear();
+            state.ui.editor_dirty = false;
+            state.ui.editor_loaded_stem = None;
+        }
+    }
+}
+
+fn save_meta_for(state: &mut AppState, _idx: usize) {
+    let dir = match &state.workspace.directory {
+        Some(d) => d.clone(),
+        None => return,
+    };
+    let meta_map: HashMap<String, _> = state
+        .workspace
+        .models
+        .iter()
+        .map(|e| (e.model.stem.clone(), e.meta.clone()))
+        .collect();
+    let _ = save_model_meta(&dir, &meta_map);
+}
+
+/// Syntax-highlight a .ferx source string into an egui LayoutJob.
+pub(crate) fn highlight_ferx(text: &str, dark: bool) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    let font = egui::FontId::monospace(12.0);
+
+    // Colour palette — dark mode uses bright/light colours; light mode uses
+    // saturated-but-dark colours so they read on a white/near-white background.
+    let (
+        col_plain,      // identifiers, values, plain body
+        col_comment,    // # …
+        col_header,     // [section]
+        col_param_kw,   // theta / omega / sigma / kappa
+        col_builtin,    // pk, one_cpt_oral, ode, …
+        col_option,     // method, maxiter, gradient, …
+        col_number,     // numeric literals
+    ) = if dark {(
+        theme::FG,
+        theme::FG3,
+        theme::ACCENT,
+        egui::Color32::from_rgb(0x86, 0xc1, 0xff),
+        theme::GREEN,
+        egui::Color32::from_rgb(0xe8, 0xb5, 0x56),
+        theme::YELLOW,
+    )} else {(
+        egui::Color32::from_rgb(0x0f, 0x11, 0x1a),   // near-black
+        egui::Color32::from_rgb(0x6a, 0x72, 0x8a),   // medium gray italic
+        egui::Color32::from_rgb(0x19, 0x63, 0xeb),   // dark blue
+        egui::Color32::from_rgb(0x17, 0x65, 0xd0),   // medium blue
+        egui::Color32::from_rgb(0x1a, 0x8a, 0x4a),   // dark green
+        egui::Color32::from_rgb(0x7c, 0x52, 0x00),   // dark amber
+        egui::Color32::from_rgb(0xb0, 0x60, 0x00),   // dark orange
+    )};
+
+    let plain  = |c: egui::Color32| egui::text::TextFormat { font_id: font.clone(), color: c, ..Default::default() };
+    let italic = |c: egui::Color32| egui::text::TextFormat { font_id: font.clone(), color: c, italics: true, ..Default::default() };
+
+    for line in text.split('\n') {
+        let tokens = tokenise_line(line);
+        let mut pos = 0usize;
+
+        for (start, end, kind) in &tokens {
+            if pos < *start {
+                job.append(&line[pos..*start], 0.0, plain(col_plain));
+            }
+            let fmt = match kind {
+                TokenKind::SectionHeader   => plain(col_header),
+                TokenKind::ParamKeyword    => plain(col_param_kw),
+                TokenKind::BuiltinFunction => plain(col_builtin),
+                TokenKind::OptionKey       => plain(col_option),
+                TokenKind::Number          => plain(col_number),
+                TokenKind::Comment         => italic(col_comment),
+                TokenKind::Plain           => plain(col_plain),
+            };
+            job.append(&line[*start..*end], 0.0, fmt);
+            pos = *end;
+        }
+
+        if pos < line.len() { job.append(&line[pos..], 0.0, plain(col_plain)); }
+        job.append("\n", 0.0, plain(col_plain));
+    }
+
+    job
+}
+
+// ── Formatting helpers ────────────────────────────────────────────────────────
+
+fn fmt_f64_4dp(v: f64) -> String {
+    if v.is_nan() { "—".to_string() } else { format!("{:.4}", v) }
+}
+fn fmt_f64_2dp(v: f64) -> String {
+    if v.is_nan() { "—".to_string() } else { format!("{:.2}", v) }
+}
+fn fmt_f64_1dp(v: f64) -> String {
+    if v.is_nan() { "—".to_string() } else { format!("{:.1}", v) }
+}
+fn fmt_f64_0dp(v: f64) -> String {
+    if v.is_nan() { "—".to_string() } else { format!("{:.0}", v) }
+}
+fn fmt_sig4(v: f64) -> String {
+    if v.is_nan() { "—".to_string() } else { format!("{:.4}", v) }
+}
+fn fmt_duration(secs: f64) -> String {
+    if secs <= 0.0 { return "—".to_string(); }
+    let s = secs as u64;
+    if s < 60 { format!("{s}s") }
+    else if s < 3600 { format!("{}m {:02}s", s / 60, s % 60) }
+    else { format!("{}h {:02}m", s / 3600, (s % 3600) / 60) }
+}
+
+fn shrink_label(ui: &mut egui::Ui, v: f64) {
+    let dark = ui.visuals().dark_mode;
+    if v.is_nan() {
+        ui.label(egui::RichText::new("—").color(theme::fg3(dark)).size(12.0));
+        return;
+    }
+    let color = if v < 20.0 { theme::fg2(dark) } else if v < 30.0 { theme::ORANGE } else { theme::RED };
+    ui.label(egui::RichText::new(format!("{:.1}%", v)).color(color).size(12.0));
+}
+
+fn kv(ui: &mut egui::Ui, key: &str, val: &str, color: egui::Color32) {
+    let dark = ui.visuals().dark_mode;
+    ui.label(egui::RichText::new(key).color(theme::fg2(dark)).size(11.0));
+    ui.label(egui::RichText::new(val).color(color).size(12.0).strong());
+}
+
+// Timestamp helpers — canonical implementations live in workers::run.
+use crate::workers::run::{now_iso, now_unix};
+
+// ── Context menu ──────────────────────────────────────────────────────────────
+
+/// Actions that can be triggered by the model-row context menu.
+enum CtxAction {
+    Duplicate,
+    ToggleReference,
+    OpenInFinder,
+    CopyName,
+    CopyModelPath,
+    CopyFolderPath,
+    ViewRunLog,
+    CompareWith(String), // target model stem
+    ViewRunRecord,
+    Delete,
+}
+
+fn apply_ctx_action(
+    ui:     &egui::Ui,
+    state:  &mut AppState,
+    idx:    usize,
+    action: CtxAction,
+) {
+    match action {
+        CtxAction::Duplicate => {
+            if let Some(m) = state.workspace.models.get(idx) {
+                let stem = m.model.stem.clone();
+                state.ui.duplicate_stem_buf =
+                    suggest_duplicate_stem(&stem, &state.workspace.models);
+                state.ui.pending_duplicate = Some(idx);
+            }
+        }
+        CtxAction::ToggleReference => {
+            state.ui.reference_model = if state.ui.reference_model == Some(idx) {
+                None
+            } else {
+                Some(idx)
+            };
+        }
+        CtxAction::OpenInFinder => {
+            if let Some(m) = state.workspace.models.get(idx) {
+                if let Some(parent) = m.model.path.parent() {
+                    let _ = open::that(parent);
+                }
+            }
+        }
+        CtxAction::CopyName => {
+            if let Some(m) = state.workspace.models.get(idx) {
+                ui.ctx().copy_text(m.model.stem.clone());
+                state.ui.status_message = format!("Copied \"{}\" to clipboard", m.model.stem);
+            }
+        }
+        CtxAction::CopyModelPath => {
+            if let Some(m) = state.workspace.models.get(idx) {
+                let path = m.model.path.to_string_lossy().to_string();
+                ui.ctx().copy_text(path.clone());
+                state.ui.status_message = format!("Copied model path to clipboard");
+            }
+        }
+        CtxAction::CopyFolderPath => {
+            if let Some(m) = state.workspace.models.get(idx) {
+                if let Some(parent) = m.model.path.parent() {
+                    let path = parent.to_string_lossy().to_string();
+                    ui.ctx().copy_text(path);
+                    state.ui.status_message = "Copied folder path to clipboard".to_string();
+                }
+            }
+        }
+        CtxAction::ViewRunLog => {
+            if let Some(m) = state.workspace.models.get(idx) {
+                if let Some(parent) = m.model.path.parent() {
+                    let log = parent.join(format!("{}_run.log", m.model.stem));
+                    if log.exists() {
+                        let _ = open::that(&log);
+                    } else {
+                        state.ui.status_message = format!("Run log not found: {}", log.display());
+                    }
+                }
+            }
+        }
+        CtxAction::CompareWith(target_stem) => {
+            if let Some(m) = state.workspace.models.get(idx) {
+                state.ui.compare_a = Some(m.model.stem.clone());
+                state.ui.compare_b = Some(target_stem);
+            }
+        }
+        CtxAction::ViewRunRecord => {
+            if let Some(m) = state.workspace.models.get(idx) {
+                // Jump to History tab and filter to this model.
+                state.ui.active_tab = crate::state::Tab::History;
+                state.ui.history_filter = m.model.stem.clone();
+            }
+        }
+        CtxAction::Delete => {
+            state.ui.pending_delete = Some(idx);
+        }
+    }
+}
+
+// ── Duplicate dialog ──────────────────────────────────────────────────────────
+
+fn show_duplicate_dialog(ctx: &egui::Context, state: &mut AppState) {
+    let Some(src_idx) = state.ui.pending_duplicate else { return };
+
+    let src_stem = state.workspace.models
+        .get(src_idx)
+        .map(|m| m.model.stem.clone())
+        .unwrap_or_default();
+
+    let mut close   = false;
+    let mut execute = false;
+
+    egui::Window::new("Duplicate Model")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            ui.set_min_width(340.0);
+            let dark = ui.visuals().dark_mode;
+            let dim  = if dark { theme::FG2 } else { egui::Color32::from_gray(90) };
+
+            ui.label(
+                egui::RichText::new(format!("Duplicating  \"{}\"", src_stem))
+                    .size(12.0)
+                    .color(dim),
+            );
+            ui.add_space(10.0);
+            ui.label("New model name:");
+            ui.add_space(4.0);
+
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut state.ui.duplicate_stem_buf)
+                    .desired_width(f32::INFINITY),
+            );
+            // Auto-focus the text field when the dialog first opens.
+            if resp.gained_focus() || resp.has_focus() {
+                // already focused
+            } else {
+                resp.request_focus();
+            }
+
+            // Validate — name must be non-empty and not already taken.
+            let new_stem = state.ui.duplicate_stem_buf.trim().to_string();
+            let conflict = state.workspace.models.iter().any(|m| m.model.stem == new_stem);
+            let can_ok   = !new_stem.is_empty() && !conflict;
+
+            if conflict {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("⚠  A model with this name already exists")
+                        .color(theme::ORANGE)
+                        .size(11.0),
+                );
+            }
+
+            ui.add_space(8.0);
+            ui.checkbox(
+                &mut state.ui.duplicate_set_as_child,
+                format!("Set as child of  \"{}\"  (updates tree lineage)", src_stem),
+            );
+            ui.label(
+                egui::RichText::new(
+                    "When checked, the new model's 'Based on' field is set to the source.")
+                    .size(10.0)
+                    .color(theme::fg3(dark)),
+            );
+
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() { close = true; }
+                ui.add_space(8.0);
+                if ui
+                    .add_enabled(
+                        can_ok,
+                        egui::Button::new(
+                            egui::RichText::new("Duplicate").color(egui::Color32::WHITE),
+                        )
+                        .fill(theme::ACCENT),
+                    )
+                    .clicked()
+                {
+                    execute = true;
+                }
+            });
+
+            // Enter key confirms when valid.
+            if can_ok && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                execute = true;
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                close = true;
+            }
+        });
+
+    if close   { state.ui.pending_duplicate = None; }
+    if execute {
+        do_duplicate(state, src_idx);
+        state.ui.pending_duplicate = None;
+    }
+}
+
+fn do_duplicate(state: &mut AppState, src_idx: usize) {
+    let Some(model) = state.workspace.models.get(src_idx) else { return };
+    let src_path  = model.model.path.clone();
+    let src_stem  = model.model.stem.clone();
+    let new_stem  = state.ui.duplicate_stem_buf.trim().to_string();
+    let set_child = state.ui.duplicate_set_as_child;
+    let Some(dir) = src_path.parent() else { return };
+    let dst_path  = dir.join(format!("{}.ferx", new_stem));
+
+    match std::fs::copy(&src_path, &dst_path) {
+        Ok(_) => {
+            // Establish tree lineage: persist based_on for the new model
+            // by merging into the existing meta map before the scan.
+            if set_child {
+                if let Some(dir) = &state.workspace.directory {
+                    let mut meta_map = crate::io::persistence::load_model_meta(dir);
+                    let mut new_meta = crate::domain::ModelMeta::default();
+                    new_meta.based_on = Some(src_stem.clone());
+                    meta_map.insert(new_stem.clone(), new_meta);
+                    let _ = save_model_meta(dir, &meta_map);
+                }
+            }
+            state.ui.status_message = format!("Created {new_stem}.ferx (child of {src_stem})");
+            state.trigger_scan();
+        }
+        Err(e) => {
+            state.ui.status_message = format!("Duplicate failed: {}", e);
+        }
+    }
+}
+
+/// Suggest the next available name for a duplicate.
+/// "run001" → "run002", "mymodel_3" → "mymodel_4", "abc" → "abc_2".
+fn suggest_duplicate_stem(stem: &str, models: &[crate::domain::ModelEntry]) -> String {
+    let taken: std::collections::HashSet<&str> = models.iter().map(|m| m.model.stem.as_str()).collect();
+
+    // Split stem into (prefix, number) or (stem, None).
+    let (prefix, start_n) = split_trailing_number(stem);
+    let base = prefix.trim_end_matches('_');
+
+    let mut n = start_n.unwrap_or(1) + 1;
+    loop {
+        let candidate = format!("{}{:0>3}", base, n);
+        if !taken.contains(candidate.as_str()) {
+            return candidate;
+        }
+        n += 1;
+        // safety valve
+        if n > 999 {
+            return format!("{}_copy", stem);
+        }
+    }
+}
+
+fn split_trailing_number(s: &str) -> (&str, Option<u32>) {
+    let digits_start = s
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| c.is_ascii_digit())
+        .last()
+        .map(|(i, _)| i);
+
+    match digits_start {
+        Some(i) if i < s.len() => {
+            let num: u32 = s[i..].parse().unwrap_or(0);
+            (&s[..i], Some(num))
+        }
+        _ => (s, None),
+    }
+}
+
+// ── Delete dialog ─────────────────────────────────────────────────────────────
+
+fn show_delete_dialog(ctx: &egui::Context, state: &mut AppState) {
+    let Some(del_idx) = state.ui.pending_delete else { return };
+
+    let stem = state.workspace.models
+        .get(del_idx)
+        .map(|m| m.model.stem.clone())
+        .unwrap_or_default();
+    let has_fitrx = state.workspace.models
+        .get(del_idx)
+        .and_then(|m| m.fitrx_path.as_ref())
+        .is_some();
+
+    // Block deletion while model is running.
+    let is_running = state.run.active_run
+        .as_ref()
+        .map(|r| r.record.model_stem == stem)
+        .unwrap_or(false);
+
+    let mut close   = false;
+    let mut execute = false;
+
+    egui::Window::new("Delete Model")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            ui.set_min_width(320.0);
+            let dark = ui.visuals().dark_mode;
+            let dim  = if dark { theme::FG2 } else { egui::Color32::from_gray(90) };
+
+            ui.label(
+                egui::RichText::new(format!("Delete  \"{}\"?", stem))
+                    .strong()
+                    .size(14.0),
+            );
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("This will permanently remove the .ferx model file.")
+                    .color(dim)
+                    .size(12.0),
+            );
+            if has_fitrx {
+                ui.label(
+                    egui::RichText::new("The .fitrx results bundle will also be deleted.")
+                        .color(dim)
+                        .size(12.0),
+                );
+            }
+            if is_running {
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new("⚠  Cannot delete — a run is in progress")
+                        .color(theme::ORANGE)
+                        .size(11.0),
+                );
+            }
+
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() { close = true; }
+                ui.add_space(8.0);
+                if ui
+                    .add_enabled(
+                        !is_running,
+                        egui::Button::new(
+                            egui::RichText::new("Delete").color(egui::Color32::WHITE),
+                        )
+                        .fill(theme::RED),
+                    )
+                    .clicked()
+                {
+                    execute = true;
+                }
+            });
+
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                close = true;
+            }
+        });
+
+    if close   { state.ui.pending_delete = None; }
+    if execute {
+        do_delete(state, del_idx);
+        state.ui.pending_delete = None;
+    }
+}
+
+fn show_new_model_dialog(ctx: &egui::Context, state: &mut AppState) {
+    if !state.ui.new_model_dialog { return; }
+
+    let mut close  = false;
+    let mut create = false;
+
+    egui::Window::new("New Model")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            ui.set_min_width(340.0);
+            let dark = ui.visuals().dark_mode;
+            let dim  = if dark { theme::FG2 } else { egui::Color32::from_gray(90) };
+
+            ui.label(egui::RichText::new("Create a new model from a template").strong().size(13.0));
+            ui.add_space(12.0);
+
+            // Template picker.
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Template:").color(dim).size(12.0));
+                egui::ComboBox::from_id_salt("new_model_template_combo")
+                    .selected_text(&state.ui.new_model_template)
+                    .width(140.0)
+                    .show_ui(ui, |ui| {
+                        for t in ["1cpt_oral","1cpt_iv","2cpt_oral","2cpt_iv","ode"] {
+                            ui.selectable_value(
+                                &mut state.ui.new_model_template, t.to_string(), t);
+                        }
+                    });
+            });
+
+            ui.add_space(8.0);
+
+            // Model name field.
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Model name:").color(dim).size(12.0));
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.ui.new_model_stem)
+                        .desired_width(160.0)
+                        .hint_text("e.g. run001"),
+                );
+                ui.label(egui::RichText::new(".ferx").color(dim).size(12.0));
+            });
+
+            // Warn if no working directory.
+            if state.workspace.directory.is_none() {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("⚠  No working directory — open one first")
+                        .color(theme::ORANGE).size(11.0),
+                );
+            }
+
+            ui.add_space(16.0);
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() { close = true; }
+                ui.add_space(8.0);
+                let can_create = !state.ui.new_model_stem.trim().is_empty()
+                    && state.workspace.directory.is_some()
+                    && state.workspace.settings.ferx_binary.is_some();
+                if ui
+                    .add_enabled(
+                        can_create,
+                        egui::Button::new(
+                            egui::RichText::new("Create").color(egui::Color32::WHITE),
+                        )
+                        .fill(theme::ACCENT),
+                    )
+                    .clicked()
+                {
+                    create = true;
+                }
+            });
+
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) { close = true; }
+            if ui.input(|i| i.key_pressed(egui::Key::Enter))
+                && !state.ui.new_model_stem.trim().is_empty()
+                && state.workspace.directory.is_some()
+            {
+                create = true;
+            }
+        });
+
+    if close { state.ui.new_model_dialog = false; }
+    if create {
+        do_create_model(state, ctx);
+        state.ui.new_model_dialog = false;
+    }
+}
+
+/// Spawn a background thread to create the template file, keeping the UI responsive.
+/// `Rscript` startup can take 1–5 s; blocking the egui frame loop is not acceptable.
+fn do_create_model(state: &mut AppState, ctx: &egui::Context) {
+    let Some(dir) = &state.workspace.directory else { return };
+    let stem = state.ui.new_model_stem.trim().to_string();
+    if stem.is_empty() { return; }
+
+    let path     = dir.join(format!("{stem}.ferx"));
+    let template = state.ui.new_model_template.clone();
+    let tx       = state.worker_tx.clone();
+    let ctx      = ctx.clone();
+
+    state.ui.status_message = format!("Creating {stem}.ferx…");
+
+    std::thread::spawn(move || {
+        match crate::io::r_extract::create_model_from_template(&path, &template) {
+            Ok(()) => {
+                let _ = tx.send(crate::workers::messages::WorkerMsg::ModelCreated(stem));
+            }
+            Err(e) => {
+                let _ = tx.send(crate::workers::messages::WorkerMsg::RTaskError {
+                    context: "new_model".to_string(),
+                    message: e,
+                });
+            }
+        }
+        ctx.request_repaint();
+    });
+}
+
+fn do_delete(state: &mut AppState, idx: usize) {
+    let Some(model) = state.workspace.models.get(idx) else { return };
+    let ferx_path  = model.model.path.clone();
+    let fitrx_path = model.fitrx_path.clone();
+    let stem       = model.model.stem.clone();
+
+    if let Err(e) = std::fs::remove_file(&ferx_path) {
+        state.ui.status_message = format!("Delete failed: {}", e);
+        return;
+    }
+    if let Some(p) = fitrx_path {
+        let _ = std::fs::remove_file(p); // best-effort
+    }
+
+    // Adjust indices pointing past the removed entry.
+    state.workspace.models.remove(idx);
+    for slot in [&mut state.ui.selected_model, &mut state.ui.reference_model] {
+        *slot = match *slot {
+            Some(i) if i == idx => None,
+            Some(i) if i > idx  => Some(i - 1),
+            other               => other,
+        };
+    }
+
+    state.ui.status_message = format!("Deleted {}.ferx", stem);
+}
+
+// ── Compare dialog ────────────────────────────────────────────────────────────
+
+fn show_compare_dialog(ctx: &egui::Context, state: &mut AppState) {
+    let (stem_a, stem_b) = match (&state.ui.compare_a, &state.ui.compare_b) {
+        (Some(a), Some(b)) => (a.clone(), b.clone()),
+        _ => return,
+    };
+
+    // Extract fit data before entering closures to avoid borrow conflicts.
+    let fit_a = state.workspace.models.iter()
+        .find(|m| m.model.stem == stem_a)
+        .and_then(|m| m.fit.clone());
+    let fit_b = state.workspace.models.iter()
+        .find(|m| m.model.stem == stem_b)
+        .and_then(|m| m.fit.clone());
+    let (fit_a, fit_b) = match (fit_a, fit_b) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return,
+    };
+
+    let mut close = false;
+
+    egui::Window::new(format!("Compare  {stem_a}  vs  {stem_b}"))
+        .collapsible(false)
+        .resizable(true)
+        .default_width(680.0)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            let dark = ui.visuals().dark_mode;
+            let dim  = theme::fg2(dark);
+
+            // ── Header summary ────────────────────────────────────────────────
+            ui.horizontal(|ui| {
+                let d_ofv = fit_b.ofv - fit_a.ofv;
+                let d_aic = fit_b.aic - fit_a.aic;
+                let ofv_col = if d_ofv < -3.84 { theme::GREEN }
+                              else if d_ofv > 0.0 { theme::ORANGE }
+                              else { theme::fg(dark) };
+                ui.label(egui::RichText::new(format!("ΔOFV: {d_ofv:+.3}")).color(ofv_col).size(13.0).strong());
+                ui.add_space(16.0);
+                ui.label(egui::RichText::new(format!("ΔAIC: {d_aic:+.2}")).color(dim).size(12.0));
+                ui.add_space(16.0);
+                let lrt = if d_ofv < -3.84 { "LRT: ✓ (p<0.05, 1 df)" }
+                          else if d_ofv < -5.99 { "LRT: ✓ (p<0.05, 2 df)" }
+                          else { "LRT: ✗" };
+                let lrt_col = if d_ofv < -5.99 { theme::GREEN } else if d_ofv < -3.84 { theme::GREEN } else { theme::RED };
+                ui.label(egui::RichText::new(lrt).color(lrt_col).size(11.0));
+            });
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(4.0);
+
+            // ── Parameter comparison table ────────────────────────────────────
+            egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+                egui::Grid::new("compare_grid")
+                    .num_columns(7)
+                    .spacing([10.0, 4.0])
+                    .min_col_width(50.0)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        // Header.
+                        let h = |ui: &mut egui::Ui, s: &str| {
+                            ui.label(egui::RichText::new(s).color(dim).size(10.0).strong());
+                        };
+                        h(ui, "PARAM");
+                        h(ui, &format!("{stem_a} est."));
+                        h(ui, &format!("{stem_a} RSE%"));
+                        h(ui, &format!("{stem_b} est."));
+                        h(ui, &format!("{stem_b} RSE%"));
+                        h(ui, "Δ est.");
+                        h(ui, "Δ %");
+                        ui.end_row();
+
+                        let fg = theme::fg(dark);
+
+                        // THETA section.
+                        for _ in 0..7 { ui.label(egui::RichText::new("── THETA ──").color(dim).size(10.0)); }
+                        ui.end_row();
+                        compare_param_rows(ui, fg, dark,
+                            &fit_a.theta_names, &fit_b.theta_names,
+                            &fit_a.theta, &fit_b.theta,
+                            &fit_a.se_theta, &fit_b.se_theta);
+
+                        // OMEGA diagonal section.
+                        if fit_a.n_eta > 0 || fit_b.n_eta > 0 {
+                            for _ in 0..7 { ui.label(egui::RichText::new("── OMEGA (diag) ──").color(dim).size(10.0)); }
+                            ui.end_row();
+                            let oa: Vec<f64> = (0..fit_a.n_eta).filter_map(|i| fit_a.omega_value(i,i)).collect();
+                            let ob: Vec<f64> = (0..fit_b.n_eta).filter_map(|i| fit_b.omega_value(i,i)).collect();
+                            compare_param_rows(ui, fg, dark,
+                                &fit_a.omega_names, &fit_b.omega_names,
+                                &oa, &ob, &fit_a.se_omega, &fit_b.se_omega);
+                        }
+
+                        // SIGMA section.
+                        if !fit_a.sigma.is_empty() || !fit_b.sigma.is_empty() {
+                            for _ in 0..7 { ui.label(egui::RichText::new("── SIGMA ──").color(dim).size(10.0)); }
+                            ui.end_row();
+                            compare_param_rows(ui, fg, dark,
+                                &fit_a.sigma_names, &fit_b.sigma_names,
+                                &fit_a.sigma, &fit_b.sigma,
+                                &fit_a.se_sigma, &fit_b.se_sigma);
+                        }
+                    });
+            });
+
+            ui.add_space(10.0);
+            if ui.button("Close").clicked() { close = true; }
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) { close = true; }
+        });
+
+    if close {
+        state.ui.compare_a = None;
+        state.ui.compare_b = None;
+    }
+}
+
+/// Render one block of parameter comparison rows inside a 7-column Grid.
+fn compare_param_rows(
+    ui:       &mut egui::Ui,
+    fg:       egui::Color32,
+    dark:     bool,
+    names_a:  &[String],
+    names_b:  &[String],
+    ests_a:   &[f64],
+    ests_b:   &[f64],
+    ses_a:    &[f64],
+    ses_b:    &[f64],
+) {
+    for (i, name) in names_a.iter().enumerate() {
+        let est_a = ests_a.get(i).copied().unwrap_or(f64::NAN);
+        let se_a  = ses_a.get(i).copied().unwrap_or(f64::NAN);
+        let rse_a = if est_a != 0.0 && se_a.is_finite() { (se_a/est_a).abs()*100.0 } else { f64::NAN };
+
+        let (est_b, rse_b) = names_b.iter().position(|n| n == name)
+            .map(|j| {
+                let eb = ests_b.get(j).copied().unwrap_or(f64::NAN);
+                let sb = ses_b.get(j).copied().unwrap_or(f64::NAN);
+                let rb = if eb != 0.0 && sb.is_finite() { (sb/eb).abs()*100.0 } else { f64::NAN };
+                (eb, rb)
+            })
+            .unwrap_or((f64::NAN, f64::NAN));
+
+        let d_abs = est_b - est_a;
+        let d_pct = if est_a.abs() > 1e-10 { d_abs / est_a.abs() * 100.0 } else { f64::NAN };
+        let d_col = if d_pct.abs() > 20.0 { theme::ORANGE } else { theme::fg2(dark) };
+
+        ui.label(egui::RichText::new(name).monospace().size(11.0).color(fg));
+        ui.label(egui::RichText::new(fmt_sig4(est_a)).monospace().size(11.0).color(fg));
+        ui.label(egui::RichText::new(fmt_f64_1dp(rse_a)).size(11.0).color(rse_color(rse_a)));
+        ui.label(egui::RichText::new(fmt_sig4(est_b)).monospace().size(11.0).color(fg));
+        ui.label(egui::RichText::new(fmt_f64_1dp(rse_b)).size(11.0).color(rse_color(rse_b)));
+        ui.label(egui::RichText::new(fmt_sig4(d_abs)).monospace().size(11.0).color(d_col));
+        ui.label(egui::RichText::new(
+            if d_pct.is_finite() { format!("{d_pct:+.1}%") } else { "—".to_string() })
+            .size(11.0).color(d_col));
+        ui.end_row();
+    }
+}
+
