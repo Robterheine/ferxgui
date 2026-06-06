@@ -354,6 +354,8 @@ pub struct UiState {
     pub tree_canvas_rect: egui::Rect,
 
     // ---- Context-menu dialogs ----
+    /// Directory awaiting a name-and-confirm bookmark dialog (path + draft label).
+    pub pending_bookmark: Option<(std::path::PathBuf, String)>,
     /// Model awaiting a duplicate-rename dialog (index into workspace.models).
     pub pending_duplicate: Option<usize>,
     /// Text buffer for the new stem name in the duplicate dialog.
@@ -502,6 +504,7 @@ impl Default for UiState {
             tree_export_pending:  false,
             tree_export_awaiting: false,
             tree_canvas_rect:     egui::Rect::NOTHING,
+            pending_bookmark: None,
             pending_duplicate: None,
             duplicate_stem_buf: String::new(),
             duplicate_set_as_child: true,
