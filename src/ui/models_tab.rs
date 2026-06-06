@@ -86,25 +86,29 @@ fn show_top_bar(ui: &mut egui::Ui, state: &mut AppState) {
             state.trigger_scan();
         }
 
-        // Bookmark star — always visible when a directory is open.
+        // "Bookmark project" pill — replaces the ambiguous ☆ star.
+        // Uses a labeled button so it cannot be confused with model-row stars.
         if let Some(dir) = state.workspace.directory.clone() {
             let already_bookmarked = state.workspace.bookmarks
                 .iter()
                 .any(|b| b.path == dir);
-            let star = if already_bookmarked { "★" } else { "☆" };
-            let star_color = if already_bookmarked {
-                theme::STAR
+            let (btn_label, btn_fill, btn_fg, tip) = if already_bookmarked {
+                (
+                    "✓ Bookmark project",
+                    theme::ACCENT,
+                    egui::Color32::WHITE,
+                    "Remove this directory from project bookmarks",
+                )
             } else {
-                if dark { theme::FG3 } else { egui::Color32::from_gray(170) }
-            };
-            let tip = if already_bookmarked {
-                "Remove bookmark for this directory"
-            } else {
-                "Bookmark this directory"
+                let fill = if dark { theme::BG3 } else { egui::Color32::TRANSPARENT };
+                let fg   = if dark { theme::FG3 } else { egui::Color32::from_gray(120) };
+                ("+ Bookmark project", fill, fg, "Save this directory as a project bookmark")
             };
             if ui.add(
-                egui::Button::new(egui::RichText::new(star).color(star_color).size(14.0))
-                    .frame(false),
+                egui::Button::new(
+                    egui::RichText::new(btn_label).size(11.0).color(btn_fg),
+                )
+                .fill(btn_fill),
             ).on_hover_text(tip).clicked() {
                 if already_bookmarked {
                     state.workspace.bookmarks.retain(|b| b.path != dir);
@@ -125,11 +129,11 @@ fn show_top_bar(ui: &mut egui::Ui, state: &mut AppState) {
             }
         }
 
-        // Bookmarks dropdown — always shown (even when empty, as a hint).
+        // Projects dropdown — lists all bookmarked directories.
         let bm_label = if state.workspace.bookmarks.is_empty() {
-            "Bookmarks"
+            "Projects"
         } else {
-            "Bookmarks ▾"
+            "Projects ▾"
         };
         egui::ComboBox::from_id_salt("bookmarks_combo")
             .selected_text(egui::RichText::new(bm_label).size(12.0).color(label_fg))
@@ -137,7 +141,7 @@ fn show_top_bar(ui: &mut egui::Ui, state: &mut AppState) {
             .show_ui(ui, |ui| {
                 if state.workspace.bookmarks.is_empty() {
                     ui.label(
-                        egui::RichText::new("No bookmarks yet — click ☆ to add one")
+                        egui::RichText::new("No bookmarks yet — use '+ Bookmark project' to add one")
                             .color(label_fg)
                             .size(11.0),
                     );
