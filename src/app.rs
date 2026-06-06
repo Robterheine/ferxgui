@@ -1047,6 +1047,11 @@ fn render_about_popup(ctx: &egui::Context, state: &mut AppState) {
                             .size(11.0).color(dim));
                         ui.add_space(8.0);
                         ui.hyperlink_to(
+                            "github.com/Robterheine/ferxgui  —  FerX GUI source code",
+                            "https://github.com/Robterheine/ferxgui",
+                        );
+                        ui.add_space(6.0);
+                        ui.hyperlink_to(
                             "ferx-nlme.github.io  —  FerX NLME documentation",
                             "https://ferx-nlme.github.io/",
                         );
