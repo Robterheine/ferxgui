@@ -198,6 +198,20 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.2.1 (2026-06-07) — UI polish and bug fixes
+
+**Models tab — project bookmarks redesign**
+- Replaced the ambiguous ☆/★ bookmark icon (which clashed visually with the per-model ★ column) with an explicit **"+ Bookmark project" / "✓ Bookmark project"** pill button.
+- Adding a bookmark now opens a name dialog so the project can be given a meaningful label; the directory path is shown as context, Enter confirms, Escape cancels.
+- The bookmarks dropdown is renamed to **Projects**.
+
+**Bookmark dialog bug fixes (from code review)**
+- Switching directories while the name dialog was open could bookmark the wrong directory; `set_directory` now closes the dialog.
+- Pressing Enter with an empty name field no longer silently dismisses the dialog without saving.
+- Escape key now dismisses the dialog (parity with all other dialogs).
+
+---
+
 ### v0.2.0 (2026-06-06) — bug-fix release
 
 **Security**
