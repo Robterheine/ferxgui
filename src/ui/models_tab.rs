@@ -2616,7 +2616,8 @@ fn apply_ctx_action(
 
 fn show_bookmark_dialog(ctx: &egui::Context, state: &mut AppState) {
     let Some((ref dir, ref mut label)) = state.ui.pending_bookmark else { return };
-    let dir = dir.clone(); // avoid borrow conflicts below
+    let dir     = dir.clone();              // avoid borrow conflicts below
+    let dir_str = dir.display().to_string(); // computed once, not per-frame inside closure
 
     let mut confirm = false;
     let mut cancel  = false;
@@ -2631,7 +2632,7 @@ fn show_bookmark_dialog(ctx: &egui::Context, state: &mut AppState) {
             let dim  = if dark { theme::FG2 } else { egui::Color32::from_gray(90) };
 
             ui.label(
-                egui::RichText::new(dir.display().to_string())
+                egui::RichText::new(&dir_str)
                     .size(11.0)
                     .color(dim),
             );
@@ -2645,13 +2646,19 @@ fn show_bookmark_dialog(ctx: &egui::Context, state: &mut AppState) {
             );
             resp.request_focus();
 
-            if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            let can_confirm = !label.trim().is_empty();
+            if resp.lost_focus()
+                && can_confirm
+                && ui.input(|i| i.key_pressed(egui::Key::Enter))
+            {
                 confirm = true;
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                cancel = true;
             }
 
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                let can_confirm = !label.trim().is_empty();
                 if ui.add_enabled(
                     can_confirm,
                     egui::Button::new("Add bookmark"),
@@ -2666,14 +2673,12 @@ fn show_bookmark_dialog(ctx: &egui::Context, state: &mut AppState) {
 
     if confirm {
         let label = label.trim().to_string();
-        if !label.is_empty() {
-            state.workspace.bookmarks.push(
-                crate::io::persistence::Bookmark { label, path: dir },
-            );
-            if let Some(app_dir) = &state.workspace.app_dir.clone() {
-                if let Err(e) = crate::io::persistence::save_bookmarks(app_dir, &state.workspace.bookmarks) {
-                    state.ui.status_message = format!("Could not save bookmarks: {e}");
-                }
+        state.workspace.bookmarks.push(
+            crate::io::persistence::Bookmark { label, path: dir },
+        );
+        if let Some(app_dir) = &state.workspace.app_dir.clone() {
+            if let Err(e) = crate::io::persistence::save_bookmarks(app_dir, &state.workspace.bookmarks) {
+                state.ui.status_message = format!("Could not save bookmarks: {e}");
             }
         }
         state.ui.pending_bookmark = None;

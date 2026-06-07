@@ -1073,6 +1073,8 @@ impl AppState {
             self.ui.status_message = warn;
         }
         self.trigger_scan();
+        // Close any in-progress bookmark dialog — it holds a path for the old directory.
+        self.ui.pending_bookmark = None;
     }
 
     /// Reference model OFV for ΔOFV column.
