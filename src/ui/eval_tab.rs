@@ -298,14 +298,36 @@ fn scatter_with_loess(
     pt_color:  egui::Color32,
     ref_color: egui::Color32,
     loess_col: egui::Color32,
-    _log:      bool,
+    log:       bool,
     kind:      PlotKind,
 ) {
     let dark = ui.visuals().dark_mode;
     let title_col = theme::fg2(dark);
 
+    // Apply log10 transform when requested; drop non-positive values.
+    let work_pts: Vec<[f64; 2]> = if log {
+        points.iter()
+            .filter(|p| p[0] > 0.0 && p[1] > 0.0)
+            .map(|p| [p[0].log10(), p[1].log10()])
+            .collect()
+    } else {
+        points.to_vec()
+    };
+    let kind = if log {
+        match kind {
+            PlotKind::Identity { lo, hi } => PlotKind::Identity {
+                lo: lo.max(1e-10).log10(),
+                hi: hi.max(1e-10).log10(),
+            },
+            other => other,
+        }
+    } else {
+        kind
+    };
+    let pts_nonempty = !work_pts.is_empty();
+
     // Compute LOESS before entering the Plot closure (avoids borrow issues).
-    let loess_pts = loess(points, 0.35);
+    let loess_pts = loess(&work_pts, 0.35);
 
     ui.vertical(|ui| {
         ui.label(egui::RichText::new(title).size(11.0).color(title_col).strong());
@@ -315,8 +337,8 @@ fn scatter_with_loess(
             .show_grid(true)
             .label_formatter(|_, v| format!("x={:.3}  y={:.3}", v.x, v.y))
             .show(ui, |p| {
-                if !points.is_empty() {
-                    p.points(Points::new(PlotPoints::new(points.to_vec()))
+                if pts_nonempty {
+                    p.points(Points::new(PlotPoints::new(work_pts))
                         .radius(2.2).color(pt_color));
                 }
                 // LOESS trendline.
@@ -354,8 +376,8 @@ fn show_individual_fits(ui: &mut egui::Ui, state: &mut AppState, _idx: usize, da
     let n_subj = data.subject_ids.len();
     if n_subj == 0 { no_predictions(ui, dark); return; }
 
-    let spp   = state.ui.eval_subjects_per_page.max(1).min(6);
-    let pages = (n_subj + spp - 1) / spp;
+    let spp   = state.ui.eval_subjects_per_page.clamp(1, 6);
+    let pages = n_subj.div_ceil(spp);
     let page  = (state.ui.eval_subject_idx / spp).min(pages.saturating_sub(1));
     let start = page * spp;
     let end   = (start + spp).min(n_subj);
@@ -392,7 +414,7 @@ fn show_individual_fits(ui: &mut egui::Ui, state: &mut AppState, _idx: usize, da
 
     let avail = ui.available_size();
     let cols  = if spp <= 1 { 1usize } else { 2 };
-    let rows  = (spp + cols - 1) / cols;
+    let rows  = spp.div_ceil(cols);
     let pw    = avail.x / cols as f32 - 6.0;
     let ph    = (avail.y / rows as f32 - 28.0).max(80.0);
 
@@ -409,8 +431,7 @@ fn show_individual_fits(ui: &mut egui::Ui, state: &mut AppState, _idx: usize, da
     let mut row_idx = 0;
     for chunk_start in (start..end).step_by(cols) {
         ui.horizontal(|ui| {
-            for si in chunk_start..(chunk_start + cols).min(end) {
-                let subj_id = &subject_ids[si];
+            for (si, subj_id) in (chunk_start..).zip(&subject_ids[chunk_start..(chunk_start + cols).min(end)]) {
                 let rows_for = match &state.ui.eval_data {
                     Some(d) => d.rows.iter().filter(|r| &r.id == subj_id).cloned().collect::<Vec<_>>(),
                     None    => vec![],
@@ -573,7 +594,7 @@ fn show_export_dialog(ctx: &egui::Context, state: &mut AppState, model_idx: usiz
                             ("PNG 600",  "png600"),
                             ("SVG",      "svg"),
                         ] {
-                            let sel = &state.ui.eval_export_format == val;
+                            let sel = state.ui.eval_export_format == val;
                             if ui.add(
                                 egui::Button::new(egui::RichText::new(label).size(11.0)
                                     .color(if sel { egui::Color32::WHITE } else { dim }))
@@ -662,7 +683,7 @@ fn show_export_dialog(ctx: &egui::Context, state: &mut AppState, model_idx: usiz
             if let Ok(mut wtr) = csv::Writer::from_path(&tmp_csv) {
                 let _ = wtr.write_record(["ID","TIME","DV","PRED","IPRED","CWRES","IWRES"]);
                 for r in &pred_rows {
-                    let _ = wtr.write_record(&[
+                    let _ = wtr.write_record([
                         &r.id,
                         &r.time.to_string(),  &r.dv.to_string(),
                         &r.pred.to_string(),  &r.ipred.to_string(),
@@ -863,11 +884,11 @@ fn show_eta_cov(ui: &mut egui::Ui, state: &mut AppState, idx: usize, dark: bool)
 
     // Auto-populate data path from run history (same as Run pill).
     let needs_path = state.ui.eval_eta_cov_data_path.as_deref()
-        .map_or(true, |p| !p.exists());
+        .is_none_or(|p| !p.exists());
     if needs_path {
         state.ui.eval_eta_cov_data_path = state.run.run_history
             .iter().rev()
-            .find(|r| r.model_stem == stem && r.data_path.as_ref().map_or(false, |p| p.exists()))
+            .find(|r| r.model_stem == stem && r.data_path.as_ref().is_some_and(|p| p.exists()))
             .and_then(|r| r.data_path.clone());
     }
 
@@ -1039,12 +1060,12 @@ fn show_eta_cov_launcher(
     // as the Run pill.  Only triggers when the path is not already set or
     // the currently stored path no longer exists on disk.
     let needs_path = state.ui.eval_eta_cov_data_path.as_deref()
-        .map_or(true, |p| !p.exists());
+        .is_none_or(|p| !p.exists());
     if needs_path {
         state.ui.eval_eta_cov_data_path = state.run.run_history
             .iter()
             .rev()
-            .find(|r| r.model_stem == stem && r.data_path.as_ref().map_or(false, |p| p.exists()))
+            .find(|r| r.model_stem == stem && r.data_path.as_ref().is_some_and(|p| p.exists()))
             .and_then(|r| r.data_path.clone());
     }
 

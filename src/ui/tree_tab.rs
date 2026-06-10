@@ -225,7 +225,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
 
         // Mouse position in logical coords.
         let mouse_logical = ui.input(|i| i.pointer.hover_pos())
-            .map(|sp| to_logical(sp));
+            .map(to_logical);
 
         let mut new_hovered: Option<String> = None;
         let mut clicked_stem: Option<String> = None;
@@ -525,7 +525,7 @@ fn show_info_panel(
 
             // DW
             if let Some(dw) = f.dw_statistic {
-                let dw_col = if dw < 1.5 || dw > 2.5 { theme::ORANGE } else { theme::GREEN };
+                let dw_col = if !(1.5..=2.5).contains(&dw) { theme::ORANGE } else { theme::GREEN };
                 info_row(ui, "Durbin-Watson", &format!("{dw:.3}"), dw_col, dark);
             }
 

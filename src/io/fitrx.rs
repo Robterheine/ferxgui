@@ -211,7 +211,7 @@ pub fn read_predictions(fitrx_path: &Path) -> Result<Option<EvalData>, FitrxErro
         .from_reader(entry);
 
     let headers = rdr.headers()
-        .map_err(|e| FitrxError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?
+        .map_err(|e| FitrxError::Io(std::io::Error::other(e)))?
         .clone();
 
     let col = |name: &str| -> Option<usize> {
@@ -233,7 +233,7 @@ pub fn read_predictions(fitrx_path: &Path) -> Result<Option<EvalData>, FitrxErro
     let mut rows = Vec::new();
     for result in rdr.records() {
         let rec = result.map_err(|e| FitrxError::Io(
-            std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            std::io::Error::other(e)))?;
         rows.push(PredRow {
             id:      col_id.and_then(|c| rec.get(c)).unwrap_or("").to_string(),
             time:    parse(&rec, col_time),
@@ -265,7 +265,7 @@ pub fn read_ebes(fitrx_path: &Path) -> Result<Option<crate::domain::EbesData>, F
         .from_reader(entry);
 
     let headers = rdr.headers()
-        .map_err(|e| FitrxError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?
+        .map_err(|e| FitrxError::Io(std::io::Error::other(e)))?
         .clone();
 
     let col = |name: &str| headers.iter().position(|h| h.eq_ignore_ascii_case(name));
@@ -295,7 +295,7 @@ pub fn read_ebes(fitrx_path: &Path) -> Result<Option<crate::domain::EbesData>, F
     let mut rows = Vec::new();
     for result in rdr.records() {
         let rec = result.map_err(|e| FitrxError::Io(
-            std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            std::io::Error::other(e)))?;
         rows.push(crate::domain::EbesRow {
             id:              col_id.and_then(|c| rec.get(c)).unwrap_or("").to_string(),
             ofv_contribution: col_ofv.map(|c| parse(&rec, c)).unwrap_or(f64::NAN),
@@ -369,7 +369,7 @@ pub fn read_trace_csv(path: &Path) -> std::io::Result<Vec<TraceRow>> {
         .from_path(path)?;
 
     let headers = rdr.headers()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+        .map_err(std::io::Error::other)?
         .clone();
 
     let col = |names: &[&str]| -> Option<usize> {
@@ -397,7 +397,7 @@ pub fn read_trace_csv(path: &Path) -> std::io::Result<Vec<TraceRow>> {
 
     let mut rows = Vec::new();
     for result in rdr.records() {
-        let rec = result.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let rec = result.map_err(std::io::Error::other)?;
         rows.push(TraceRow {
             iteration:      parse(&rec, col_iter),
             ofv:            parse(&rec, col_ofv),

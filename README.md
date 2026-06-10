@@ -198,6 +198,31 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.3.0 (2026-06-10) — statistical fixes, security hardening, performance
+
+**Statistical correctness**
+- **LRT in Compare dialog**: degrees of freedom are now computed from the difference in estimated-parameter counts between the two models, with a chi-square critical-value table for df 1–20. The previous code had an unreachable branch and always reported 1 df regardless of model complexity.
+- **Log-scale GOF toggle**: the "Log scale" checkbox in the Evaluation tab now actually log₁₀-transforms the plotted points, the LOESS trendline, and the identity reference line. Non-positive observations are filtered out. Previously the toggle had no visual effect.
+- **Parameter comparison tooltip**: the ÷ (shrinkage) branch now shows the reciprocal ratio for parameters that decreased from initial to final estimate; previously both branches showed the same ×ratio string.
+
+**Security**
+- Notification strings containing special characters (e.g. `"` on macOS, `'` on Windows) are now properly escaped before insertion into AppleScript / PowerShell command strings.
+
+**Performance**
+- `push_log` rebuilt the full cached log string on every incoming line (O(n²) with a 5,000-line ring buffer). The common path is now an O(1) append; the buffer-full eviction path is O(n) drain of the front entry — a significant improvement when R floods stdout.
+- Windows orphan-run liveness poll throttled from 100 ms to 500 ms, eliminating ~10 `tasklist` subprocess spawns per second per reconnected run.
+
+**Code quality**
+- Removed dead `ModelUpdated` (1,256-byte enum variant and the source of the `large_enum_variant` clippy warning), `VersionCheckResult`, and the phantom "Update available" header badge — no version check was ever implemented.
+- `RunRecord` in `WorkerMsg::RunFinished` is now boxed; reduces the channel message size from 296 to ~72 bytes.
+- Removed unused `window_geometry` field from `Settings` (was serialised but never read back).
+- Sim Plot `==`/`!=` column filters now use a 1 × 10⁻⁹ relative epsilon instead of exact float equality.
+- Log-axis label in Sim Plot uses portable ASCII `log10(...)` instead of Unicode subscript characters that may be absent from the bundled font.
+- Guarded `.unwrap()` calls replaced with `match`/`if let`/`.expect()`.
+- 63 clippy warnings resolved (from 69 down to 6); remaining 6 are pre-existing `too_many_arguments` and one `dead_code` field.
+
+---
+
 ### v0.2.1 (2026-06-07) — UI polish and bug fixes
 
 **Models tab — project bookmarks redesign**

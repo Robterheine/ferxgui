@@ -35,9 +35,6 @@ pub struct Settings {
     /// Path to RStudio (optional; shows button in header when set).
     pub rstudio_path: Option<PathBuf>,
     pub theme: Theme,
-    /// Saved window geometry (x, y, width, height).
-    #[serde(default)]
-    pub window_geometry: Option<[f32; 4]>,
     /// Whether the sidebar is collapsed to icon-only mode.
     #[serde(default)]
     pub sidebar_collapsed: bool,
@@ -58,7 +55,6 @@ impl Default for Settings {
             ferx_binary: default_ferx_binary(),
             rstudio_path: None,
             theme: Theme::Dark,
-            window_geometry: None,
             sidebar_collapsed: false,
             file_extensions: vec![
                 "ferx".into(),

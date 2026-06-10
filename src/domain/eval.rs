@@ -1,5 +1,4 @@
 /// Prediction-level data loaded from `predictions.csv` inside a `.fitrx` bundle.
-
 /// One row of `predictions.csv`.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]

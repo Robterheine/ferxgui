@@ -206,7 +206,7 @@ impl SirResult {
     /// Persist to disk next to the `.fitrx` bundle.
     pub fn save(&self, fitrx_path: &Path) -> std::io::Result<()> {
         let json = serde_json::to_string(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         std::fs::write(Self::cache_path(fitrx_path), json)
     }
 

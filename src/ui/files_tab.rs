@@ -19,7 +19,6 @@
 /// - Edit/Save/Discard for both text and CSV.
 ///   Saving a .ferx file also refreshes the Models tab editor and triggers rescan.
 /// - Plot view for CSV: X / Y pickers, unity line, LOESS, color-by column.
-
 use std::path::PathBuf;
 
 use eframe::egui;
@@ -222,7 +221,7 @@ fn show_file_list(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
                         let prefix = if is_dir { "📁  " } else { "" };
                         let text = egui::RichText::new(format!("{prefix}{name}"))
                             .size(12.0)
-                            .color(if is_dir { theme::fg(dark) } else { theme::fg(dark) });
+                            .color(theme::fg(dark));
                         let text = if is_dir { text.strong() } else { text };
                         let resp = ui.add(
                             egui::Label::new(text).sense(egui::Sense::click()).truncate()
@@ -248,9 +247,8 @@ fn show_file_list(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
                     if resp.double_clicked() {
                         if is_dir { nav_into  = Some(path.clone()); }
                         else       { open_file = Some(path.clone()); }
-                    } else if resp.clicked() {
-                        if !is_dir { select = Some(path.clone()); }
-                    }
+                    } else if resp.clicked()
+                        && !is_dir { select = Some(path.clone()); }
 
                     let p = path.clone();
                     resp.context_menu(|ui| {
@@ -311,8 +309,8 @@ fn show_preview_header(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let mode = state.ui.files_view_mode;
             match mode {
-                FilesViewMode::Text => {
-                    if state.ui.files_text_dirty {
+                FilesViewMode::Text
+                    if state.ui.files_text_dirty => {
                         if ui.small_button("Discard").clicked() {
                             if let Some(path) = state.ui.files_selected.clone() {
                                 load_file(state, path);
@@ -325,7 +323,6 @@ fn show_preview_header(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
                             save_text_file(state);
                         }
                     }
-                }
                 FilesViewMode::Table => {
                     // Table ↔ Plot switcher.
                     if ui.add(
@@ -342,15 +339,14 @@ fn show_preview_header(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
                                 load_file(state, path);
                             }
                         }
-                        if state.ui.files_csv_dirty {
-                            if ui.add(
+                        if state.ui.files_csv_dirty
+                            && ui.add(
                                 egui::Button::new(egui::RichText::new("Save")
                                     .color(egui::Color32::WHITE))
                                     .fill(theme::ACCENT).min_size(egui::vec2(0.0, 20.0)),
                             ).clicked() {
                                 save_csv_file(state);
                             }
-                        }
                         if ui.small_button("Done").clicked() {
                             state.ui.files_csv_edit_mode = false;
                             state.ui.files_csv_editing   = None;
@@ -359,14 +355,13 @@ fn show_preview_header(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
                         state.ui.files_csv_edit_mode = true;
                     }
                 }
-                FilesViewMode::Plot => {
+                FilesViewMode::Plot
                     if ui.add(
                         egui::Button::new(egui::RichText::new("Table").size(11.0))
                             .min_size(egui::vec2(0.0, 20.0)),
-                    ).clicked() {
+                    ).clicked() => {
                         state.ui.files_view_mode = FilesViewMode::Table;
                     }
-                }
                 _ => {}
             }
         });
@@ -892,8 +887,8 @@ fn rebuild_entries(state: &mut AppState) {
         }
     }
 
-    folders.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-    files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    folders.sort_by_key(|a| a.name.to_lowercase());
+    files.sort_by_key(|a| a.name.to_lowercase());
     folders.extend(files);
     state.ui.files_entries = folders;
 }

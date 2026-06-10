@@ -312,16 +312,6 @@ fn render_header(ctx: &egui::Context, state: &mut AppState) {
                     }
                 }
 
-                // Update available badge.
-                if let Some(ver) = &state.ui.update_available {
-                    ui.add_space(8.0);
-                    ui.label(
-                        egui::RichText::new(format!("Update available: {}", ver))
-                            .color(theme::YELLOW)
-                            .size(11.0),
-                    );
-                }
-
                 // Right-side buttons.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(8.0);
@@ -531,10 +521,9 @@ fn render_settings(ui: &mut egui::Ui, state: &mut AppState) {
 
                 // "Re-detect" button when detection failed — lets user retry
                 // without restarting the app (useful after fixing PATH/R install).
-                if state.workspace.ferx_binary_source == FerxBinarySource::NotFound
-                    || state.workspace.ferx_binary_source == FerxBinarySource::Detecting
-                {
-                    if ui.small_button("Re-detect").clicked() {
+                if (state.workspace.ferx_binary_source == FerxBinarySource::NotFound
+                    || state.workspace.ferx_binary_source == FerxBinarySource::Detecting)
+                    && ui.small_button("Re-detect").clicked() {
                         state.workspace.ferx_binary_source = FerxBinarySource::Detecting;
                         let tx  = state.worker_tx.clone();
                         let ctx = ui.ctx().clone();
@@ -546,7 +535,6 @@ fn render_settings(ui: &mut egui::Ui, state: &mut AppState) {
                             ctx.request_repaint();
                         });
                     }
-                }
             });
 
             // ferx package version, when known.
@@ -1274,9 +1262,7 @@ fn save_tree_png(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let dir = state.workspace.directory
-        .as_ref()
-        .map(|p| p.clone())
+    let dir = state.workspace.directory.clone()
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     let path = dir.join(format!("tree_{ts}.png"));
 

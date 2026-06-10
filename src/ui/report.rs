@@ -6,7 +6,6 @@
 ///
 /// An "Export HTML" button writes a self-contained, timestamped HTML file
 /// to the model directory — suitable for inclusion in a modelling report.
-
 use eframe::egui;
 
 use crate::app::theme;
@@ -243,7 +242,7 @@ fn show_diagnostics_section(ui: &mut egui::Ui, fit: &FitSummary, dark: bool) {
     let dim = theme::fg3(dark);
 
     if let Some(dw) = fit.dw_statistic {
-        let ok  = dw >= 1.5 && dw <= 2.5;
+        let ok  = (1.5..=2.5).contains(&dw);
         let col = if ok { theme::GREEN } else { theme::ORANGE };
         let verdict = if dw < 1.5 {
             "positive autocorrelation"
@@ -649,7 +648,7 @@ fn generate_html(
     // ── Diagnostics ──
     b.push_str("<section><h2>Diagnostics</h2><table class=\"kv\">\n");
     if let Some(dw) = fit.dw_statistic {
-        let ok  = dw >= 1.5 && dw <= 2.5;
+        let ok  = (1.5..=2.5).contains(&dw);
         let cls = if ok { "ok" } else { "warn" };
         let verdict = if dw < 1.5 { "positive autocorrelation" }
                       else if dw > 2.5 { "negative autocorrelation" }

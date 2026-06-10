@@ -17,23 +17,17 @@ pub enum WorkerMsg {
     /// Directory scan completed; full refreshed model list.
     ScanComplete(Vec<ModelEntry>),
 
-    /// A single model entry was updated (e.g. after a run completes or a file changes).
-    ModelUpdated(ModelEntry),
-
     /// A line of stdout / stderr from the active ferx subprocess.
     RunLine(String),
 
     /// The ferx subprocess exited.
     RunFinished {
         exit_code: i32,
-        record: RunRecord,
+        record: Box<RunRecord>,
     },
 
     /// The ferx subprocess could not be spawned or was killed with an error.
     RunError(String),
-
-    /// GitHub version check result: `Some(version_string)` when a newer release exists.
-    VersionCheckResult(Option<String>),
 
     /// Result of the background ferx detection via the R package.
     /// `Some((rscript_path, ferx_version, r_version))` on success.

@@ -11,10 +11,9 @@
 ///    Child handle, using PID polling instead.
 ///
 /// Both variants send the same `WorkerMsg` variants back to the main thread.
-
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
@@ -190,7 +189,7 @@ fn fresh_run_worker_inner(
 
         // ── Tail log every ~300 ms (3 × 100 ms ticks) ──────────────────
         tail_tick = tail_tick.wrapping_add(1);
-        if tail_tick % 3 == 0 {
+        if tail_tick.is_multiple_of(3) {
             log_reader.drain(&tx);
         }
 
@@ -261,12 +260,13 @@ fn orphan_worker_inner(
 
         // ── Tail log every ~500 ms (5 × 100 ms ticks) ──────────────────
         tick = tick.wrapping_add(1);
-        if tick % 5 == 0 {
+        if tick.is_multiple_of(5) {
             log_reader.drain(&tx);
         }
 
-        // ── PID liveness check ──────────────────────────────────────────
-        if !RunManifest::is_pid_alive(pid) {
+        // ── PID liveness check (every 5 ticks = 500 ms) ─────────────────
+        // Throttled so Windows doesn't spawn `tasklist` at 10 Hz.
+        if tick.is_multiple_of(5) && !RunManifest::is_pid_alive(pid) {
             log_reader.drain(&tx);
             // We don't know the exit code from a reconnected run.
             finish(record, 0, &manifest_path, &tx);
@@ -356,11 +356,11 @@ fn kill_hard(pid: u32) {
 }
 
 /// Send `RunFinished` and remove the manifest.
-fn finish(mut record: RunRecord, exit_code: i32, manifest_path: &PathBuf, tx: &Sender<WorkerMsg>) {
+fn finish(mut record: RunRecord, exit_code: i32, manifest_path: &Path, tx: &Sender<WorkerMsg>) {
     record.completed = Some(now_iso());
     record.status = if exit_code == 0 { JobStatus::Completed } else { JobStatus::Failed };
     RunManifest::remove(manifest_path);
-    let _ = tx.send(WorkerMsg::RunFinished { exit_code, record });
+    let _ = tx.send(WorkerMsg::RunFinished { exit_code, record: Box::new(record) });
 }
 
 // ---------------------------------------------------------------------------
@@ -451,5 +451,5 @@ pub fn now_iso() -> String {
 }
 
 fn is_leap(y: u32) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
 }

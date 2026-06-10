@@ -438,7 +438,7 @@ fn show_distributions(
     let sir_ci    = find_sir_ci(sir, param);
 
     let n = samples.len();
-    let n_bins = ((n as f64).sqrt() as usize).max(8).min(40);
+    let n_bins = ((n as f64).sqrt() as usize).clamp(8, 40);
 
     let s_min = samples.iter().cloned().fold(f64::INFINITY, f64::min);
     let s_max = samples.iter().cloned().fold(f64::NEG_INFINITY, f64::max);

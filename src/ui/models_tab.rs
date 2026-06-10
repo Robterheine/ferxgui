@@ -860,12 +860,14 @@ fn show_editor_pill(ui: &mut egui::Ui, state: &mut AppState) {
                 // Text editor with syntax highlighting.
                 // Cache the layout job across frames; only recompute when the buffer or theme changes.
                 let cache_valid = state.ui.editor_layout_cache.as_ref()
-                    .map_or(false, |(t, d, _)| t == &state.ui.editor_buffer && *d == dark);
+                    .is_some_and(|(t, d, _)| t == &state.ui.editor_buffer && *d == dark);
                 if !cache_valid {
                     let job = highlight_ferx(&state.ui.editor_buffer, dark);
                     state.ui.editor_layout_cache = Some((state.ui.editor_buffer.clone(), dark, job));
                 }
-                let cached_job = state.ui.editor_layout_cache.as_ref().unwrap().2.clone();
+                let cached_job = state.ui.editor_layout_cache.as_ref()
+                    .expect("layout cache populated unconditionally above")
+                    .2.clone();
                 let mut layouter = move |ui: &egui::Ui, _text: &str, _wrap: f32| {
                     ui.fonts(|f| f.layout_job(cached_job.clone()))
                 };
@@ -912,7 +914,7 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
             .rev()
             .find(|r| {
                 r.model_stem == stem
-                    && r.data_path.as_ref().map_or(false, |p| p.exists())
+                    && r.data_path.as_ref().is_some_and(|p| p.exists())
             })
             .and_then(|r| r.data_path.clone());
     }
@@ -1118,25 +1120,24 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
                     let already_queued = state.run.run_queue.iter().any(|q| q.stem == stem);
                     if already_queued {
                         state.ui.status_message = format!("{stem} is already in the queue");
-                    } else {
-                    let model_path = state.workspace.models[idx].model.path.clone();
-                    let data_path = state.ui.run_data_path.clone().unwrap();
-                    state.run.run_queue.push_back(crate::domain::QueuedRun {
-                        stem: stem.clone(),
-                        model_path,
-                        data_path,
-                        method: state.ui.run_method.clone(),
-                        covariance: state.ui.run_covariance,
-                        gradient: state.ui.run_gradient.clone(),
-                        settings: state.ui.run_extra_args.clone(),
-                        threads: state.ui.run_threads,
-                        optimizer_trace: state.ui.run_optimizer_trace,
-                        export_tables: state.ui.run_export_tables,
-                        run_sir_after: state.ui.run_sir_after_fit,
-                    });
-                    let n = state.run.run_queue.len();
-                    state.ui.status_message = format!("Queued {stem} ({n} in queue)");
-                    } // else: already_queued
+                    } else if let Some(data_path) = state.ui.run_data_path.clone() {
+                        let model_path = state.workspace.models[idx].model.path.clone();
+                        state.run.run_queue.push_back(crate::domain::QueuedRun {
+                            stem: stem.clone(),
+                            model_path,
+                            data_path,
+                            method: state.ui.run_method.clone(),
+                            covariance: state.ui.run_covariance,
+                            gradient: state.ui.run_gradient.clone(),
+                            settings: state.ui.run_extra_args.clone(),
+                            threads: state.ui.run_threads,
+                            optimizer_trace: state.ui.run_optimizer_trace,
+                            export_tables: state.ui.run_export_tables,
+                            run_sir_after: state.ui.run_sir_after_fit,
+                        });
+                        let n = state.run.run_queue.len();
+                        state.ui.status_message = format!("Queued {stem} ({n} in queue)");
+                    }
                 }
 
                 if running {
@@ -1640,7 +1641,7 @@ fn show_output_pill(ui: &mut egui::Ui, state: &mut AppState) {
 
                             // Row 5: IWRES diagnostics (ferx >= 0.1.5 — only shown when available)
                             if let Some(dw) = fit.dw_statistic {
-                                let dw_color = if dw < 1.5 || dw > 2.5 {
+                                let dw_color = if !(1.5..=2.5).contains(&dw) {
                                     theme::ORANGE
                                 } else {
                                     theme::GREEN
@@ -2169,7 +2170,7 @@ fn draw_init_final_cell(
         let tip = if ratio >= 1.0 {
             format!("×{:.2}  (init {:.4} → final {:.4})", ratio, initial, estimate)
         } else {
-            format!("×{:.2}  (init {:.4} → final {:.4})", ratio, initial, estimate)
+            format!("÷{:.2}  (init {:.4} → final {:.4})", 1.0 / ratio, initial, estimate)
         };
         response.on_hover_text(tip);
     }
@@ -2567,7 +2568,7 @@ fn apply_ctx_action(
             if let Some(m) = state.workspace.models.get(idx) {
                 let path = m.model.path.to_string_lossy().to_string();
                 ui.ctx().copy_text(path.clone());
-                state.ui.status_message = format!("Copied model path to clipboard");
+                state.ui.status_message = "Copied model path to clipboard".to_string();
             }
         }
         CtxAction::CopyFolderPath => {
@@ -2805,8 +2806,10 @@ fn do_duplicate(state: &mut AppState, src_idx: usize) {
             if set_child {
                 if let Some(dir) = &state.workspace.directory {
                     let mut meta_map = crate::io::persistence::load_model_meta(dir);
-                    let mut new_meta = crate::domain::ModelMeta::default();
-                    new_meta.based_on = Some(src_stem.clone());
+                    let new_meta = crate::domain::ModelMeta {
+                        based_on: Some(src_stem.clone()),
+                        ..Default::default()
+                    };
                     meta_map.insert(new_stem.clone(), new_meta);
                     let _ = save_model_meta(dir, &meta_map);
                 }
@@ -3139,10 +3142,24 @@ fn show_compare_dialog(ctx: &egui::Context, state: &mut AppState) {
                 ui.add_space(16.0);
                 ui.label(egui::RichText::new(format!("ΔAIC: {d_aic:+.2}")).color(dim).size(12.0));
                 ui.add_space(16.0);
-                let lrt = if d_ofv < -3.84 { "LRT: ✓ (p<0.05, 1 df)" }
-                          else if d_ofv < -5.99 { "LRT: ✓ (p<0.05, 2 df)" }
-                          else { "LRT: ✗" };
-                let lrt_col = if d_ofv < -5.99 { theme::GREEN } else if d_ofv < -3.84 { theme::GREEN } else { theme::RED };
+                let df = fit_b.n_parameters.abs_diff(fit_a.n_parameters);
+                // Chi-square critical values (p=0.05, upper tail) for df 1..=20.
+                const CHI2_P05: [f64; 20] = [
+                    3.841, 5.991, 7.815, 9.488, 11.070,
+                    12.592, 14.067, 15.507, 16.919, 18.307,
+                    19.675, 21.026, 22.362, 23.685, 24.996,
+                    26.296, 27.587, 28.869, 30.144, 31.410,
+                ];
+                let (lrt, lrt_col) = if df == 0 {
+                    ("LRT: — (Δdf=0)".to_string(), theme::fg2(dark))
+                } else {
+                    let threshold = CHI2_P05.get(df.saturating_sub(1)).copied().unwrap_or(f64::MAX);
+                    if -d_ofv > threshold {
+                        (format!("LRT: ✓ (p<0.05, {df} df)"), theme::GREEN)
+                    } else {
+                        (format!("LRT: ✗ ({df} df)"), theme::RED)
+                    }
+                };
                 ui.label(egui::RichText::new(lrt).color(lrt_col).size(11.0));
             });
             ui.add_space(6.0);

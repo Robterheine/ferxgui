@@ -2,7 +2,6 @@
 ///
 /// Layout: fixed left panel (cards + pinned Plot button), plot canvas on the right.
 /// All computation is pure Rust — no R required.
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -353,8 +352,8 @@ fn show_cards(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
         }
         if let Some(i) = remove_fi { state.sim.filters.remove(i); }
 
-        if state.sim.filters.len() < 6 {
-            if ui.add(
+        if state.sim.filters.len() < 6
+            && ui.add(
                 egui::Button::new(egui::RichText::new("+ Add filter").size(11.0))
                     .min_size(egui::vec2(ui.available_width(), 26.0)),
             ).clicked() {
@@ -362,7 +361,6 @@ fn show_cards(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
                 if let Some(c) = cols.first() { row.col = c.clone(); }
                 state.sim.filters.push(row);
             }
-        }
     });
 
     // ── REFERENCE LINES ───────────────────────────────────────────────────
@@ -400,8 +398,8 @@ fn show_cards(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
         }
         if let Some(i) = remove_rl { state.sim.ref_lines.remove(i); }
 
-        if state.sim.ref_lines.len() < 6 {
-            if ui.add(
+        if state.sim.ref_lines.len() < 6
+            && ui.add(
                 egui::Button::new(egui::RichText::new("+ Add line").size(11.0))
                     .min_size(egui::vec2(ui.available_width(), 26.0)),
             ).clicked() {
@@ -416,7 +414,6 @@ fn show_cards(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
                 let idx = state.sim.ref_lines.len() % colors.len();
                 state.sim.ref_lines.push(RefLine::new(0.0, "", colors[idx]));
             }
-        }
     });
 
     // ── OBSERVED DATA OVERLAY ─────────────────────────────────────────────
@@ -585,17 +582,18 @@ fn show_plot_panel(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
         });
     });
 
-    if state.sim.result.is_none() {
-        ui.centered_and_justified(|ui| {
-            ui.label(
-                egui::RichText::new("Load a simulation file and click Plot.")
-                    .color(theme::fg3(dark)).size(13.0),
-            );
-        });
-        return;
-    }
-
-    let result = state.sim.result.as_ref().unwrap();
+    let result = match state.sim.result.as_ref() {
+        Some(r) => r,
+        None => {
+            ui.centered_and_justified(|ui| {
+                ui.label(
+                    egui::RichText::new("Load a simulation file and click Plot.")
+                        .color(theme::fg3(dark)).size(13.0),
+                );
+            });
+            return;
+        }
+    };
     let times  = &result.times;
     let smooth      = state.sim.smooth;
     let smooth_frac = state.sim.smooth_frac as f64;
@@ -603,7 +601,7 @@ fn show_plot_panel(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
     let maybe_log   = |v: f64| -> f64 { if log_y && v > 0.0 { v.log10() } else { v } };
 
     let y_label = if log_y {
-        format!("log₁₀({})", state.sim.y_col)
+        format!("log10({})", state.sim.y_col)
     } else {
         state.sim.y_col.clone()
     };
@@ -873,8 +871,8 @@ fn compute_quantiles(
             if !mask[i] { continue; }
             let cv = col_data[i];
             let keep = match (nval, fr.op.as_str()) {
-                (Some(v), "==") => cv == v,
-                (Some(v), "!=") => cv != v,
+                (Some(v), "==") => (cv - v).abs() < 1e-9 * (1.0 + v.abs()),
+                (Some(v), "!=") => (cv - v).abs() >= 1e-9 * (1.0 + v.abs()),
                 (Some(v), ">")  => cv >  v,
                 (Some(v), "<")  => cv <  v,
                 (Some(v), ">=") => cv >= v,

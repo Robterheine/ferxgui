@@ -3,7 +3,6 @@
 ///
 /// Layout:  `{app_dir}/running/{run_id}.runmfst`
 /// Strategy: write to `{path}.tmp`, then `fs::rename` (atomic on same FS).
-
 use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
@@ -35,7 +34,7 @@ impl RunManifest {
     pub fn write(&self, path: &Path) -> std::io::Result<()> {
         let tmp = path.with_extension("tmp");
         let json = serde_json::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         std::fs::write(&tmp, json)?;
         std::fs::rename(&tmp, path)
     }

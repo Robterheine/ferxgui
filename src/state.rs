@@ -249,8 +249,6 @@ pub struct UiState {
     pub sidebar_collapsed: bool,
     /// Toast / status bar message (cleared after a timeout).
     pub status_message: String,
-    /// Non-empty when a newer version is available.
-    pub update_available: Option<String>,
 
     // ---- Editor pill ----
     /// Text currently in the editor.  Reloaded whenever selected_model changes.
@@ -456,7 +454,6 @@ impl Default for UiState {
             model_status_filter: ModelStatusFilter::All,
             sidebar_collapsed: false,
             status_message: String::new(),
-            update_available: None,
             editor_buffer: String::new(),
             editor_dirty: false,
             editor_loaded_stem: None,
@@ -704,10 +701,23 @@ impl RunState {
     pub fn push_log(&mut self, line: String) {
         if self.log_buffer.len() == Self::LOG_CAPACITY {
             self.log_buffer.pop_front();
+            self.log_buffer.push_back(line.clone());
+            // Eviction path: remove the first line from the cached text by
+            // slicing off up to and including the first newline, then append.
+            match self.log_text.find('\n') {
+                Some(nl) => { self.log_text.drain(..=nl); }
+                None     => { self.log_text.clear(); return; }
+            }
+            self.log_text.push('\n');
+            self.log_text.push_str(&line);
+        } else {
+            // Fast path: append only.
+            if !self.log_text.is_empty() {
+                self.log_text.push('\n');
+            }
+            self.log_text.push_str(&line);
+            self.log_buffer.push_back(line);
         }
-        self.log_buffer.push_back(line);
-        // Rebuild the cached join only on change, not every frame.
-        self.log_text = self.log_buffer.iter().cloned().collect::<Vec<_>>().join("\n");
     }
 
     pub fn save_history(&self, app_dir: Option<&PathBuf>) -> Option<String> {
@@ -738,10 +748,12 @@ impl AppState {
         let (tx, rx) = mpsc::channel::<WorkerMsg>();
         let workspace = WorkspaceState::load();
         let run = RunState::load(workspace.app_dir.as_ref());
-        let mut ui = UiState::default();
-        ui.sidebar_collapsed = workspace.settings.sidebar_collapsed;
-        ui.files_cwd = workspace.settings.working_directory.clone();
-        ui.files_active_exts = workspace.settings.file_extensions.iter().cloned().collect();
+        let ui = UiState {
+            sidebar_collapsed: workspace.settings.sidebar_collapsed,
+            files_cwd: workspace.settings.working_directory.clone(),
+            files_active_exts: workspace.settings.file_extensions.iter().cloned().collect(),
+            ..Default::default()
+        };
 
         Self {
             ui,
@@ -768,9 +780,9 @@ impl AppState {
                 for m in &models {
                     if let Some(fitrx) = &m.fitrx_path {
                         let stem = m.model.stem.clone();
-                        if !self.workspace.sir_results.contains_key(&stem) {
+                        if let std::collections::hash_map::Entry::Vacant(e) = self.workspace.sir_results.entry(stem) {
                             if let Some(sir) = crate::domain::SirResult::load_if_fresh(fitrx) {
-                                self.workspace.sir_results.insert(stem, sir);
+                                e.insert(sir);
                             }
                         }
                     }
@@ -800,17 +812,11 @@ impl AppState {
                     self.workspace.models.iter().position(|m| m.model.stem == s)
                 });
             }
-            ModelUpdated(entry) => {
-                if let Some(idx) = self.workspace.models.iter().position(|m| {
-                    m.model.stem == entry.model.stem
-                }) {
-                    self.workspace.models[idx] = entry;
-                }
-            }
             RunLine(line) => {
                 self.run.push_log(line);
             }
             RunFinished { exit_code, record } => {
+                let record  = *record;
                 let success = exit_code == 0;
                 let stem    = record.model_stem.clone();
                 let export_tables = self.run.active_run.as_ref()
@@ -907,9 +913,6 @@ impl AppState {
                 self.run.push_log(format!("[error] {}", msg));
                 self.run.active_run = None;
                 self.ui.status_message = format!("Run error: {}", msg);
-            }
-            VersionCheckResult(ver) => {
-                self.ui.update_available = ver;
             }
             RInspectComplete { stem, info } => {
                 self.workspace.r_inspecting.remove(&stem);

@@ -3,7 +3,6 @@
 /// Scripts are embedded as raw string literals so the binary is self-contained.
 /// Both `inspect_model` and `compute_vpc` are blocking and must be called from
 /// a background thread.
-
 use std::path::Path;
 
 use crate::domain::{CheckInitResult, EtaCovResult, RModelInfo, SirCi, SirResult, VpcConfig, VpcResult};
@@ -992,10 +991,7 @@ pub fn find_rscript() -> Option<std::path::PathBuf> {
     }
 
     // 3. Per-platform well-known locations.
-    for p in platform_rscript_candidates() {
-        if p.is_file() { return Some(p); }
-    }
-    None
+    platform_rscript_candidates().into_iter().find(|p| p.is_file())
 }
 
 #[cfg(windows)]
