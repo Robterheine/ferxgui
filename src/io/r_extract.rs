@@ -675,11 +675,29 @@ lloq_val  <- if (!is.null(cfg$lloq)  && !is.na(as.numeric(cfg$lloq)))  as.numeri
 uloq_val  <- if (!is.null(cfg$uloq)  && !is.na(as.numeric(cfg$uloq)))  as.numeric(cfg$uloq)  else NULL
 facet_val <- if (!is.null(cfg$facet) && nchar(cfg$facet) > 0) cfg$facet else "wrap"
 
-vpc_theme <- if (!is.null(cfg$band_color) && nchar(cfg$band_color) > 0) {
-  vpc::new_vpc_theme(update = list(sim_pi_fill = cfg$band_color, sim_median_fill = cfg$band_color))
-} else {
-  vpc::new_vpc_theme()
+# Build the vpc theme from the appearance config (display-only options).
+theme_upd <- list()
+if (!is.null(cfg$band_color) && nchar(cfg$band_color) > 0) {
+  theme_upd$sim_pi_fill     <- cfg$band_color
+  theme_upd$sim_median_fill <- cfg$band_color
 }
+if (!is.null(cfg$sim_pi_alpha))     theme_upd$sim_pi_alpha     <- cfg$sim_pi_alpha
+if (!is.null(cfg$sim_median_alpha)) theme_upd$sim_median_alpha <- cfg$sim_median_alpha
+if (!is.null(cfg$obs_color) && nchar(cfg$obs_color) > 0) {
+  theme_upd$obs_color        <- cfg$obs_color
+  theme_upd$obs_median_color <- cfg$obs_color
+  theme_upd$obs_ci_color     <- cfg$obs_color
+}
+if (!is.null(cfg$obs_median_linetype))  theme_upd$obs_median_linetype  <- cfg$obs_median_linetype
+if (!is.null(cfg$obs_median_linewidth)) theme_upd$obs_median_linewidth <- cfg$obs_median_linewidth
+if (!is.null(cfg$obs_ci_linetype))      theme_upd$obs_ci_linetype      <- cfg$obs_ci_linetype
+if (!is.null(cfg$obs_ci_linewidth))     theme_upd$obs_ci_linewidth     <- cfg$obs_ci_linewidth
+# Empty bin-separator colour means "hide": map to NA.
+if (!is.null(cfg$bin_separators_color)) {
+  theme_upd$bin_separators_color <- if (nchar(cfg$bin_separators_color) > 0) cfg$bin_separators_color else NA
+}
+if (!is.null(cfg$loq_color) && nchar(cfg$loq_color) > 0) theme_upd$loq_color <- cfg$loq_color
+vpc_theme <- if (length(theme_upd) > 0) vpc::new_vpc_theme(update = theme_upd) else vpc::new_vpc_theme()
 
 pl <- if (identical(vpc_type, "censored")) {
   suppressWarnings(vpc::vpc_cens(

@@ -16,7 +16,7 @@ use egui_plot::{HLine, Legend, Line, Plot, PlotPoints, Points, Polygon, VLine};
 use crate::app::theme;
 use crate::domain::{VpcConfig, VpcResult};
 use crate::io::r_extract;
-use crate::state::{AppState, VpcOpts};
+use crate::state::{AppState, VpcLineStyle, VpcOpts};
 use crate::workers::messages::WorkerMsg;
 
 // ---------------------------------------------------------------------------
@@ -481,6 +481,7 @@ fn show_options(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
         }
         ui.checkbox(&mut o.show_grid_h, "Horizontal grid lines");
         ui.checkbox(&mut o.show_grid_v, "Vertical grid lines");
+
         ui.add_space(6.0);
         egui::Grid::new("vpc_color_grid").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
             ui.label(egui::RichText::new("Band colour").size(11.0));
@@ -490,6 +491,74 @@ fn show_options(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
             ui.color_edit_button_rgb(&mut o.obs_color);
             ui.end_row();
         });
+
+        // ── Theme (mirrors vpc::new_vpc_theme) ────────────────────────────
+        ui.add_space(6.0);
+        ui.separator();
+        ui.label(egui::RichText::new("THEME").size(9.5).strong().color(theme::fg3(dark)));
+        ui.add_space(4.0);
+        let t = &mut o.theme;
+
+        let style_combo = |ui: &mut egui::Ui, id: &str, val: &mut VpcLineStyle| {
+            egui::ComboBox::from_id_salt(id)
+                .selected_text(val.label())
+                .width(90.0)
+                .show_ui(ui, |ui| {
+                    for s in VpcLineStyle::ALL {
+                        if ui.selectable_label(*val == s, s.label()).clicked() { *val = s; }
+                    }
+                });
+        };
+
+        egui::Grid::new("vpc_theme_grid").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+            ui.label(egui::RichText::new("Sim PI opacity").size(11.0));
+            ui.add(egui::Slider::new(&mut t.sim_pi_alpha, 0.0..=1.0).fixed_decimals(2));
+            ui.end_row();
+            ui.label(egui::RichText::new("Sim median opacity").size(11.0));
+            ui.add(egui::Slider::new(&mut t.sim_median_alpha, 0.0..=1.0).fixed_decimals(2));
+            ui.end_row();
+
+            ui.label(egui::RichText::new("Obs median line").size(11.0));
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut t.obs_median_width).speed(0.1).range(0.5..=5.0).fixed_decimals(1));
+                style_combo(ui, "vpc_obs_med_style", &mut t.obs_median_style);
+            });
+            ui.end_row();
+            ui.label(egui::RichText::new("Obs 5th/95th line").size(11.0));
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut t.obs_ci_width).speed(0.1).range(0.5..=5.0).fixed_decimals(1));
+                style_combo(ui, "vpc_obs_ci_style", &mut t.obs_ci_style);
+            });
+            ui.end_row();
+
+            if !is_censored {
+                ui.label(egui::RichText::new("Obs point size").size(11.0));
+                ui.add(egui::DragValue::new(&mut t.obs_point_size).speed(0.1).range(0.5..=8.0).fixed_decimals(1));
+                ui.end_row();
+            }
+
+            ui.label(egui::RichText::new("Bin separators").size(11.0));
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut t.bin_sep_show, "");
+                ui.add_enabled_ui(t.bin_sep_show, |ui| {
+                    ui.color_edit_button_rgb(&mut t.bin_sep_color);
+                });
+            });
+            ui.end_row();
+
+            if is_censored {
+                ui.label(egui::RichText::new("LOQ line colour").size(11.0));
+                ui.color_edit_button_rgb(&mut t.loq_color);
+                ui.end_row();
+            }
+        });
+
+        ui.add_space(6.0);
+        if ui.button("Reset appearance").clicked() {
+            o.theme = crate::state::VpcTheme::default();
+            o.band_color = [0.2, 0.533, 0.8];
+            o.obs_color  = [0.0, 0.0, 0.0];
+        }
     });
 }
 
@@ -525,8 +594,10 @@ fn build_config(state: &AppState, idx: usize) -> Option<VpcConfig> {
         (parsed.len() >= 2).then_some(parsed)
     } else { None };
 
-    let [r, g, b] = o.band_color;
-    let band_color = format!("#{:02x}{:02x}{:02x}", (r*255.) as u8, (g*255.) as u8, (b*255.) as u8);
+    let hex = |[r, g, b]: [f32; 3]| format!("#{:02x}{:02x}{:02x}",
+        (r*255.) as u8, (g*255.) as u8, (b*255.) as u8);
+    let band_color = hex(o.band_color);
+    let t = &o.theme;
     let lloq = o.lloq_str.trim().parse::<f64>().ok();
     let uloq = o.uloq_str.trim().parse::<f64>().ok();
     let stratify: Vec<String> = [o.stratify1.trim(), o.stratify2.trim()]
@@ -546,6 +617,15 @@ fn build_config(state: &AppState, idx: usize) -> Option<VpcConfig> {
         vpc_type: o.vpc_type.clone(), lloq, uloq,
         pred_corr: o.pred_corr, pred_corr_lower_bnd: o.pred_corr_lower_bnd,
         stratify, facet: o.facet.clone(),
+        obs_color: hex(o.obs_color),
+        sim_pi_alpha: t.sim_pi_alpha as f64,
+        sim_median_alpha: t.sim_median_alpha as f64,
+        obs_median_linetype: t.obs_median_style.r_name().to_string(),
+        obs_median_linewidth: t.obs_median_width as f64,
+        obs_ci_linetype: t.obs_ci_style.r_name().to_string(),
+        obs_ci_linewidth: t.obs_ci_width as f64,
+        bin_separators_color: if t.bin_sep_show { hex(t.bin_sep_color) } else { String::new() },
+        loq_color: hex(t.loq_color),
     })
 }
 
@@ -609,6 +689,15 @@ fn ensure_pkg_check(ui: &egui::Ui, state: &mut AppState) {
 // Plot
 // ---------------------------------------------------------------------------
 
+/// Map a `VpcLineStyle` to an egui_plot `LineStyle`.
+fn line_style(s: VpcLineStyle) -> egui_plot::LineStyle {
+    match s {
+        VpcLineStyle::Solid  => egui_plot::LineStyle::Solid,
+        VpcLineStyle::Dashed => egui_plot::LineStyle::Dashed { length: 8.0 },
+        VpcLineStyle::Dotted => egui_plot::LineStyle::Dotted { spacing: 4.0 },
+    }
+}
+
 fn show_vpc_plot(ui: &mut egui::Ui, vpc: &VpcResult, opts: &VpcOpts, dark: bool) {
     if vpc.vpc_dat.is_empty() && vpc.aggr_obs.is_empty() {
         return hint(ui, "VPC returned no data — check the dataset and binning.");
@@ -631,14 +720,24 @@ fn show_vpc_plot(ui: &mut egui::Ui, vpc: &VpcResult, opts: &VpcOpts, dark: bool)
     let plot_h   = (panel_h - label_h).max(60.0);
 
     // Colors
+    let t = &opts.theme;
     let [br, bg, bb] = opts.band_color;
     let (ir, ig, ib) = ((br*255.) as u8, (bg*255.) as u8, (bb*255.) as u8);
-    let pi_fill    = egui::Color32::from_rgba_unmultiplied(ir, ig, ib, 55);
-    let med_fill   = egui::Color32::from_rgba_unmultiplied(ir, ig, ib, 100);
+    let a8 = |a: f32| (a.clamp(0.0, 1.0) * 255.0) as u8;
+    let pi_fill    = egui::Color32::from_rgba_unmultiplied(ir, ig, ib, a8(t.sim_pi_alpha));
+    let med_fill   = egui::Color32::from_rgba_unmultiplied(ir, ig, ib, a8(t.sim_median_alpha));
     let pi_stroke  = egui::Stroke::new(0.5, egui::Color32::from_rgba_unmultiplied(ir, ig, ib, 140));
     let med_stroke = egui::Stroke::new(0.5, egui::Color32::from_rgba_unmultiplied(ir, ig, ib, 200));
     let [or_, og, ob] = opts.obs_color;
     let obs_col = egui::Color32::from_rgb((or_*255.) as u8, (og*255.) as u8, (ob*255.) as u8);
+    let bin_sep_col = {
+        let [r, g, b] = t.bin_sep_color;
+        egui::Color32::from_rgba_unmultiplied((r*255.) as u8, (g*255.) as u8, (b*255.) as u8, 60)
+    };
+    let loq_col = {
+        let [r, g, b] = t.loq_color;
+        egui::Color32::from_rgb((r*255.) as u8, (g*255.) as u8, (b*255.) as u8)
+    };
 
     let is_censored  = vpc.vpc_mode == "censored";
     let is_pred_corr = opts.pred_corr && !is_censored;
@@ -756,21 +855,20 @@ fn show_vpc_plot(ui: &mut egui::Ui, vpc: &VpcResult, opts: &VpcOpts, dark: bool)
             }
             pl.show(ui, |plot_ui| {
                     // Bin-edge separators.
-                    if opts.show_grid_v {
-                        let ec = egui::Color32::from_rgba_unmultiplied(0x88, 0x88, 0x88, 40);
+                    if t.bin_sep_show {
                         for edge in vpc.bins.iter().filter(|e| e.is_finite()) {
-                            plot_ui.vline(VLine::new(*edge).color(ec).width(0.5));
+                            plot_ui.vline(VLine::new(*edge).color(bin_sep_col).width(0.5));
                         }
                     }
                     // LOQ reference line(s) for censored VPC.
                     if is_censored {
                         if let Some(lloq) = vpc.lloq {
                             plot_ui.hline(HLine::new(lloq)
-                                .color(egui::Color32::from_rgb(0x99, 0x00, 0x00)).width(1.0).name("LLOQ"));
+                                .color(loq_col).width(1.0).name("LLOQ"));
                         }
                         if let Some(uloq) = vpc.uloq {
                             plot_ui.hline(HLine::new(uloq)
-                                .color(egui::Color32::from_rgb(0x99, 0x00, 0x00)).width(1.0).name("ULOQ"));
+                                .color(loq_col).width(1.0).name("ULOQ"));
                         }
                     }
                     // Simulated bands.
@@ -780,22 +878,23 @@ fn show_vpc_plot(ui: &mut egui::Ui, vpc: &VpcResult, opts: &VpcOpts, dark: bool)
                     // Observed lines.
                     if obs_lo.len() >= 2 {
                         plot_ui.line(Line::new(PlotPoints::from(obs_lo))
-                            .name("Obs 5th").color(obs_col).width(1.0)
-                            .style(egui_plot::LineStyle::Dashed { length: 8.0 }));
+                            .name("Obs 5th").color(obs_col).width(t.obs_ci_width)
+                            .style(line_style(t.obs_ci_style)));
                     }
                     if obs_med.len() >= 2 {
                         let lbl = if is_censored { "Obs fraction below LOQ" } else { "Obs median" };
                         plot_ui.line(Line::new(PlotPoints::from(obs_med))
-                            .name(lbl).color(obs_col).width(2.0));
+                            .name(lbl).color(obs_col).width(t.obs_median_width)
+                            .style(line_style(t.obs_median_style)));
                     }
                     if obs_hi.len() >= 2 {
                         plot_ui.line(Line::new(PlotPoints::from(obs_hi))
-                            .name("Obs 95th").color(obs_col).width(1.0)
-                            .style(egui_plot::LineStyle::Dashed { length: 8.0 }));
+                            .name("Obs 95th").color(obs_col).width(t.obs_ci_width)
+                            .style(line_style(t.obs_ci_style)));
                     }
                     if !obs_pts.is_empty() {
                         plot_ui.points(Points::new(PlotPoints::from(obs_pts))
-                            .name("Observed").radius(2.5)
+                            .name("Observed").radius(t.obs_point_size)
                             .shape(egui_plot::MarkerShape::Circle).filled(false).color(obs_col));
                     }
                 });

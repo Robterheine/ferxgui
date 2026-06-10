@@ -151,6 +151,63 @@ pub enum HistorySortCol {
     Duration,
 }
 
+/// Line style for VPC observed-percentile lines. Maps to an egui `LineStyle`
+/// for the native render and to a ggplot `linetype` string for the R export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VpcLineStyle { Solid, Dashed, Dotted }
+
+impl VpcLineStyle {
+    pub const ALL: [VpcLineStyle; 3] = [Self::Solid, Self::Dashed, Self::Dotted];
+    /// ggplot2 `linetype` name for the R export.
+    pub fn r_name(self) -> &'static str {
+        match self { Self::Solid => "solid", Self::Dashed => "dashed", Self::Dotted => "dotted" }
+    }
+    pub fn label(self) -> &'static str {
+        match self { Self::Solid => "Solid", Self::Dashed => "Dashed", Self::Dotted => "Dotted" }
+    }
+}
+
+/// Visual theme for the VPC plot. Mirrors the high-value elements of the `vpc`
+/// package's `new_vpc_theme()`; applied live to the native egui render and
+/// forwarded to the R ggplot export. Display-only — never triggers a re-simulate.
+#[derive(Debug, Clone)]
+pub struct VpcTheme {
+    /// Transparency of the simulated prediction-interval band fill (0–1).
+    pub sim_pi_alpha: f32,
+    /// Transparency of the simulated median band fill (0–1).
+    pub sim_median_alpha: f32,
+    /// Observed median line width / style.
+    pub obs_median_width: f32,
+    pub obs_median_style: VpcLineStyle,
+    /// Observed 5th/95th percentile line width / style.
+    pub obs_ci_width: f32,
+    pub obs_ci_style: VpcLineStyle,
+    /// Radius of overlaid observed points.
+    pub obs_point_size: f32,
+    /// Draw vertical bin-edge separators, and their colour.
+    pub bin_sep_show: bool,
+    pub bin_sep_color: [f32; 3],
+    /// Colour of the LLOQ/ULOQ reference line on censored VPCs.
+    pub loq_color: [f32; 3],
+}
+
+impl Default for VpcTheme {
+    fn default() -> Self {
+        Self {
+            sim_pi_alpha:     0.15,
+            sim_median_alpha: 0.30,
+            obs_median_width: 2.0,
+            obs_median_style: VpcLineStyle::Solid,
+            obs_ci_width:     1.0,
+            obs_ci_style:     VpcLineStyle::Dashed,
+            obs_point_size:   2.5,
+            bin_sep_show:     true,
+            bin_sep_color:    [0.53, 0.53, 0.53],
+            loq_color:        [0.6, 0.0, 0.0],
+        }
+    }
+}
+
 /// User-tunable VPC options. Simulation fields (n_sim/seed) drive a re-simulate;
 /// the rest are display options the `vpc` package recomputes cheaply from cache.
 #[derive(Debug, Clone)]
@@ -196,6 +253,8 @@ pub struct VpcOpts {
     pub stratify2: String,
     /// Facet direction for the R ggplot export.
     pub facet: String,
+    /// Visual theme (colours/alpha/linetypes/points). Display-only.
+    pub theme: VpcTheme,
 }
 
 impl Default for VpcOpts {
@@ -225,6 +284,7 @@ impl Default for VpcOpts {
             stratify1:             String::new(),
             stratify2:             String::new(),
             facet:                 "wrap".to_string(),
+            theme:                 VpcTheme::default(),
         }
     }
 }
@@ -1088,5 +1148,31 @@ impl AppState {
             .and_then(|m| m.fit.as_ref())
             .map(|f| f.ofv)
             .unwrap_or(f64::NAN)
+    }
+}
+
+#[cfg(test)]
+mod vpc_theme_tests {
+    use super::{VpcLineStyle, VpcTheme};
+
+    #[test]
+    fn line_style_r_names_match_ggplot() {
+        // These strings are passed verbatim to ggplot2 `linetype`; a typo would
+        // silently break the exported plot theme.
+        assert_eq!(VpcLineStyle::Solid.r_name(),  "solid");
+        assert_eq!(VpcLineStyle::Dashed.r_name(), "dashed");
+        assert_eq!(VpcLineStyle::Dotted.r_name(), "dotted");
+    }
+
+    #[test]
+    fn theme_defaults_match_vpc_package() {
+        // Mirrors vpc::new_vpc_theme() defaults so the native render and the R
+        // export start from the same look.
+        let t = VpcTheme::default();
+        assert!((t.sim_pi_alpha - 0.15).abs() < 1e-9);
+        assert!((t.sim_median_alpha - 0.30).abs() < 1e-9);
+        assert_eq!(t.obs_median_style, VpcLineStyle::Solid);
+        assert_eq!(t.obs_ci_style, VpcLineStyle::Dashed);
+        assert!(t.bin_sep_show);
     }
 }

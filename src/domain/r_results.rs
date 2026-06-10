@@ -70,6 +70,24 @@ pub struct VpcConfig {
     pub stratify: Vec<String>,
     /// Facet direction for the R ggplot: "wrap" | "rows" | "columns".
     pub facet: String,
+
+    // ---- Appearance theme (display-only; forwarded to new_vpc_theme) --------
+    /// Observed-line colour as a CSS hex string.
+    pub obs_color: String,
+    /// Simulated prediction-interval band fill transparency (0–1).
+    pub sim_pi_alpha: f64,
+    /// Simulated median band fill transparency (0–1).
+    pub sim_median_alpha: f64,
+    /// Observed median line: ggplot linetype name + width.
+    pub obs_median_linetype: String,
+    pub obs_median_linewidth: f64,
+    /// Observed 5th/95th line: ggplot linetype name + width.
+    pub obs_ci_linetype: String,
+    pub obs_ci_linewidth: f64,
+    /// Bin-separator colour hex, or "" to hide them.
+    pub bin_separators_color: String,
+    /// LLOQ/ULOQ reference-line colour hex.
+    pub loq_color: String,
 }
 
 /// One simulated-percentile band row from `vpcdb$vpc_dat`.

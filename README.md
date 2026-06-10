@@ -198,6 +198,17 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.4.0 (2026-06-10) — VPC appearance theming
+
+**VPC plot theming (mirrors the `vpc` package `new_vpc_theme()`)**
+- New **Theme** controls in the VPC Appearance panel: simulated prediction-interval and median band opacity; observed median and 5th/95th line width and style (solid/dashed/dotted); observed point size; bin-separator toggle and colour; and LLOQ/ULOQ reference-line colour.
+- Theme applies **live** to the native egui render (display-only — no re-simulation) and is forwarded to the R ggplot export via `vpc::new_vpc_theme()`, so the exported publication figure matches what's on screen.
+- Defaults mirror the package (`sim_pi` opacity 0.15, `sim_median` opacity 0.30, solid observed median, dashed 5th/95th). A **Reset appearance** button restores them.
+- Bin separators are now controlled by their own toggle (previously tied to the vertical-grid checkbox), matching the package's treatment of them as a distinct theme element.
+
+**Notes on scope**
+- Categorical VPC (`vpc_cat`) and time-to-event VPC (`vpc_tte`) were investigated and found to be blocked upstream in `ferx-core` (no categorical/count outcome likelihood; TTE simulation lacks horizon censoring). Tracking drafts live under `design/`. Theming was the only one of the three remaining `vpc` features buildable today.
+
 ### v0.3.0 (2026-06-10) — statistical fixes, security hardening, performance
 
 **Statistical correctness**
