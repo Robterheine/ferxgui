@@ -23,9 +23,7 @@ jobs:
       matrix:
         include:
           - os: macos-latest
-            target: aarch64-apple-darwin    # Apple Silicon
-          - os: macos-13
-            target: x86_64-apple-darwin      # Intel Mac
+            target: aarch64-apple-darwin    # Apple Silicon — Intel Macs run this under Rosetta 2
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
           - os: windows-latest
