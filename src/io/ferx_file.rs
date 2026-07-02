@@ -55,6 +55,60 @@ pub fn parse_params(source: &str) -> ParsedParams {
 }
 
 // ---------------------------------------------------------------------------
+// Fit options
+// ---------------------------------------------------------------------------
+
+/// Values extracted from the `[fit_options]` block. A field is `None` when the
+/// directive is absent or commented out — the model file is the source of truth,
+/// so the GUI run controls are initialised from these when a model is loaded.
+#[derive(Debug, Clone, Default)]
+pub struct FitOptions {
+    pub method: Option<String>,
+    pub covariance: Option<bool>,
+    pub gradient: Option<String>,
+    pub threads: Option<u32>,
+}
+
+/// Parse the `[fit_options]` block of a `.ferx` file. Full-line and inline `#`
+/// comments are ignored, so a commented-out directive reads as absent (`None`).
+pub fn parse_fit_options(source: &str) -> FitOptions {
+    let mut opts = FitOptions::default();
+    let mut in_section = false;
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') || trimmed.is_empty() {
+            continue;
+        }
+        if let Some(sec) = section_name(trimmed) {
+            in_section = sec == "fit_options";
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let Some((key, val)) = trimmed.split_once('=') else { continue; };
+        // Strip any inline comment from the value.
+        let val = val.split('#').next().unwrap_or("").trim();
+        match key.trim() {
+            "method"   if !val.is_empty() => opts.method = Some(val.to_string()),
+            "gradient" if !val.is_empty() => opts.gradient = Some(val.to_string()),
+            "covariance" => opts.covariance = parse_bool(val),
+            "threads"    => opts.threads = val.parse().ok(),
+            _ => {}
+        }
+    }
+    opts
+}
+
+fn parse_bool(s: &str) -> Option<bool> {
+    match s.to_ascii_lowercase().as_str() {
+        "true"  | "t" | "yes" | "1" => Some(true),
+        "false" | "f" | "no"  | "0" => Some(false),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Section detection
 // ---------------------------------------------------------------------------
 
@@ -303,6 +357,31 @@ mod tests {
   omega = [0.09, 0.04]
   sigma = [0.02]
 "#;
+
+    #[test]
+    fn fit_options_reads_explicit_values() {
+        let src = "[fit_options]\n  method = focei\n  covariance = true\n  gradient = ad\n  threads = 4\n";
+        let o = parse_fit_options(src);
+        assert_eq!(o.method.as_deref(), Some("focei"));
+        assert_eq!(o.covariance, Some(true));
+        assert_eq!(o.gradient.as_deref(), Some("ad"));
+        assert_eq!(o.threads, Some(4));
+    }
+
+    #[test]
+    fn fit_options_commented_covariance_reads_as_absent() {
+        // The reported bug: commenting the directive must disable it, not be ignored.
+        let src = "[fit_options]\n  method = foce\n#  covariance = true\n";
+        let o = parse_fit_options(src);
+        assert_eq!(o.covariance, None, "commented directive must read as absent");
+        assert_eq!(o.method.as_deref(), Some("foce"));
+    }
+
+    #[test]
+    fn fit_options_strips_inline_comment_and_parses_false() {
+        let src = "[fit_options]\n  covariance = false  # no SE step\n";
+        assert_eq!(parse_fit_options(src).covariance, Some(false));
+    }
 
     #[test]
     fn parses_theta_names_and_inits() {

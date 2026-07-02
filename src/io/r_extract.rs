@@ -512,9 +512,9 @@ template <- args[2]
 
 suppressMessages(library(ferx))
 
-ferx_model_new(
-  path      = out_path,
+ferx_model(
   template  = template,
+  path      = out_path,
   edit      = FALSE,
   overwrite = TRUE,
   print     = FALSE

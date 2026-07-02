@@ -138,6 +138,22 @@ pub enum EvalSection {
     Convergence,
     EtaCov,
     ParamCorr,
+    CondDist,
+}
+
+/// Which sub-view is active inside the Cond. Dist. (SAEM conditional
+/// distribution) section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CondDistView {
+    /// Histogram of the conditional mean across subjects, with a N(0, omega_jj)
+    /// overlay and a distribution-based shrinkage annotation.
+    #[default]
+    Distributions,
+    /// Per-subject conditional mean +/- SD, sorted by mean.
+    Caterpillar,
+    /// Scatter of conditional mode (EBE) vs. conditional mean, with the
+    /// identity line — points pulled toward zero show EBE shrinkage bias.
+    ModeVsMean,
 }
 
 /// Which column the History table is sorted by.
@@ -386,6 +402,16 @@ pub struct UiState {
     /// Data CSV path used for ETA-covariate correlation screening.
     pub eval_eta_cov_data_path: Option<PathBuf>,
 
+    // ---- Evaluation tab (Cond. Dist. section) ----
+    /// Lazily-loaded per-subject per-ETA conditional distribution data from
+    /// `conddist.csv`. `None` when absent (older bundle, non-SAEM fit, or
+    /// `conddist` not enabled) — the section shows a hint instead.
+    pub eval_conddist: Option<crate::domain::CondDistData>,
+    /// Which sub-view (Distributions / Caterpillar / Mode vs Mean) is shown.
+    pub eval_conddist_view: CondDistView,
+    /// Index into `eval_conddist.eta_names` for the currently displayed ETA.
+    pub eval_conddist_eta_idx: usize,
+
     // ---- Run popup ----
     /// Whether the floating run-output window is visible.
     pub run_popup_open: bool,
@@ -552,6 +578,9 @@ impl Default for UiState {
             eval_export_ci_lines: true,
             run_export_tables:      false,
             eval_eta_cov_data_path: None,
+            eval_conddist: None,
+            eval_conddist_view: CondDistView::default(),
+            eval_conddist_eta_idx: 0,
             run_popup_open:        false,
             about_open:            false,
             run_popup_last_run_id: None,

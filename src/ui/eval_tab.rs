@@ -1,9 +1,9 @@
 use eframe::egui;
-use egui_plot::{Bar, BarChart, HLine, Line, Plot, PlotPoints, Points};
+use egui_plot::{Bar, BarChart, HLine, Line, Plot, PlotPoints, Points, VLine};
 
 use crate::app::theme;
 use crate::domain::TraceRow;
-use crate::state::{AppState, EvalSection};
+use crate::state::{AppState, CondDistView, EvalSection};
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
@@ -37,6 +37,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
             ("Convergence",     EvalSection::Convergence),
             ("ETA-Cov",         EvalSection::EtaCov),
             ("Param Corr",      EvalSection::ParamCorr),
+            ("Cond. Dist.",     EvalSection::CondDist),
         ] {
             let active = state.ui.active_eval_section == section;
             if ui.add(
@@ -46,6 +47,44 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                 .min_size(egui::vec2(0.0, 22.0)),
             ).clicked() {
                 state.ui.active_eval_section = section;
+            }
+        }
+
+        // ETA selector + view toggle (Cond. Dist. only).
+        if state.ui.active_eval_section == EvalSection::CondDist {
+            if let Some(cd) = &state.ui.eval_conddist {
+                if !cd.eta_names.is_empty() {
+                    let cur_idx = state.ui.eval_conddist_eta_idx.min(cd.eta_names.len() - 1);
+                    ui.add_space(10.0);
+                    ui.label(egui::RichText::new("ETA:").color(theme::fg2(dark)).size(11.0));
+                    egui::ComboBox::from_id_salt("conddist_eta_combo")
+                        .selected_text(&cd.eta_names[cur_idx])
+                        .width(90.0)
+                        .show_ui(ui, |ui| {
+                            for (i, name) in cd.eta_names.iter().enumerate() {
+                                if ui.selectable_label(cur_idx == i, name).clicked() {
+                                    state.ui.eval_conddist_eta_idx = i;
+                                }
+                            }
+                        });
+
+                    ui.add_space(10.0);
+                    for (label, view) in [
+                        ("Distributions", CondDistView::Distributions),
+                        ("Caterpillar",   CondDistView::Caterpillar),
+                        ("Mode vs Mean",  CondDistView::ModeVsMean),
+                    ] {
+                        let active_view = state.ui.eval_conddist_view == view;
+                        if ui.add(
+                            egui::Button::new(egui::RichText::new(label).size(10.5)
+                                .color(if active_view { egui::Color32::WHITE } else { inactive_fg }))
+                            .fill(if active_view { theme::ACCENT } else { inactive_fill })
+                            .min_size(egui::vec2(0.0, 20.0)),
+                        ).clicked() {
+                            state.ui.eval_conddist_view = view;
+                        }
+                    }
+                }
             }
         }
 
@@ -118,8 +157,11 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                 .and_then(|p| crate::io::fitrx::read_predictions(p).ok().flatten());
             state.ui.eval_ebes = fitrx.as_deref()
                 .and_then(|p| crate::io::fitrx::read_ebes(p).ok().flatten());
+            state.ui.eval_conddist = fitrx.as_deref()
+                .and_then(|p| crate::io::fitrx::read_conddist(p).ok().flatten());
             state.ui.eval_loaded_stem = Some(stem);
             state.ui.eval_subject_idx = 0;
+            state.ui.eval_conddist_eta_idx = 0;
         }
     }
 
@@ -134,6 +176,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         EvalSection::Convergence    => show_convergence(ui, state, model_idx, dark),
         EvalSection::EtaCov         => show_eta_cov(ui, state, model_idx, dark),
         EvalSection::ParamCorr      => show_param_corr(ui, state, model_idx, dark),
+        EvalSection::CondDist       => show_cond_dist(ui, state, model_idx, dark),
     }
 }
 
@@ -1218,6 +1261,252 @@ fn show_param_corr(ui: &mut egui::Ui, state: &AppState, idx: usize, dark: bool) 
 
     crate::ui::sir_tab::correlation_heatmap(
         ui, &fit.cov_corr_names, &fit.cov_corr_flat, fit.cov_corr_n, dark);
+}
+
+// ── Conditional distribution (SAEM conddist) ─────────────────────────────────
+
+fn show_cond_dist(ui: &mut egui::Ui, state: &AppState, idx: usize, dark: bool) {
+    let fit = state.workspace.models[idx].fit.as_ref();
+
+    let cd = match &state.ui.eval_conddist {
+        Some(cd) if !cd.rows.is_empty() && !cd.eta_names.is_empty() => cd,
+        _ => {
+            let dim = theme::fg3(dark);
+            let is_saem = fit.is_some_and(|f| {
+                f.method.eq_ignore_ascii_case("saem")
+                    || f.method_chain.iter().any(|m| m.eq_ignore_ascii_case("saem"))
+            });
+            ui.centered_and_justified(|ui| {
+                ui.vertical_centered(|ui| {
+                    ui.label(egui::RichText::new("No conditional distribution data").size(15.0).strong());
+                    ui.add_space(6.0);
+                    if is_saem {
+                        ui.label(egui::RichText::new(
+                            "conddist.csv not found in this bundle.\n\
+                             Re-run with 'conddist = true' in [fit_options] to compute it.")
+                            .color(dim).size(12.0));
+                    } else {
+                        ui.label(egui::RichText::new(
+                            "Conditional distributions require the SAEM estimator.\n\
+                             This fit used a different method.")
+                            .color(dim).size(12.0));
+                    }
+                });
+            });
+            return;
+        }
+    };
+
+    let eta_idx = state.ui.eval_conddist_eta_idx.min(cd.eta_names.len() - 1);
+    let eta = cd.eta_names[eta_idx].clone();
+
+    match state.ui.eval_conddist_view {
+        CondDistView::Distributions => show_conddist_distributions(ui, cd, &eta, fit, dark),
+        CondDistView::Caterpillar   => show_conddist_caterpillar(ui, cd, &eta, dark),
+        CondDistView::ModeVsMean    => show_conddist_mode_vs_mean(ui, cd, &eta, dark),
+    }
+}
+
+/// Bin `values` into `n_bins` equal-width bins (with 8% padding on the range)
+/// and return `(bars, lo, hi, bin_width)`. Bars are pre-styled with `fill`.
+fn histogram_bars(values: &[f64], n_bins: usize, fill: egui::Color32) -> (Vec<Bar>, f64, f64, f64) {
+    let lo_raw = values.iter().cloned().fold(f64::INFINITY, f64::min);
+    let hi_raw = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    if !lo_raw.is_finite() || !hi_raw.is_finite() {
+        return (vec![], 0.0, 1.0, 1.0);
+    }
+    let range = (hi_raw - lo_raw).max(1e-9);
+    let pad = range * 0.08;
+    let (lo, hi) = (lo_raw - pad, hi_raw + pad);
+    let bin_w = (hi - lo) / n_bins as f64;
+    let mut counts = vec![0usize; n_bins];
+    for &v in values {
+        let b = (((v - lo) / bin_w) as usize).min(n_bins - 1);
+        counts[b] += 1;
+    }
+    let bars = counts.iter().enumerate().map(|(i, &c)| {
+        let x0 = lo + i as f64 * bin_w;
+        Bar::new(x0 + bin_w / 2.0, c as f64).width(bin_w * 0.9).fill(fill)
+    }).collect();
+    (bars, lo, hi, bin_w)
+}
+
+/// Theoretical `N(0, sigma^2)` curve, scaled to expected bin counts
+/// (`n * pdf(x) * bin_w`) so it overlays a count-histogram at the same scale.
+fn gaussian_overlay(sigma: f64, n: usize, bin_w: f64, lo: f64, hi: f64) -> Vec<[f64; 2]> {
+    if sigma <= 0.0 || hi <= lo { return vec![]; }
+    let two_sigma2 = 2.0 * sigma * sigma;
+    let norm = 1.0 / (sigma * (2.0 * std::f64::consts::PI).sqrt());
+    (0..=80).map(|i| {
+        let x = lo + (hi - lo) * i as f64 / 80.0;
+        let pdf = norm * (-(x * x) / two_sigma2).exp();
+        [x, pdf * n as f64 * bin_w]
+    }).collect()
+}
+
+fn show_conddist_distributions(
+    ui: &mut egui::Ui,
+    cd: &crate::domain::CondDistData,
+    eta: &str,
+    fit: Option<&crate::domain::FitSummary>,
+    dark: bool,
+) {
+    let means: Vec<f64> = cd.rows_for_eta(eta).iter()
+        .map(|r| r.cond_mean).filter(|v| v.is_finite()).collect();
+    if means.len() < 2 {
+        ui.centered_and_justified(|ui| {
+            ui.label(egui::RichText::new("Not enough subjects to plot a distribution.")
+                .color(theme::fg3(dark)).size(12.0));
+        });
+        return;
+    }
+
+    let omega_jj = fit.and_then(|f| {
+        f.omega_names.iter().position(|n| n == eta).and_then(|j| f.omega_value(j, j))
+    });
+    let shrink = omega_jj.map(|w| cd.shrinkage_for_eta(eta, w));
+
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(format!("Conditional mean distribution — {eta}"))
+            .size(13.0).strong());
+        if let Some(s) = shrink.filter(|v| v.is_finite()) {
+            ui.add_space(12.0);
+            let col = if s > 0.3 { theme::ORANGE } else { theme::GREEN };
+            ui.label(egui::RichText::new(format!("Distribution-based shrinkage: {:.1}%", s * 100.0))
+                .color(col).size(11.0));
+        }
+    });
+    ui.label(egui::RichText::new(
+        "Histogram of E[eta|y] per subject, with the theoretical N(0, omega) overlay. \
+         Unlike EBE-based shrinkage, this is not biased toward zero.")
+        .color(theme::fg3(dark)).size(10.0));
+    ui.add_space(4.0);
+
+    let n_bins = 14usize;
+    let fill = theme::ACCENT.linear_multiply(0.6);
+    let (bars, lo, hi, bin_w) = histogram_bars(&means, n_bins, fill);
+    let overlay = omega_jj.filter(|w| *w > 0.0)
+        .map(|w| gaussian_overlay(w.sqrt(), means.len(), bin_w, lo, hi))
+        .unwrap_or_default();
+
+    Plot::new(format!("conddist_hist_{eta}"))
+        .width(ui.available_width())
+        .height(ui.available_height() - 40.0)
+        .x_axis_label(format!("{eta} (conditional mean)"))
+        .y_axis_label("Count")
+        .show_grid(true)
+        .show(ui, |p| {
+            p.bar_chart(BarChart::new(bars));
+            if overlay.len() > 1 {
+                p.line(Line::new(PlotPoints::from(overlay))
+                    .color(theme::ORANGE).width(2.0).name("N(0, omega) expected"));
+            }
+            p.vline(VLine::new(0.0).color(egui::Color32::from_gray(160)).width(1.0));
+        });
+}
+
+fn show_conddist_caterpillar(
+    ui: &mut egui::Ui,
+    cd: &crate::domain::CondDistData,
+    eta: &str,
+    dark: bool,
+) {
+    let mut rows: Vec<&crate::domain::CondDistRow> = cd.rows_for_eta(eta).into_iter()
+        .filter(|r| r.cond_mean.is_finite())
+        .collect();
+    if rows.is_empty() {
+        ui.centered_and_justified(|ui| {
+            ui.label(egui::RichText::new("No subjects with finite conditional mean.")
+                .color(theme::fg3(dark)).size(12.0));
+        });
+        return;
+    }
+    rows.sort_by(|a, b| a.cond_mean.partial_cmp(&b.cond_mean).unwrap_or(std::cmp::Ordering::Equal));
+
+    ui.label(egui::RichText::new(format!("Per-subject conditional mean +/- SD — {eta}"))
+        .size(13.0).strong());
+    ui.label(egui::RichText::new(
+        "Sorted by conditional mean. Wide error bars indicate subjects with sparse \
+         or uninformative data for this random effect.")
+        .color(theme::fg3(dark)).size(10.0));
+    ui.add_space(4.0);
+
+    let ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
+    let col = theme::fg(dark);
+
+    Plot::new(format!("conddist_caterpillar_{eta}"))
+        .width(ui.available_width())
+        .height(ui.available_height() - 40.0)
+        .x_axis_label(eta)
+        .show_grid(egui::Vec2b::new(true, false))
+        .y_axis_formatter(move |mark, _| {
+            let i = mark.value.round() as usize;
+            ids.get(i).cloned().unwrap_or_default()
+        })
+        .label_formatter(|_, v| format!("eta = {:.3}", v.x))
+        .show(ui, |p| {
+            p.vline(VLine::new(0.0).color(egui::Color32::from_gray(160)).width(1.0));
+            for (i, r) in rows.iter().enumerate() {
+                let y = i as f64;
+                let sd = if r.cond_sd.is_finite() { r.cond_sd } else { 0.0 };
+                if sd > 0.0 {
+                    p.line(Line::new(PlotPoints::from(vec![
+                        [r.cond_mean - sd, y], [r.cond_mean + sd, y],
+                    ])).color(col).width(1.2));
+                }
+                p.points(Points::new(PlotPoints::from(vec![[r.cond_mean, y]]))
+                    .radius(2.5).color(col));
+            }
+        });
+}
+
+fn show_conddist_mode_vs_mean(
+    ui: &mut egui::Ui,
+    cd: &crate::domain::CondDistData,
+    eta: &str,
+    dark: bool,
+) {
+    let pts: Vec<[f64; 2]> = cd.rows_for_eta(eta).iter()
+        .filter(|r| r.cond_mode.is_finite() && r.cond_mean.is_finite())
+        .map(|r| [r.cond_mode, r.cond_mean])
+        .collect();
+    if pts.len() < 2 {
+        ui.centered_and_justified(|ui| {
+            ui.label(egui::RichText::new("Not enough subjects to plot.")
+                .color(theme::fg3(dark)).size(12.0));
+        });
+        return;
+    }
+
+    ui.label(egui::RichText::new(format!("Conditional mode (EBE) vs. conditional mean — {eta}"))
+        .size(13.0).strong());
+    ui.label(egui::RichText::new(
+        "Points below the identity line show the EBE shrunk further toward zero \
+         than the shrinkage-unbiased conditional mean.")
+        .color(theme::fg3(dark)).size(10.0));
+    ui.add_space(4.0);
+
+    let lo = pts.iter().flat_map(|p| [p[0], p[1]]).fold(f64::INFINITY, f64::min);
+    let hi = pts.iter().flat_map(|p| [p[0], p[1]]).fold(f64::NEG_INFINITY, f64::max);
+    let pad = ((hi - lo).max(1e-9)) * 0.08;
+    let (lo, hi) = (lo - pad, hi + pad);
+
+    let pt_col = if dark { egui::Color32::from_rgba_unmultiplied(76,138,255,200) }
+                 else    { egui::Color32::from_rgba_unmultiplied(30, 90,210,180) };
+    let ref_col = if dark { egui::Color32::from_gray(120) } else { egui::Color32::from_gray(160) };
+
+    Plot::new(format!("conddist_mode_mean_{eta}"))
+        .width(ui.available_width())
+        .height(ui.available_height() - 40.0)
+        .data_aspect(1.0)
+        .x_axis_label(format!("{eta} (mode / EBE)"))
+        .y_axis_label(format!("{eta} (conditional mean)"))
+        .show_grid(true)
+        .show(ui, |p| {
+            p.points(Points::new(PlotPoints::new(pts)).radius(2.5).color(pt_col));
+            p.line(Line::new(PlotPoints::new(vec![[lo, lo], [hi, hi]]))
+                .color(ref_col).width(1.2));
+        });
 }
 
 fn no_predictions(ui: &mut egui::Ui, dark: bool) {

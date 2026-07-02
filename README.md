@@ -54,7 +54,7 @@ FeRx NLME runs entirely inside R. FeRx GUI calls `Rscript` for all modelling ope
 | Software | Minimum version | Notes |
 |---|---|---|
 | **R** | 4.2 | [r-project.org](https://www.r-project.org/) |
-| **ferx** R package | 0.1.5 | See installation below |
+| **ferx** R package | 0.2.0 | See installation below |
 | **vpc** R package | 1.0 | Required for VPC tab |
 | **ggplot2** R package | 3.0 | Required for R ggplot export |
 | **jsonlite** R package | — | Usually installed with R |
@@ -197,6 +197,25 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 ---
 
 ## Changelog
+
+### v0.5.0 (2026-07-02) — model-file fit options, SAEM conditional distributions, ferx-r 0.2.0 compatibility
+
+**Model file `[fit_options]` is now authoritative**
+- `covariance`, `method`, `gradient`, and `threads` are parsed from the model file's `[fit_options]` block and used to initialise the Run pill whenever a model is selected. Previously these keywords were only recognised for syntax highlighting — the values were parsed but silently discarded, so editing them (including commenting one out) had no effect on what actually ran.
+- **Covariance is now opt-in from the file**: an absent or commented-out `covariance` line means the covariance step is off, matching what commenting it out visibly implies. Fixes a bug where disabling covariance in the model file left the previous (ticked) Run-pill state in effect, so the fit ran — and reported results — with covariance still on.
+- Per-run overrides in the Run pill still work as before; the file only sets the starting point on load.
+
+**New Evaluation section: Cond. Dist. (SAEM conditional distributions)**
+- Reads `conddist.csv` from `.fitrx` bundles (when present) and adds a "Cond. Dist." tab to the Evaluation view with three sub-views: a per-ETA histogram of the conditional mean with a theoretical `N(0, ω)` overlay and distribution-based shrinkage annotation, a caterpillar plot of per-subject mean ± SD, and a Mode-vs-Mean scatter against the identity line.
+- Distribution-based shrinkage (`1 - SD(cond_mean)/√ω_jj`) is computed client-side, since it isn't part of the CSV schema.
+- The empty-state hint is method-aware: SAEM fits without `conddist.csv` are told to re-run with `conddist = true`; non-SAEM fits are told the feature requires SAEM, with no dead-end retry prompt.
+- **This section is currently dormant for everyone**: `conddist.csv` bundling into `.fitrx` hasn't shipped in `ferx-core` yet ([ferx-core#675](https://github.com/FeRx-NLME/ferx-core/issues/675), filed as part of this work). The reader degrades cleanly (`None`) on any bundle without it, so this activates automatically — no ferxgui update needed — once that lands.
+
+**Fixed: `ferx_model_new` — removed in ferx-r 0.2.0**
+- ferx-r's [API cleanup](https://github.com/FeRx-NLME/ferx-r/issues/223) removed `ferx_model_new()` (hard break, no deprecation shim) in favour of a `template =` scaffold mode on `ferx_model()`. FeRx GUI's "Create model" feature called the removed function directly and would fail on any ferx-r ≥ 0.2.0 install. Updated the call site; the **minimum supported ferx R package version is now 0.2.0** (was 0.1.5).
+- Audited the rest of ferx-r's cleanup tracking issue against every `ferx_*` function FeRx GUI calls: one further item is a known upcoming break to watch (`ferx_eta_cov(fit, data)` is slated to drop its `data` argument once [ferx-r#226](https://github.com/FeRx-NLME/ferx-r/issues/226) lands — not yet merged, no action needed today) and one is worth re-checking once unblocked (trace storage moving onto the fit object, [ferx-r#228](https://github.com/FeRx-NLME/ferx-r/issues/228), could affect how the Convergence tab locates its trace CSV — blocked upstream on `ferx-core#640`, not yet merged either).
+
+---
 
 ### v0.4.0 (2026-06-10) — VPC appearance theming
 

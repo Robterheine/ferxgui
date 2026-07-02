@@ -314,6 +314,62 @@ pub fn read_ebes(fitrx_path: &Path) -> Result<Option<crate::domain::EbesData>, F
     Ok(Some(crate::domain::EbesData { rows, total_ofv, eta_names }))
 }
 
+/// Read `conddist.csv` from a `.fitrx` bundle — per-subject per-ETA conditional
+/// distribution summary from the SAEM `conddist` post-fit pass. Returns
+/// `Ok(None)` when the entry is absent (older bundle, non-SAEM fit, or
+/// `conddist` not enabled for this run).
+pub fn read_conddist(fitrx_path: &Path) -> Result<Option<crate::domain::CondDistData>, FitrxError> {
+    let file = std::fs::File::open(fitrx_path)?;
+    let mut zip = zip::ZipArchive::new(file)?;
+
+    let entry = match zip.by_name("conddist.csv") {
+        Ok(e)  => e,
+        Err(_) => return Ok(None),
+    };
+
+    let mut rdr = csv::ReaderBuilder::new()
+        .trim(csv::Trim::All)
+        .from_reader(entry);
+
+    let headers = rdr.headers()
+        .map_err(|e| FitrxError::Io(std::io::Error::other(e)))?
+        .clone();
+
+    let col = |name: &str| headers.iter().position(|h| h.eq_ignore_ascii_case(name));
+    let parse = |rec: &csv::StringRecord, c: usize| -> f64 {
+        rec.get(c).and_then(|s| s.trim().parse().ok()).unwrap_or(f64::NAN)
+    };
+
+    let col_id   = col("ID");
+    let col_eta  = col("ETA");
+    let col_mean = col("COND_MEAN");
+    let col_sd   = col("COND_SD");
+    let col_mode = col("COND_MODE");
+
+    let mut rows = Vec::new();
+    let mut eta_names: Vec<String> = Vec::new();
+    let mut subject_ids: Vec<String> = Vec::new();
+    let mut seen_etas = std::collections::HashSet::new();
+    let mut seen_ids  = std::collections::HashSet::new();
+
+    for result in rdr.records() {
+        let rec = result.map_err(|e| FitrxError::Io(std::io::Error::other(e)))?;
+        let id  = col_id.and_then(|c| rec.get(c)).unwrap_or("").to_string();
+        let eta = col_eta.and_then(|c| rec.get(c)).unwrap_or("").to_string();
+        if seen_ids.insert(id.clone())   { subject_ids.push(id.clone()); }
+        if seen_etas.insert(eta.clone()) { eta_names.push(eta.clone()); }
+        rows.push(crate::domain::CondDistRow {
+            id,
+            eta_name:  eta,
+            cond_mean: col_mean.map(|c| parse(&rec, c)).unwrap_or(f64::NAN),
+            cond_sd:   col_sd.map(|c| parse(&rec, c)).unwrap_or(f64::NAN),
+            cond_mode: col_mode.map(|c| parse(&rec, c)).unwrap_or(f64::NAN),
+        });
+    }
+
+    Ok(Some(crate::domain::CondDistData { rows, eta_names, subject_ids }))
+}
+
 /// Extract per-observation and per-subject output tables from a `.fitrx` bundle,
 /// writing them as standalone CSVs next to the bundle file.
 ///

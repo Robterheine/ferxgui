@@ -2380,6 +2380,16 @@ fn sync_editor_buffer(state: &mut AppState) {
                 state.ui.editor_buffer = state.workspace.models[idx].model.source.clone();
                 state.ui.editor_dirty = false;
                 state.ui.editor_loaded_stem = Some(stem.clone());
+
+                // The model file's [fit_options] is authoritative: initialise the
+                // run controls from it on load. Covariance is opt-in — an absent
+                // or commented-out directive means the covariance step is off.
+                let opts = crate::io::ferx_file::parse_fit_options(
+                    &state.workspace.models[idx].model.source);
+                state.ui.run_covariance = opts.covariance.unwrap_or(false);
+                if let Some(m) = opts.method   { state.ui.run_method = m; }
+                if let Some(g) = opts.gradient { state.ui.run_gradient = g; }
+                if let Some(t) = opts.threads  { state.ui.run_threads = t; }
             }
         } else {
             state.ui.editor_buffer.clear();
