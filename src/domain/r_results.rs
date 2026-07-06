@@ -245,7 +245,7 @@ impl SirResult {
 }
 
 // ---------------------------------------------------------------------------
-// ETA-covariate correlation (ferx_eta_cov)
+// ETA-covariate correlation (fit$eta_cov, ferx-r >= 0.2.0)
 // ---------------------------------------------------------------------------
 
 /// One row from `ferx_eta_cov()` — Pearson r between an ETA and a dataset covariate.
@@ -271,6 +271,11 @@ fn nan() -> f64 { f64::NAN }
 pub struct EtaCovResult {
     #[serde(default)]
     pub rows: Vec<EtaCovRow>,
+    /// True when `rows` is empty because the original dataset could no
+    /// longer be read from its recorded path — distinct from a legitimate
+    /// "too few subjects / no numeric covariates" empty result.
+    #[serde(default)]
+    pub data_unavailable: bool,
 }
 
 // ---------------------------------------------------------------------------

@@ -9,8 +9,11 @@
 ///   warnings.txt    — one warning per line
 ///   data.csv        — optionally embedded input dataset
 ///
-/// `trace_path` in `fit.json` points to the convergence trace CSV, which lives
-/// **outside** the zip in the same directory as the `.fitrx` file.
+/// `trace_path` in `fit.json` points to the convergence trace CSV as it was
+/// written during the run — an external temp file that usually doesn't
+/// survive past it. ferx-r (>= 0.2.0) additionally bundles the same data as
+/// `trace.csv` inside the zip; prefer that (`read_trace_csv_from_bundle`)
+/// and fall back to the external path only for older bundles.
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -420,9 +423,32 @@ pub fn extract_output_tables(fitrx_path: &Path) -> Result<Vec<PathBuf>, FitrxErr
 /// Parses all columns written by ferx-core: iter, method, phase, ofv,
 /// grad_norm, mh_accept_rate, lm_lambda.  Unknown/missing columns are NaN.
 pub fn read_trace_csv(path: &Path) -> std::io::Result<Vec<TraceRow>> {
+    let file = std::fs::File::open(path)?;
+    parse_trace_csv(file)
+}
+
+/// Read `trace.csv` directly from a `.fitrx` bundle. ferx-r (>= 0.2.0) always
+/// bundles the trace alongside the fit when `optimizer_trace = TRUE` was
+/// used, since the external `trace_path` temp file usually doesn't survive
+/// past the run. Returns `Ok(None)` when absent (older bundles, or the trace
+/// was never enabled) — callers should fall back to `resolve_trace_path` +
+/// `read_trace_csv` for those.
+pub fn read_trace_csv_from_bundle(fitrx_path: &Path) -> Result<Option<Vec<TraceRow>>, FitrxError> {
+    let file = std::fs::File::open(fitrx_path)?;
+    let mut zip = zip::ZipArchive::new(file)?;
+    let entry = match zip.by_name("trace.csv") {
+        Ok(e)  => e,
+        Err(_) => return Ok(None),
+    };
+    Ok(Some(parse_trace_csv(entry)?))
+}
+
+/// Shared CSV-parsing body for the convergence trace, used by both the
+/// external-file and in-bundle read paths.
+fn parse_trace_csv<R: Read>(reader: R) -> std::io::Result<Vec<TraceRow>> {
     let mut rdr = csv::ReaderBuilder::new()
         .trim(csv::Trim::All)
-        .from_path(path)?;
+        .from_reader(reader);
 
     let headers = rdr.headers()
         .map_err(std::io::Error::other)?

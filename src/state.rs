@@ -383,6 +383,10 @@ pub struct UiState {
     pub eval_subject_idx: usize,
     /// Whether the DV/PRED axes use log scale.
     pub eval_log_scale: bool,
+    /// Convergence tab: show the running-minimum OFV for FOCE/FOCEI rows
+    /// instead of the raw per-evaluation trace (which includes rejected
+    /// line-search trial steps). Mirrors ferx-r's own `plot(fit)` default.
+    pub eval_monotonic_ofv: bool,
     /// Number of subjects shown per page in Individual Fits (1–6).
     pub eval_subjects_per_page: usize,
     /// Column name used as X-axis for the first CWRES scatter panel.
@@ -397,10 +401,6 @@ pub struct UiState {
     pub eval_export_width_mm: u32,
     pub eval_export_loess: bool,
     pub eval_export_ci_lines: bool,
-
-    // ---- Evaluation tab (ETA-Cov section) ----
-    /// Data CSV path used for ETA-covariate correlation screening.
-    pub eval_eta_cov_data_path: Option<PathBuf>,
 
     // ---- Evaluation tab (Cond. Dist. section) ----
     /// Lazily-loaded per-subject per-ETA conditional distribution data from
@@ -568,6 +568,7 @@ impl Default for UiState {
             eval_ebes: None,
             eval_subject_idx: 0,
             eval_log_scale: false,
+            eval_monotonic_ofv: true,
             eval_subjects_per_page: 1,
             eval_cwres_x_col:    "TIME".to_string(),
             eval_cwres_x_col_2:  "PRED".to_string(),
@@ -577,7 +578,6 @@ impl Default for UiState {
             eval_export_loess:   true,
             eval_export_ci_lines: true,
             run_export_tables:      false,
-            eval_eta_cov_data_path: None,
             eval_conddist: None,
             eval_conddist_view: CondDistView::default(),
             eval_conddist_eta_idx: 0,

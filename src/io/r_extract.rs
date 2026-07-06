@@ -470,23 +470,31 @@ if (use_gg) {
 cat(output_path)
 "#;
 
+// ferx-r >= 0.2.0 removed the exported ferx_eta_cov(fit, data) function
+// (FeRx-NLME/ferx-r#226): the ETA-covariate screen is now computed
+// automatically at fit time (and recomputed by ferx_load_fit() from the
+// dataset path recorded on the fit) and exposed as the fit$eta_cov field.
 const ETA_COV_R: &str = r#"
 args <- commandArgs(trailingOnly = TRUE)
-if (length(args) < 2) stop("usage: eta_cov.R <fitrx_path> <data_path>")
+if (length(args) < 1) stop("usage: eta_cov.R <fitrx_path>")
 fitrx_path <- args[1]
-data_path  <- args[2]
 
 suppressMessages(library(ferx))
 suppressMessages(library(jsonlite))
 
-fit  <- ferx_load_fit(fitrx_path)
-data <- read.csv(data_path)
-
-# ferx_eta_cov() prints a summary table to stdout — capture it.
-invisible(capture.output(result <- ferx_eta_cov(fit, data)))
+fit    <- ferx_load_fit(fitrx_path)
+result <- fit$eta_cov
 
 if (is.null(result) || !is.data.frame(result) || nrow(result) == 0) {
-  cat(toJSON(list(rows = list()), auto_unbox = TRUE))
+  # fit$eta_cov is NULL for two distinct reasons: a legitimate "nothing to
+  # screen" result (too few subjects / no numeric covariates), or the
+  # original dataset could no longer be read from its recorded path. Tell
+  # these apart so the GUI doesn't show a misleading "no pairs found"
+  # message when the real cause is a moved/missing data file.
+  data_path    <- tryCatch(fit$data_path, error = function(e) NULL)
+  data_missing <- !is.null(data_path) && length(data_path) == 1 &&
+                  !is.na(data_path) && nzchar(data_path) && !file.exists(data_path)
+  cat(toJSON(list(rows = list(), data_unavailable = data_missing), auto_unbox = TRUE))
 } else {
   rows <- lapply(seq_len(nrow(result)), function(i) {
     r_v   <- result$r[i]
@@ -500,7 +508,7 @@ if (is.null(result) || !is.data.frame(result) || nrow(result) == 0) {
       flag      = flg
     )
   })
-  cat(toJSON(list(rows = rows), auto_unbox = TRUE, na = "null"))
+  cat(toJSON(list(rows = rows, data_unavailable = FALSE), auto_unbox = TRUE, na = "null"))
 }
 "#;
 
@@ -861,11 +869,8 @@ fn parse_sir_result(json: &str) -> Result<SirResult, serde_json::Error> {
 
 /// Call `ferx_eta_cov()` via R to screen EBE ETAs against dataset covariates.
 /// Blocking — run from a background thread.
-pub fn compute_eta_cov(fitrx_path: &Path, data_path: &Path) -> Result<EtaCovResult, String> {
-    let json = run_script(ETA_COV_R, &[
-        path_as_str(fitrx_path)?,
-        path_as_str(data_path)?,
-    ])?;
+pub fn compute_eta_cov(fitrx_path: &Path) -> Result<EtaCovResult, String> {
+    let json = run_script(ETA_COV_R, &[path_as_str(fitrx_path)?])?;
     serde_json::from_str(&json)
         .map_err(|e| format!("eta_cov JSON parse error: {e}\nR output: {}", &json[..json.len().min(500)]))
 }

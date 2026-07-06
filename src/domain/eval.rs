@@ -167,6 +167,72 @@ pub struct TraceRow {
     pub lm_lambda:      f64,
 }
 
+/// Running-minimum (`cummin`) OFV over the FOCE/FOCEI rows only, leaving any
+/// other method's rows (e.g. a preceding SAEM/GN stage in a method chain)
+/// unchanged. Mirrors ferx-r's own `plot(fit)` default (`monotonic = TRUE`),
+/// which filters out the OFV upticks from rejected line-search trial steps
+/// that the raw per-evaluation trace otherwise includes.
+pub fn monotonic_ofv(rows: &[TraceRow]) -> Vec<f64> {
+    let mut ofv: Vec<f64> = rows.iter().map(|r| r.ofv).collect();
+    let mut running_min = f64::INFINITY;
+    for (i, r) in rows.iter().enumerate() {
+        if r.method.starts_with("foce") {
+            running_min = running_min.min(ofv[i]);
+            ofv[i] = running_min;
+        }
+    }
+    ofv
+}
+
+#[cfg(test)]
+mod monotonic_ofv_tests {
+    use super::{monotonic_ofv, TraceRow};
+
+    fn row(method: &str, ofv: f64) -> TraceRow {
+        TraceRow {
+            iteration: 0.0, ofv, method: method.to_string(), phase: String::new(),
+            grad_norm: f64::NAN, mh_accept_rate: f64::NAN, lm_lambda: f64::NAN,
+        }
+    }
+
+    #[test]
+    fn applies_running_minimum_to_focei_rows_only() {
+        let rows = vec![
+            row("focei", 100.0),
+            row("focei", 95.0),
+            row("focei", 98.0), // rejected trial step — should be smoothed to 95.0
+            row("focei", 90.0),
+        ];
+        let ofv = monotonic_ofv(&rows);
+        assert_eq!(ofv, vec![100.0, 95.0, 95.0, 90.0]);
+    }
+
+    #[test]
+    fn leaves_non_foce_rows_untouched() {
+        // A preceding SAEM stage in a method chain: cummin must not apply to
+        // it, and must not be perturbed by it either (independent running
+        // minimum per the foce/focei subset only).
+        let rows = vec![
+            row("saem", 200.0),
+            row("saem", 150.0),
+            row("focei", 100.0),
+            row("focei", 105.0), // rejected — smoothed to 100.0
+        ];
+        let ofv = monotonic_ofv(&rows);
+        assert_eq!(ofv, vec![200.0, 150.0, 100.0, 100.0]);
+    }
+
+    #[test]
+    fn matches_foce_prefix_case_sensitively() {
+        // Mirrors ferx-r's `grepl("^foce", method)` — matches "foce"/"focei"
+        // by prefix, does not match other methods.
+        let rows = vec![row("foce", 50.0), row("gn", 40.0), row("foce", 45.0)];
+        let ofv = monotonic_ofv(&rows);
+        // gn row (40.0) is untouched; the foce running min is 50 -> 45.
+        assert_eq!(ofv, vec![50.0, 40.0, 45.0]);
+    }
+}
+
 #[cfg(test)]
 mod conddist_tests {
     use super::{CondDistData, CondDistRow};

@@ -40,8 +40,13 @@ pub fn parse_params(source: &str) -> ParsedParams {
             }
             continue;
         }
-        if let Some(sec) = section_name(trimmed) {
-            current_section = Some(sec);
+        if is_section_header(trimmed) {
+            // Any bracketed header ends the previous section, whether or not
+            // it's one we recognise — an unrecognised section (e.g. a DSL
+            // block newer than this parser) must not leave `current_section`
+            // pointing at whatever came before it, or that section's content
+            // lines would keep being misattributed to it.
+            current_section = section_name(trimmed);
             continue;
         }
         match current_section {
@@ -112,6 +117,13 @@ fn parse_bool(s: &str) -> Option<bool> {
 // Section detection
 // ---------------------------------------------------------------------------
 
+/// True for any `[...]` bracketed line, recognised or not — used to decide
+/// when to reset `current_section`, independently of whether `section_name`
+/// knows the name inside the brackets.
+fn is_section_header(line: &str) -> bool {
+    line.starts_with('[') && line.ends_with(']')
+}
+
 fn section_name(line: &str) -> Option<&'static str> {
     let inner = line.strip_prefix('[')?.strip_suffix(']')?.trim();
     match inner {
@@ -126,6 +138,14 @@ fn section_name(line: &str) -> Option<&'static str> {
         "scaling" => Some("scaling"),
         "diffusion" => Some("diffusion"),
         "covariate_nn" => Some("covariate_nn"),
+        // ferx-core 0.2.0 additions (joint PK-TTE, adaptive dosing,
+        // parameter-dependent ODE baselines, FREM covariates). No dedicated
+        // field extraction yet — recognising them here is enough to keep
+        // section-boundary tracking correct.
+        "event_model" => Some("event_model"),
+        "adaptive_dosing" => Some("adaptive_dosing"),
+        "initial_conditions" => Some("initial_conditions"),
+        "covariates" => Some("covariates"),
         _ => None,
     }
 }
@@ -357,6 +377,33 @@ mod tests {
   omega = [0.09, 0.04]
   sigma = [0.02]
 "#;
+
+    #[test]
+    fn unrecognised_section_does_not_leak_into_next_recognised_one() {
+        // An unrecognised section (e.g. a newer ferx-core DSL block) between
+        // two [parameters] blocks must not let the second block's lines be
+        // parsed twice, nor let the unrecognised block's own content be
+        // misread as parameter declarations.
+        let src = "\
+[parameters]
+  theta TVCL(0.1, 0.001, 10.0)
+
+[event_model]
+  hazard = H0 * exp(BETA * (central / V))
+
+[parameters]
+  theta TVV(5.0, 0.1, 100.0)
+";
+        let p = parse_params(src);
+        assert_eq!(p.theta_names, vec!["TVCL", "TVV"]);
+    }
+
+    #[test]
+    fn new_dsl_sections_are_recognised() {
+        for name in ["event_model", "adaptive_dosing", "initial_conditions", "covariates"] {
+            assert_eq!(section_name(&format!("[{name}]")), Some(name));
+        }
+    }
 
     #[test]
     fn fit_options_reads_explicit_values() {

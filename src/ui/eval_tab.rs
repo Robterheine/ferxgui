@@ -145,6 +145,16 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                     }
                 });
         }
+
+        // Monotonic-OFV toggle (Convergence only).
+        if state.ui.active_eval_section == EvalSection::Convergence {
+            ui.add_space(12.0);
+            ui.checkbox(&mut state.ui.eval_monotonic_ofv, "Monotonic OFV")
+                .on_hover_text(
+                    "Show the running-minimum OFV for FOCE/FOCEI iterations, hiding \
+                     rejected line-search trial steps. Matches ferx-r's plot(fit) default.",
+                );
+        }
     });
     ui.separator();
 
@@ -784,21 +794,30 @@ fn show_convergence(ui: &mut egui::Ui, state: &AppState, idx: usize, dark: bool)
         Some(f) => f,
         None => { no_trace(ui, dark, "No fit data for this model."); return; }
     };
-    let trace_path = match crate::io::fitrx::resolve_trace_path(&fitrx_path, fit) {
-        Some(p) => p,
-        None => {
-            no_trace(ui, dark,
-                "No convergence trace in this bundle.\n\n\
-                 To generate it: go to the Run tab for this model, enable\n\
-                 the 'Optimizer trace' checkbox, then re-run the model.");
-            return;
-        }
-    };
-    let rows: Vec<TraceRow> = match crate::io::fitrx::read_trace_csv(&trace_path) {
-        Ok(r) if !r.is_empty() => r,
+    // Prefer the trace bundled inside the .fitrx (ferx-r >= 0.2.0 always
+    // embeds it as trace.csv when optimizer_trace was on, since the external
+    // trace_path temp file usually doesn't survive past the run). Fall back
+    // to the external path for older bundles that don't carry it.
+    let rows: Vec<TraceRow> = match crate::io::fitrx::read_trace_csv_from_bundle(&fitrx_path) {
+        Ok(Some(r)) if !r.is_empty() => r,
         _ => {
-            no_trace(ui, dark, &format!("Trace file not found or empty:\n{}", trace_path.display()));
-            return;
+            let trace_path = match crate::io::fitrx::resolve_trace_path(&fitrx_path, fit) {
+                Some(p) => p,
+                None => {
+                    no_trace(ui, dark,
+                        "No convergence trace in this bundle.\n\n\
+                         To generate it: go to the Run tab for this model, enable\n\
+                         the 'Optimizer trace' checkbox, then re-run the model.");
+                    return;
+                }
+            };
+            match crate::io::fitrx::read_trace_csv(&trace_path) {
+                Ok(r) if !r.is_empty() => r,
+                _ => {
+                    no_trace(ui, dark, &format!("Trace file not found or empty:\n{}", trace_path.display()));
+                    return;
+                }
+            }
         }
     };
 
@@ -832,9 +851,18 @@ fn show_convergence(ui: &mut egui::Ui, state: &AppState, idx: usize, dark: bool)
         .map(|w| w[1].iteration)
         .collect();
 
-    let ofv_pts: Vec<[f64;2]> = rows.iter()
-        .filter(|r| r.iteration.is_finite() && r.ofv.is_finite())
-        .map(|r| [r.iteration, r.ofv]).collect();
+    // The plotted OFV can be smoothed (running-minimum on FOCE/FOCEI rows);
+    // the *reported* final OFV always stays the raw last-row value, which is
+    // what the fit itself converged to — a display transform must never
+    // leak into a reported statistic.
+    let ofv_vals: Vec<f64> = if state.ui.eval_monotonic_ofv {
+        crate::domain::monotonic_ofv(&rows)
+    } else {
+        rows.iter().map(|r| r.ofv).collect()
+    };
+    let ofv_pts: Vec<[f64;2]> = rows.iter().zip(ofv_vals.iter())
+        .filter(|(r, v)| r.iteration.is_finite() && v.is_finite())
+        .map(|(r, v)| [r.iteration, *v]).collect();
     let final_ofv = rows.last().map(|r| r.ofv).unwrap_or(f64::NAN);
     let n_iters   = rows.len();
 
@@ -911,6 +939,32 @@ fn no_trace(ui: &mut egui::Ui, dark: bool, msg: &str) {
 
 // ── ETA-Covariate Correlation ─────────────────────────────────────────────────
 
+/// Kick off (or restart) the ETA-covariate correlation screen for `stem`.
+/// `fit$eta_cov` is computed automatically by ferx-r (>= 0.2.0) at fit time
+/// and recomputed by `ferx_load_fit()` from the dataset path recorded on the
+/// fit itself — no dataset path needs to come from the GUI.
+fn launch_eta_cov(state: &mut AppState, stem: &str, fitrx_path: &std::path::Path) {
+    let fitrx  = fitrx_path.to_path_buf();
+    let stem_s = stem.to_string();
+    let tx     = state.worker_tx.clone();
+    state.workspace.eta_cov_running.insert(stem_s.clone());
+    std::thread::spawn(move || {
+        match crate::io::r_extract::compute_eta_cov(&fitrx) {
+            Ok(result) => {
+                let _ = tx.send(crate::workers::messages::WorkerMsg::EtaCovComplete {
+                    stem: stem_s, result: Box::new(result),
+                });
+            }
+            Err(msg) => {
+                let _ = tx.send(crate::workers::messages::WorkerMsg::RTaskError {
+                    context: format!("eta_cov {stem_s}"),
+                    message: msg,
+                });
+            }
+        }
+    });
+}
+
 fn show_eta_cov(ui: &mut egui::Ui, state: &mut AppState, idx: usize, dark: bool) {
     let entry = &state.workspace.models[idx];
     let stem  = entry.model.stem.clone();
@@ -925,42 +979,11 @@ fn show_eta_cov(ui: &mut egui::Ui, state: &mut AppState, idx: usize, dark: bool)
         return;
     };
 
-    // Auto-populate data path from run history (same as Run pill).
-    let needs_path = state.ui.eval_eta_cov_data_path.as_deref()
-        .is_none_or(|p| !p.exists());
-    if needs_path {
-        state.ui.eval_eta_cov_data_path = state.run.run_history
-            .iter().rev()
-            .find(|r| r.model_stem == stem && r.data_path.as_ref().is_some_and(|p| p.exists()))
-            .and_then(|r| r.data_path.clone());
-    }
-
-    // Auto-trigger: fire immediately when the section is entered if we have a
-    // data path, no cached result, and the computation isn't already running.
+    // Auto-trigger the moment a fit exists — no setup step needed any more.
     if !state.workspace.eta_cov_running.contains(&stem)
         && !state.workspace.eta_cov_results.contains_key(&stem)
     {
-        if let Some(data_path) = state.ui.eval_eta_cov_data_path.clone() {
-            let fitrx_c = fitrx_path.clone();
-            let stem_c  = stem.clone();
-            let tx      = state.worker_tx.clone();
-            state.workspace.eta_cov_running.insert(stem_c.clone());
-            std::thread::spawn(move || {
-                match crate::io::r_extract::compute_eta_cov(&fitrx_c, &data_path) {
-                    Ok(result) => {
-                        let _ = tx.send(crate::workers::messages::WorkerMsg::EtaCovComplete {
-                            stem: stem_c, result: Box::new(result),
-                        });
-                    }
-                    Err(msg) => {
-                        let _ = tx.send(crate::workers::messages::WorkerMsg::RTaskError {
-                            context: format!("eta_cov {stem_c}"),
-                            message: msg,
-                        });
-                    }
-                }
-            });
-        }
+        launch_eta_cov(state, &stem, &fitrx_path);
     }
 
     // ── Computing spinner ──────────────────────────────────────────────────
@@ -987,10 +1010,27 @@ fn show_eta_cov(ui: &mut egui::Ui, state: &mut AppState, idx: usize, dark: bool)
             .show(ui, |ui| {
                 if result.rows.is_empty() {
                     ui.add_space(20.0);
-                    ui.label(
-                        egui::RichText::new("No ETA-covariate pairs found (need ≥3 subjects with finite values).")
-                            .color(theme::fg2(dark)).size(12.0),
-                    );
+                    if result.data_unavailable {
+                        ui.label(
+                            egui::RichText::new("Original dataset not found").strong()
+                                .color(theme::fg2(dark)).size(13.0),
+                        );
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(
+                                "The dataset used to fit this model can no longer be found at its \
+                                 original path, so ETA-covariate correlations could not be \
+                                 recomputed. Re-run the model with the dataset available at its \
+                                 original location to enable this section.",
+                            )
+                            .color(theme::fg3(dark)).size(11.0),
+                        );
+                    } else {
+                        ui.label(
+                            egui::RichText::new("No ETA-covariate pairs found (need ≥3 subjects with finite values).")
+                                .color(theme::fg2(dark)).size(12.0),
+                        );
+                    }
                 } else {
                     let flagged = result.rows.iter().filter(|r| r.flag).count();
                     ui.add_space(4.0);
@@ -1059,119 +1099,18 @@ fn show_eta_cov(ui: &mut egui::Ui, state: &mut AppState, idx: usize, dark: bool)
                 ui.add_space(16.0);
                 ui.separator();
                 ui.add_space(8.0);
-                show_eta_cov_launcher(ui, state, &stem, &fitrx_path, true, dark);
+                if ui.button("Re-run").clicked() {
+                    launch_eta_cov(state, &stem, &fitrx_path);
+                }
             });
         return;
     }
 
-    // ── Setup panel ────────────────────────────────────────────────────────
-    egui::ScrollArea::vertical()
-        .auto_shrink([false; 2])
-        .show(ui, |ui| {
-            ui.add_space(40.0);
-            ui.vertical_centered(|ui| {
-                ui.set_max_width(460.0);
-                ui.label(
-                    egui::RichText::new("ETA-Covariate Correlation Screen")
-                        .size(16.0).strong().color(theme::fg(dark)),
-                );
-                ui.add_space(8.0);
-                ui.label(
-                    egui::RichText::new(
-                        "Computes Pearson r between each ETA (EBE) and numeric dataset \
-                         covariates. Pairs with |r| ≥ 0.3 are flagged as covariate \
-                         model building candidates.",
-                    )
-                    .color(theme::fg2(dark))
-                    .size(12.0),
-                );
-                ui.add_space(24.0);
-                show_eta_cov_launcher(ui, state, &stem, &fitrx_path, false, dark);
-            });
-        });
-}
-
-fn show_eta_cov_launcher(
-    ui:         &mut egui::Ui,
-    state:      &mut AppState,
-    stem:       &str,
-    fitrx_path: &std::path::Path,
-    compact:    bool,
-    dark:       bool,
-) {
-    // Auto-populate from the most recent run for this model — same pattern
-    // as the Run pill.  Only triggers when the path is not already set or
-    // the currently stored path no longer exists on disk.
-    let needs_path = state.ui.eval_eta_cov_data_path.as_deref()
-        .is_none_or(|p| !p.exists());
-    if needs_path {
-        state.ui.eval_eta_cov_data_path = state.run.run_history
-            .iter()
-            .rev()
-            .find(|r| r.model_stem == stem && r.data_path.as_ref().is_some_and(|p| p.exists()))
-            .and_then(|r| r.data_path.clone());
-    }
-
-    if !compact {
-        ui.label(
-            egui::RichText::new("Dataset CSV (the same file used for fitting):")
-                .color(theme::fg2(dark)).size(12.0),
-        );
-        ui.add_space(4.0);
-    }
-
-    ui.horizontal(|ui| {
-        let path_str = state.ui.eval_eta_cov_data_path.as_deref()
-            .and_then(|p| p.to_str())
-            .unwrap_or("(no file selected)");
-        ui.label(
-            egui::RichText::new(path_str)
-                .color(theme::fg2(dark)).size(11.0).monospace(),
-        );
-        if ui.button("Browse…").clicked() {
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter("CSV", &["csv"])
-                .pick_file()
-            {
-                state.ui.eval_eta_cov_data_path = Some(path);
-            }
-        }
+    // No cached result and not (yet) running — launch_eta_cov() above just
+    // triggered it; this frame renders once before the spinner takes over.
+    ui.centered_and_justified(|ui| {
+        ui.label(egui::RichText::new("Loading…").color(theme::fg3(dark)).size(12.0));
     });
-
-    ui.add_space(8.0);
-    let can_run = state.ui.eval_eta_cov_data_path.is_some();
-    ui.add_enabled_ui(can_run, |ui| {
-        if ui.button(if compact { "Re-run" } else { "Run ETA-Cov Screen" }).clicked() {
-            if let Some(data_path) = state.ui.eval_eta_cov_data_path.clone() {
-                let fitrx   = fitrx_path.to_path_buf();
-                let stem_s  = stem.to_string();
-                let tx      = state.worker_tx.clone();
-                state.workspace.eta_cov_running.insert(stem_s.clone());
-                std::thread::spawn(move || {
-                    match crate::io::r_extract::compute_eta_cov(&fitrx, &data_path) {
-                        Ok(result) => {
-                            let _ = tx.send(crate::workers::messages::WorkerMsg::EtaCovComplete {
-                                stem: stem_s,
-                                result: Box::new(result),
-                            });
-                        }
-                        Err(msg) => {
-                            let _ = tx.send(crate::workers::messages::WorkerMsg::RTaskError {
-                                context: format!("eta_cov {stem_s}"),
-                                message: msg,
-                            });
-                        }
-                    }
-                });
-            }
-        }
-    });
-    if !can_run {
-        ui.label(
-            egui::RichText::new("Select a dataset CSV to run.")
-                .color(theme::fg3(dark)).size(11.0),
-        );
-    }
 }
 
 fn show_no_model(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
