@@ -279,6 +279,49 @@ pub struct EtaCovResult {
 }
 
 // ---------------------------------------------------------------------------
+// Declared-covariate screen (ferx_cov_screen(fit), ferx-r >= 0.2.0)
+// ---------------------------------------------------------------------------
+
+/// One row from `ferx_cov_screen()` — association between an individual
+/// parameter and a covariate declared in the model's `[covariates]` block,
+/// measured two ways: against the raw individual parameter estimate (`ebe`)
+/// and against its random effect (`eta`, a correlation *ratio* for
+/// categorical covariates — not the random effect itself; the R function's
+/// own naming collides with "ETA" elsewhere, so the GUI must not reuse the
+/// bare column name in a label).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CovScreenRow {
+    pub parameter: String,
+    pub covariate: String,
+    /// "continuous" or "categorical" (from `fit$covariate_types`).
+    #[serde(default)]
+    pub cov_type:  String,
+    /// Association with the raw individual parameter estimate; NaN when not computable.
+    #[serde(default = "nan")]
+    pub ebe:       f64,
+    /// Association with the parameter's random effect (Pearson r for
+    /// continuous covariates, correlation ratio η ∈ [0,1] for categorical);
+    /// NaN when not computable.
+    #[serde(default = "nan")]
+    pub eta:       f64,
+}
+
+/// Full result from the `cov_screen.R` background script.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CovScreenResult {
+    #[serde(default)]
+    pub rows: Vec<CovScreenRow>,
+    /// True when the model declares no `[covariates]` block (`fit$covtab` is
+    /// NULL) — the expected, common case for most models, not an error.
+    #[serde(default)]
+    pub no_covariates: bool,
+    /// True when the model has no random effects at all (`fit$ebe_etas` is
+    /// NULL) — the screen needs at least one ETA to associate against.
+    #[serde(default)]
+    pub no_etas: bool,
+}
+
+// ---------------------------------------------------------------------------
 // Structured warnings (ferx >= 0.1.5)
 // ---------------------------------------------------------------------------
 
@@ -364,5 +407,47 @@ mod tests {
         // R `na = "null"` must become None, not an error.
         assert_eq!(r.obs_points[1].dv, None);
         assert_eq!(r.obs_points[0].dv, Some(5.3653));
+    }
+
+    #[test]
+    fn cov_screen_result_parses_bridge_json() {
+        // A trimmed but faithful sample of what cov_screen.R emits when the
+        // model declares [covariates] and ferx_cov_screen() finds candidates.
+        const FIXTURE: &str = r#"{
+          "rows": [
+            {"parameter":"CL","covariate":"WT","cov_type":"continuous","ebe":0.412,"eta":0.398},
+            {"parameter":"V","covariate":"SEX","cov_type":"categorical","ebe":0.255,"eta":0.221}
+          ],
+          "no_covariates": false,
+          "no_etas": false
+        }"#;
+        let r: CovScreenResult = serde_json::from_str(FIXTURE).expect("parse CovScreenResult");
+        assert_eq!(r.rows.len(), 2);
+        assert!(!r.no_covariates);
+        assert!(!r.no_etas);
+        assert_eq!(r.rows[0].cov_type, "continuous");
+        assert_eq!(r.rows[1].cov_type, "categorical");
+        assert_eq!(r.rows[0].eta, 0.398);
+    }
+
+    #[test]
+    fn cov_screen_result_distinguishes_empty_reasons() {
+        let no_cov: CovScreenResult =
+            serde_json::from_str(r#"{"rows":[],"no_covariates":true,"no_etas":false}"#)
+                .expect("parse");
+        assert!(no_cov.no_covariates);
+        assert!(no_cov.rows.is_empty());
+
+        let no_eta: CovScreenResult =
+            serde_json::from_str(r#"{"rows":[],"no_covariates":false,"no_etas":true}"#)
+                .expect("parse");
+        assert!(no_eta.no_etas);
+
+        // Legitimate "nothing cleared the threshold" case: both false, empty rows.
+        let below_threshold: CovScreenResult =
+            serde_json::from_str(r#"{"rows":[],"no_covariates":false,"no_etas":false}"#)
+                .expect("parse");
+        assert!(!below_threshold.no_covariates && !below_threshold.no_etas);
+        assert!(below_threshold.rows.is_empty());
     }
 }

@@ -198,14 +198,21 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
-### v0.6.0 (2026-07-04) — ferx 0.2.0 impact audit: ETA-Cov fix, convergence trace fix, DSL parser hardening
+### v0.6.0 (2026-07-06) — ferx 0.2.0 impact audit: ETA-Cov fix + declared-covariate screen, convergence trace fix, DSL parser hardening
 
-A full audit of the ferx-core/ferx-r 0.2.0 release against every R call and parser FeRx GUI relies on. Two things were confirmed broken, one recently-added GUI feature is now confirmed live, and one latent parser bug (unrelated to the version bump, but found while checking the new DSL sections) is fixed.
+A full audit of the ferx-core/ferx-r 0.2.0 release against every R call and parser FeRx GUI relies on. Two things were confirmed broken, one recently-added GUI feature is now confirmed live, one latent parser bug (unrelated to the version bump, but found while checking the new DSL sections) is fixed, and the ETA-Cov section gains a second, more formal screening view.
 
 **Fixed: ETA-Covariate screen — `ferx_eta_cov(fit, data)` removed in ferx-r 0.2.0**
 - ferx-r's [fit-accessor cleanup](https://github.com/FeRx-NLME/ferx-r/issues/226) removed `ferx_eta_cov()`, `ferx_cor_matrix()`, and `ferx_estimates()` as callable functions, replacing them with fields computed automatically at fit time (`fit$eta_cov`, `fit$cor_matrix`, `fit$estimates`). FeRx GUI's ETA-Cov section called the removed function directly and would fail on any ferx-r ≥ 0.2.0 install.
 - Switched to reading `fit$eta_cov` after `ferx_load_fit()`. This also **simplifies the feature**: the dataset picker and "Run ETA-Cov Screen" setup step are gone — the screen now loads automatically the moment a fit exists, matching how the other Evaluation sections already behave, since ferx-r recomputes it from the dataset path recorded on the fit itself.
 - `fit$eta_cov` can be empty for two different reasons — too few subjects, or the original dataset no longer being readable at its recorded path — which the previous single-message empty state couldn't tell apart. The GUI now distinguishes them and explains the second case explicitly instead of silently showing a misleading "no pairs found."
+
+**New: Declared Covariates view, merged into the ETA-Cov section**
+- The ETA-Cov section now has two views, toggled at the top: **Dataset Scan** (the informal `fit$eta_cov` screen above — correlates raw EBEs against every numeric dataset column, no covariate needs to be declared) and **Declared Covariates** (new — `ferx_cov_screen(fit)`, a formal screen using the model's own `[covariates]` block, aggregated to one value per subject exactly as the model would use it, reporting association against both the raw individual parameter estimate and its random effect).
+- Each view carries a short caption plus a "ⓘ" hover with the full statistical explanation — including that the two views use independently-calibrated thresholds (Dataset Scan: |r| ≥ 0.3; Declared Covariates: |association| ≥ 0.2, both ferx-r's own defaults) and that neither view's flagged pairs are themselves a formal covariate test.
+- The Declared Covariates table labels its two measure columns "EBE ASSOC." / "ETA ASSOC." rather than reusing `ferx_cov_screen()`'s bare `eta` column name, which would otherwise read as "the ETA value itself" rather than "association strength with the ETA."
+- Distinguishes three legitimate empty states: no `[covariates]` block declared (the common case for most models), no random effects to screen against, and nothing clearing the threshold — each explained separately.
+- Computed lazily and independently per view (its own cache, its own in-flight tracking) — switching views only triggers an R call for whichever one hasn't been computed yet, not both up front.
 
 **Fixed: convergence trace lost after a temp-file cleanup**
 - ferx-r 0.2.0 now bundles the optimizer trace directly inside `.fitrx` as `trace.csv`, specifically because the external temp file `trace_path` points to "usually doesn't survive" a reboot or OS temp-file cleanup (its own words, from the ferx-r source). FeRx GUI's Convergence tab only ever read the external path, so any bundle whose temp file had since been cleaned up showed "Trace file not found" — even though the trace was sitting right there in the bundle.
@@ -220,7 +227,7 @@ A full audit of the ferx-core/ferx-r 0.2.0 release against every R call and pars
 
 **Investigated, no action needed:** every other `ferx_*` call FeRx GUI makes (`ferx_check_init`, `ferx_fit`, `ferx_load_fit`, `ferx_model`, `ferx_model_inspect`, `ferx_save_fit`, `ferx_simulate`, `ferx_sir`) is unaffected by ferx-core/ferx-r 0.2.0's other breaking changes (section-function collapse, `ferx_plot_trace` → `plot()`, `ferx_selection_excluded` removal, and the various renames) — none of them touch calls FeRx GUI actually makes.
 
-**Backlog, not implemented this round:** a `covtab.csv` reader for FREM/covariate-block models, and dedicated GUI controls for the large set of new `[fit_options]` keys (`npde_*`, `imp_*`/`impmap_*`, `cov_inner_tol`, `outer_xtol`/`outer_ftol`, `global_search`, `bloq_method`, `mu_referencing`, `iov_column`, `inits_from_nca`, and others) — all of these already work correctly when set directly in the model file; this is about deciding which, if any, deserve a dedicated widget rather than staying file-only.
+**Backlog, not implemented this round:** dedicated GUI controls for the large set of new `[fit_options]` keys (`npde_*`, `imp_*`/`impmap_*`, `cov_inner_tol`, `outer_xtol`/`outer_ftol`, `global_search`, `bloq_method`, `mu_referencing`, `iov_column`, `inits_from_nca`, and others) — all of these already work correctly when set directly in the model file; this is about deciding which, if any, deserve a dedicated widget rather than staying file-only.
 
 ### v0.5.0 (2026-07-02) — model-file fit options, SAEM conditional distributions, ferx-r 0.2.0 compatibility
 

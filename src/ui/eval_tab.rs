@@ -3,7 +3,7 @@ use egui_plot::{Bar, BarChart, HLine, Line, Plot, PlotPoints, Points, VLine};
 
 use crate::app::theme;
 use crate::domain::TraceRow;
-use crate::state::{AppState, CondDistView, EvalSection};
+use crate::state::{AppState, CondDistView, EtaCovView, EvalSection};
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
@@ -84,6 +84,25 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                             state.ui.eval_conddist_view = view;
                         }
                     }
+                }
+            }
+        }
+
+        // View toggle (ETA-Cov only): Dataset Scan vs. Declared Covariates.
+        if state.ui.active_eval_section == EvalSection::EtaCov {
+            ui.add_space(10.0);
+            for (label, view) in [
+                ("Dataset Scan",        EtaCovView::DatasetScan),
+                ("Declared Covariates", EtaCovView::DeclaredCovariates),
+            ] {
+                let active_view = state.ui.eval_eta_cov_view == view;
+                if ui.add(
+                    egui::Button::new(egui::RichText::new(label).size(10.5)
+                        .color(if active_view { egui::Color32::WHITE } else { inactive_fg }))
+                    .fill(if active_view { theme::ACCENT } else { inactive_fill })
+                    .min_size(egui::vec2(0.0, 20.0)),
+                ).clicked() {
+                    state.ui.eval_eta_cov_view = view;
                 }
             }
         }
@@ -965,6 +984,45 @@ fn launch_eta_cov(state: &mut AppState, stem: &str, fitrx_path: &std::path::Path
     });
 }
 
+/// Kick off (or restart) the declared-covariate screen (`ferx_cov_screen`)
+/// for `stem`. Separate cache/in-flight tracking from `launch_eta_cov` so the
+/// two views compute independently and lazily — only the view the user is
+/// actually looking at ever triggers an R call.
+fn launch_cov_screen(state: &mut AppState, stem: &str, fitrx_path: &std::path::Path) {
+    let fitrx  = fitrx_path.to_path_buf();
+    let stem_s = stem.to_string();
+    let tx     = state.worker_tx.clone();
+    state.workspace.cov_screen_running.insert(stem_s.clone());
+    std::thread::spawn(move || {
+        match crate::io::r_extract::compute_cov_screen(&fitrx) {
+            Ok(result) => {
+                let _ = tx.send(crate::workers::messages::WorkerMsg::CovScreenComplete {
+                    stem: stem_s, result: Box::new(result),
+                });
+            }
+            Err(msg) => {
+                let _ = tx.send(crate::workers::messages::WorkerMsg::RTaskError {
+                    context: format!("cov_screen {stem_s}"),
+                    message: msg,
+                });
+            }
+        }
+    });
+}
+
+/// A short, always-visible caption plus a "ⓘ" hover for the fuller
+/// explanation — the toggled view's caption should never compete with the
+/// data table for attention, but the full statistical detail stays one hover
+/// away.
+fn view_caption(ui: &mut egui::Ui, dark: bool, short: &str, full: &str) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(short).color(theme::fg3(dark)).size(11.0).italics());
+        ui.label(egui::RichText::new("ⓘ").color(theme::fg3(dark)).size(11.0))
+            .on_hover_text(full);
+    });
+    ui.add_space(6.0);
+}
+
 fn show_eta_cov(ui: &mut egui::Ui, state: &mut AppState, idx: usize, dark: bool) {
     let entry = &state.workspace.models[idx];
     let stem  = entry.model.stem.clone();
@@ -979,15 +1037,36 @@ fn show_eta_cov(ui: &mut egui::Ui, state: &mut AppState, idx: usize, dark: bool)
         return;
     };
 
+    match state.ui.eval_eta_cov_view {
+        EtaCovView::DatasetScan =>
+            show_eta_cov_dataset_scan(ui, state, &stem, &fitrx_path, dark),
+        EtaCovView::DeclaredCovariates =>
+            show_eta_cov_declared(ui, state, &stem, &fitrx_path, dark),
+    }
+}
+
+/// "Dataset Scan" view: `fit$eta_cov`, an informal Pearson-r scan of every
+/// numeric dataset column against the raw EBE.
+fn show_eta_cov_dataset_scan(
+    ui: &mut egui::Ui, state: &mut AppState, stem: &str, fitrx_path: &std::path::Path, dark: bool,
+) {
+    view_caption(ui, dark,
+        "Informal scan: correlates each raw EBE with every numeric dataset column. \
+         No covariate needs to be declared in the model.",
+        "Pearson correlation between each subject's raw empirical Bayes estimate (EBE) \
+         and every numeric column found in the original dataset used to fit the model. \
+         This is an exploratory, first-pass screen — a flagged pair here is not itself \
+         a covariate test. Pairs with |r| ≥ 0.3 are flagged.");
+
     // Auto-trigger the moment a fit exists — no setup step needed any more.
-    if !state.workspace.eta_cov_running.contains(&stem)
-        && !state.workspace.eta_cov_results.contains_key(&stem)
+    if !state.workspace.eta_cov_running.contains(stem)
+        && !state.workspace.eta_cov_results.contains_key(stem)
     {
-        launch_eta_cov(state, &stem, &fitrx_path);
+        launch_eta_cov(state, stem, fitrx_path);
     }
 
     // ── Computing spinner ──────────────────────────────────────────────────
-    if state.workspace.eta_cov_running.contains(&stem) {
+    if state.workspace.eta_cov_running.contains(stem) {
         ui.centered_and_justified(|ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space(60.0);
@@ -1004,7 +1083,7 @@ fn show_eta_cov(ui: &mut egui::Ui, state: &mut AppState, idx: usize, dark: bool)
     }
 
     // ── Results ────────────────────────────────────────────────────────────
-    if let Some(result) = state.workspace.eta_cov_results.get(&stem).cloned() {
+    if let Some(result) = state.workspace.eta_cov_results.get(stem).cloned() {
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
             .show(ui, |ui| {
@@ -1100,7 +1179,7 @@ fn show_eta_cov(ui: &mut egui::Ui, state: &mut AppState, idx: usize, dark: bool)
                 ui.separator();
                 ui.add_space(8.0);
                 if ui.button("Re-run").clicked() {
-                    launch_eta_cov(state, &stem, &fitrx_path);
+                    launch_eta_cov(state, stem, fitrx_path);
                 }
             });
         return;
@@ -1108,6 +1187,153 @@ fn show_eta_cov(ui: &mut egui::Ui, state: &mut AppState, idx: usize, dark: bool)
 
     // No cached result and not (yet) running — launch_eta_cov() above just
     // triggered it; this frame renders once before the spinner takes over.
+    ui.centered_and_justified(|ui| {
+        ui.label(egui::RichText::new("Loading…").color(theme::fg3(dark)).size(12.0));
+    });
+}
+
+/// "Declared Covariates" view: `ferx_cov_screen(fit)`, a formal screen using
+/// the model's own `[covariates]` block.
+fn show_eta_cov_declared(
+    ui: &mut egui::Ui, state: &mut AppState, stem: &str, fitrx_path: &std::path::Path, dark: bool,
+) {
+    view_caption(ui, dark,
+        "Formal screen using the model's own [covariates] block, typed and aggregated \
+         exactly as the model would use them.",
+        "For each covariate declared in the model's [covariates] block, aggregated to \
+         one value per subject (median for continuous, most frequent level for \
+         categorical), reports the association with both the raw individual parameter \
+         estimate (EBE) and its random effect (ETA) — Pearson r for continuous \
+         covariates, correlation ratio η ∈ [0,1] for categorical ones. The two can \
+         disagree (e.g. a correlated third covariate), and neither is itself a formal \
+         covariate test — this is a screening aid. Only pairs at or above |association| \
+         ≥ 0.2 are returned; note this threshold differs from the Dataset Scan's |r| ≥ \
+         0.3 — each view is calibrated independently by ferx-r.");
+
+    if !state.workspace.cov_screen_running.contains(stem)
+        && !state.workspace.cov_screen_results.contains_key(stem)
+    {
+        launch_cov_screen(state, stem, fitrx_path);
+    }
+
+    if state.workspace.cov_screen_running.contains(stem) {
+        ui.centered_and_justified(|ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(60.0);
+                ui.add(egui::Spinner::new().size(32.0));
+                ui.add_space(12.0);
+                ui.label(
+                    egui::RichText::new("Computing declared-covariate screen via R…")
+                        .color(theme::fg2(dark)).size(13.0),
+                );
+            });
+        });
+        ui.ctx().request_repaint();
+        return;
+    }
+
+    if let Some(result) = state.workspace.cov_screen_results.get(stem).cloned() {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false; 2])
+            .show(ui, |ui| {
+                if result.no_covariates {
+                    ui.add_space(20.0);
+                    ui.label(
+                        egui::RichText::new("No declared covariates").strong()
+                            .color(theme::fg2(dark)).size(13.0),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "This model declares no [covariates] block — that's the common \
+                             case for most models, not an error. Add one to the model file to \
+                             use this screen.",
+                        )
+                        .color(theme::fg3(dark)).size(11.0),
+                    );
+                } else if result.no_etas {
+                    ui.add_space(20.0);
+                    ui.label(
+                        egui::RichText::new("No random effects to screen").strong()
+                            .color(theme::fg2(dark)).size(13.0),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "This model has no ETAs (inter-individual variability), so there is \
+                             nothing to associate the declared covariates against.",
+                        )
+                        .color(theme::fg3(dark)).size(11.0),
+                    );
+                } else if result.rows.is_empty() {
+                    ui.add_space(20.0);
+                    ui.label(
+                        egui::RichText::new("No covariate associations reached the threshold (|association| ≥ 0.2).")
+                            .color(theme::fg2(dark)).size(12.0),
+                    );
+                } else {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} candidate pair(s) found (|association| ≥ 0.2)",
+                            result.rows.len()
+                        ))
+                        .color(theme::fg2(dark)).size(11.0),
+                    );
+                    ui.add_space(6.0);
+
+                    egui::Grid::new("cov_screen_table")
+                        .num_columns(5)
+                        .striped(true)
+                        .spacing([16.0, 3.0])
+                        .min_col_width(60.0)
+                        .show(ui, |ui| {
+                            for h in ["PARAMETER", "COVARIATE", "TYPE", "EBE ASSOC.", "ETA ASSOC."] {
+                                ui.label(
+                                    egui::RichText::new(h).strong()
+                                        .color(theme::fg2(dark)).size(11.0),
+                                );
+                            }
+                            ui.end_row();
+
+                            for row in &result.rows {
+                                let is_continuous = row.cov_type.eq_ignore_ascii_case("continuous");
+                                let fmt = |v: f64| -> String {
+                                    if !v.is_finite() { return "—".to_string(); }
+                                    if is_continuous { format!("{v:+.3}") } else { format!("{v:.3}") }
+                                };
+                                ui.label(
+                                    egui::RichText::new(&row.parameter)
+                                        .color(theme::fg(dark)).size(12.0).monospace(),
+                                );
+                                ui.label(
+                                    egui::RichText::new(&row.covariate)
+                                        .color(theme::fg(dark)).size(12.0).monospace(),
+                                );
+                                let type_short = if is_continuous { "CONT" }
+                                    else if row.cov_type.eq_ignore_ascii_case("categorical") { "CAT" }
+                                    else { "—" };
+                                ui.label(
+                                    egui::RichText::new(type_short)
+                                        .color(theme::fg3(dark)).size(10.5).monospace(),
+                                );
+                                ui.label(egui::RichText::new(fmt(row.ebe)).color(theme::fg(dark)).size(12.0));
+                                ui.label(egui::RichText::new(fmt(row.eta)).color(theme::fg(dark)).size(12.0));
+                                ui.end_row();
+                            }
+                        });
+                }
+
+                ui.add_space(16.0);
+                ui.separator();
+                ui.add_space(8.0);
+                if ui.button("Re-run").clicked() {
+                    launch_cov_screen(state, stem, fitrx_path);
+                }
+            });
+        return;
+    }
+
     ui.centered_and_justified(|ui| {
         ui.label(egui::RichText::new("Loading…").color(theme::fg3(dark)).size(12.0));
     });

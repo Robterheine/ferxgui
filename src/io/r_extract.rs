@@ -5,7 +5,7 @@
 /// a background thread.
 use std::path::Path;
 
-use crate::domain::{CheckInitResult, EtaCovResult, RModelInfo, SirCi, SirResult, VpcConfig, VpcResult};
+use crate::domain::{CheckInitResult, CovScreenResult, EtaCovResult, RModelInfo, SirCi, SirResult, VpcConfig, VpcResult};
 
 // ---------------------------------------------------------------------------
 // Embedded R scripts
@@ -512,6 +512,55 @@ if (is.null(result) || !is.data.frame(result) || nrow(result) == 0) {
 }
 "#;
 
+// ferx_cov_screen(fit) (ferx-r >= 0.2.0) — the formal covariate screen built
+// on the model's own declared [covariates] block (fit$covtab), as opposed to
+// fit$eta_cov's informal scan of every numeric dataset column. Kept public
+// upstream (not folded into a fit-object field like eta_cov was), so this
+// still calls it directly.
+const COV_SCREEN_R: &str = r#"
+args <- commandArgs(trailingOnly = TRUE)
+if (length(args) < 1) stop("usage: cov_screen.R <fitrx_path>")
+fitrx_path <- args[1]
+
+suppressMessages(library(ferx))
+suppressMessages(library(jsonlite))
+
+fit <- ferx_load_fit(fitrx_path)
+
+# Check preconditions ourselves rather than relying on ferx_cov_screen()'s
+# own message()+NULL fallback, so the two distinct "not applicable" reasons
+# (no declared covariates vs. no random effects at all) are told apart
+# without depending on parsing its console message text.
+no_covariates <- is.null(fit$covtab)   || !is.data.frame(fit$covtab)
+no_etas       <- is.null(fit$ebe_etas) || !is.data.frame(fit$ebe_etas)
+
+if (no_covariates || no_etas) {
+  cat(toJSON(list(rows = list(), no_covariates = no_covariates, no_etas = no_etas),
+             auto_unbox = TRUE))
+} else {
+  # ferx_cov_screen() prints its summary table to the console — capture it.
+  invisible(capture.output(result <- ferx_cov_screen(fit)))
+
+  if (is.null(result) || !is.data.frame(result) || nrow(result) == 0) {
+    cat(toJSON(list(rows = list(), no_covariates = FALSE, no_etas = FALSE), auto_unbox = TRUE))
+  } else {
+    rows <- lapply(seq_len(nrow(result)), function(i) {
+      ebe_v <- result$ebe[i]
+      eta_v <- result$eta[i]
+      list(
+        parameter = as.character(result$parameter[i]),
+        covariate = as.character(result$covariate[i]),
+        cov_type  = as.character(result$type[i]),
+        ebe       = if (is.na(ebe_v)) NULL else as.numeric(ebe_v),
+        eta       = if (is.na(eta_v)) NULL else as.numeric(eta_v)
+      )
+    })
+    cat(toJSON(list(rows = rows, no_covariates = FALSE, no_etas = FALSE),
+               auto_unbox = TRUE, na = "null"))
+  }
+}
+"#;
+
 const CREATE_MODEL_R: &str = r#"
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) < 2) stop("usage: create_model.R <output_path> <template>")
@@ -873,6 +922,12 @@ pub fn compute_eta_cov(fitrx_path: &Path) -> Result<EtaCovResult, String> {
     let json = run_script(ETA_COV_R, &[path_as_str(fitrx_path)?])?;
     serde_json::from_str(&json)
         .map_err(|e| format!("eta_cov JSON parse error: {e}\nR output: {}", &json[..json.len().min(500)]))
+}
+
+pub fn compute_cov_screen(fitrx_path: &Path) -> Result<CovScreenResult, String> {
+    let json = run_script(COV_SCREEN_R, &[path_as_str(fitrx_path)?])?;
+    serde_json::from_str(&json)
+        .map_err(|e| format!("cov_screen JSON parse error: {e}\nR output: {}", &json[..json.len().min(500)]))
 }
 
 /// Export a 4-panel GOF figure via an R/ggplot2 script.

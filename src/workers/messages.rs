@@ -84,6 +84,12 @@ pub enum WorkerMsg {
         result: Box<crate::domain::EtaCovResult>,
     },
 
+    /// `ferx_cov_screen()` completed for the given model stem.
+    CovScreenComplete {
+        stem:   String,
+        result: Box<crate::domain::CovScreenResult>,
+    },
+
     /// An R background task failed.
     RTaskError {
         /// Short context string, e.g. "inspect run001", "vpc run001", or "check_init run001".

@@ -156,6 +156,22 @@ pub enum CondDistView {
     ModeVsMean,
 }
 
+/// Which of the two covariate-screening views is shown in the ETA-Cov
+/// section. Both screen for candidate covariate effects, but from different
+/// sources and with different rigor:
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EtaCovView {
+    /// `fit$eta_cov` — an informal scan: Pearson r between each raw EBE and
+    /// every numeric column in the original dataset. No covariate needs to
+    /// be declared in the model.
+    #[default]
+    DatasetScan,
+    /// `ferx_cov_screen(fit)` — a formal screen using the model's own
+    /// declared `[covariates]` block, typed and aggregated exactly as the
+    /// model would use them. Requires the model to declare covariates.
+    DeclaredCovariates,
+}
+
 /// Which column the History table is sorted by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HistorySortCol {
@@ -412,6 +428,11 @@ pub struct UiState {
     /// Index into `eval_conddist.eta_names` for the currently displayed ETA.
     pub eval_conddist_eta_idx: usize,
 
+    // ---- Evaluation tab (ETA-Cov section) ----
+    /// Which of the two covariate-screening views (Dataset Scan / Declared
+    /// Covariates) is shown.
+    pub eval_eta_cov_view: EtaCovView,
+
     // ---- Run popup ----
     /// Whether the floating run-output window is visible.
     pub run_popup_open: bool,
@@ -581,6 +602,7 @@ impl Default for UiState {
             eval_conddist: None,
             eval_conddist_view: CondDistView::default(),
             eval_conddist_eta_idx: 0,
+            eval_eta_cov_view: EtaCovView::default(),
             run_popup_open:        false,
             about_open:            false,
             run_popup_last_run_id: None,
@@ -683,6 +705,12 @@ pub struct WorkspaceState {
     pub eta_cov_results: HashMap<String, crate::domain::EtaCovResult>,
     /// Stems for which an ETA-cov computation is currently in flight.
     pub eta_cov_running: HashSet<String>,
+    /// Cached declared-covariate screen results (`ferx_cov_screen`) keyed by
+    /// model stem. Separate from `eta_cov_*` so the two views in the ETA-Cov
+    /// section can be computed independently and lazily.
+    pub cov_screen_results: HashMap<String, crate::domain::CovScreenResult>,
+    /// Stems for which a covariate-screen computation is currently in flight.
+    pub cov_screen_running: HashSet<String>,
 }
 
 impl WorkspaceState {
@@ -742,6 +770,8 @@ impl WorkspaceState {
             sir_cancel_tx:      HashMap::new(),
             eta_cov_results:    HashMap::new(),
             eta_cov_running:    HashSet::new(),
+            cov_screen_results: HashMap::new(),
+            cov_screen_running: HashSet::new(),
         }
     }
 
@@ -1088,6 +1118,11 @@ impl AppState {
                 self.ui.status_message = format!("ETA-cov ready: {stem}");
                 self.workspace.eta_cov_results.insert(stem, *result);
             }
+            CovScreenComplete { stem, result } => {
+                self.workspace.cov_screen_running.remove(&stem);
+                self.ui.status_message = format!("Covariate screen ready: {stem}");
+                self.workspace.cov_screen_results.insert(stem, *result);
+            }
             RTaskError { context, message } => {
                 // Clean up in-flight tracking if stem is encoded in the context.
                 // For inspect, also mark as failed so we don't auto-retry every frame.
@@ -1116,6 +1151,9 @@ impl AppState {
                 }
                 if let Some(stem) = context.strip_prefix("eta_cov ") {
                     self.workspace.eta_cov_running.remove(stem);
+                }
+                if let Some(stem) = context.strip_prefix("cov_screen ") {
+                    self.workspace.cov_screen_running.remove(stem);
                 }
                 self.ui.status_message = format!("R error ({context}): {message}");
             }
