@@ -42,6 +42,11 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     let has_res = state.workspace.sir_results.contains_key(&stem);
 
     egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+        // Which model this SIR run belongs to — mirrors the Evaluation tab
+        // so it's never ambiguous which model's fit is being visualised.
+        ui.label(egui::RichText::new(&stem).size(12.0).strong().color(theme::fg(dark)));
+        ui.add_space(6.0);
+
         // ── Settings card ─────────────────────────────────────────────────
         egui::Frame::new()
             .fill(theme::card_fill(dark))

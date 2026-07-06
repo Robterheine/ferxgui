@@ -109,7 +109,6 @@ pub fn paint_tab_icon(
         Tab::Uncertainty => uncertainty(painter, cx, cy, s, color, st),
         Tab::SimPlot     => simplot(painter, cx, cy, s, st),
         Tab::History     => history(painter, cx, cy, s, color, st),
-        Tab::Settings    => settings(painter, cx, cy, s, color, st),
     }
 }
 
@@ -263,17 +262,4 @@ fn history(painter: &egui::Painter, cx: f32, cy: f32, s: f32, color: egui::Color
     painter.line_segment([egui::pos2(cx, cy), p(cx, cy, -s * 0.33, -s * 0.5)], st);
     painter.line_segment([egui::pos2(cx, cy), p(cx, cy,  s * 0.33, -s * 0.5)], st);
     painter.circle_filled(egui::pos2(cx, cy), s * 0.12, color);
-}
-
-// ── Settings: three horizontal slider lines with knobs ───────────────────────
-fn settings(painter: &egui::Painter, cx: f32, cy: f32, s: f32, color: egui::Color32, st: egui::Stroke) {
-    let hw = s * 0.74;
-    let r  = s * 0.24;
-    let ys   = [cy - s * 0.56, cy, cy + s * 0.56];
-    let kxs  = [cx - s * 0.22, cx + s * 0.28, cx - s * 0.08];
-    for (&y, &kx) in ys.iter().zip(kxs.iter()) {
-        painter.line_segment([egui::pos2(cx - hw, y), egui::pos2(cx + hw, y)], st);
-        painter.circle_stroke(egui::pos2(kx, y), r, st);
-        painter.circle_filled(egui::pos2(kx, y), r * 0.45, color);
-    }
 }

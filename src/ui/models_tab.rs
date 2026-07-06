@@ -58,6 +58,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     show_duplicate_dialog(ui.ctx(), state);
     show_delete_dialog(ui.ctx(), state);
     show_new_model_dialog(ui.ctx(), state);
+    show_compare_picker(ui.ctx(), state);
     show_compare_dialog(ui.ctx(), state);
 }
 
@@ -95,7 +96,7 @@ fn show_top_bar(ui: &mut egui::Ui, state: &mut AppState) {
                 .any(|b| b.path == dir);
             let (btn_label, btn_fill, btn_fg, tip) = if already_bookmarked {
                 (
-                    "✓ Bookmark project",
+                    "✔ Bookmark project",
                     theme::ACCENT,
                     egui::Color32::WHITE,
                     "Remove this directory from project bookmarks",
@@ -220,6 +221,24 @@ fn show_top_bar(ui: &mut egui::Ui, state: &mut AppState) {
                 {
                     state.ui.new_model_stem.clear();
                     state.ui.new_model_dialog = true;
+                }
+
+                // Explicit, discoverable entry point into the compare dialog
+                // (previously only reachable via right-click "Compare with…"
+                // on a model row, which a first-time user has no reason to find).
+                let n_fitted = state.workspace.models.iter().filter(|m| m.fit.is_some()).count();
+                let btn = egui::Button::new(egui::RichText::new("Compare Models…").size(12.0))
+                    .min_size(egui::vec2(115.0, 22.0));
+                let resp = ui.add_enabled(n_fitted >= 2, btn);
+                let resp = if n_fitted < 2 {
+                    resp.on_disabled_hover_text("Need at least two models with a completed fit to compare")
+                } else {
+                    resp
+                };
+                if resp.clicked() {
+                    state.ui.compare_picker_open = true;
+                    state.ui.compare_picker_a = None;
+                    state.ui.compare_picker_b = None;
                 }
             });
         }
@@ -618,12 +637,12 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
                             match row.cov_ok {
                                 Some(true) => {
                                     ui.label(
-                                        egui::RichText::new("✓").color(theme::GREEN).size(13.0),
+                                        egui::RichText::new("✔").color(theme::GREEN).size(13.0),
                                     );
                                 }
                                 Some(false) => {
                                     ui.label(
-                                        egui::RichText::new("✗").color(theme::RED).size(13.0),
+                                        egui::RichText::new("✖").color(theme::RED).size(13.0),
                                     );
                                 }
                                 None => {
@@ -738,16 +757,61 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
     }
 
     // Keyboard: Space = toggle star, Enter = switch to Output pill.
+    // Guarded by focus: these are list-row shortcuts and must not fire while
+    // another widget (e.g. the code editor's TextEdit) has keyboard focus —
+    // otherwise typing Enter/Space into the editor would also yank focus away
+    // from it via this global listener.
     if let Some(sel) = state.ui.selected_model {
         let space = ui.input(|i| i.key_pressed(egui::Key::Space));
         let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-        if space {
+        let other_widget_focused = ui.ctx().memory(|m| m.focused().is_some());
+        if space && should_apply_list_shortcut(other_widget_focused) {
             state.workspace.models[sel].meta.starred ^= true;
             save_meta_for(state, sel);
         }
-        if enter {
+        if enter && should_apply_list_shortcut(other_widget_focused) {
             state.ui.active_model_pill = ModelPill::Output;
         }
+    }
+}
+
+/// Whether a model-list keyboard shortcut (Space/Enter) should act, given
+/// whether some other widget currently holds keyboard focus.
+fn should_apply_list_shortcut(other_widget_focused: bool) -> bool {
+    !other_widget_focused
+}
+
+#[cfg(test)]
+mod list_shortcut_tests {
+    use super::{egui, should_apply_list_shortcut};
+    use egui_kittest::Harness;
+
+    #[test]
+    fn fires_when_nothing_else_is_focused() {
+        assert!(should_apply_list_shortcut(false));
+    }
+
+    #[test]
+    fn suppressed_when_another_widget_is_focused() {
+        assert!(!should_apply_list_shortcut(true));
+    }
+
+    /// End-to-end: typing into a real egui TextEdit gives it focus, and the
+    /// production focus check (`ctx.memory(|m| m.focused().is_some())`) must
+    /// report that focus is held — this is the actual mechanism the fix
+    /// depends on, exercised against real egui rather than a mock.
+    #[test]
+    fn textedit_holds_focus_while_editing() {
+        let mut buf = String::new();
+        let mut harness = Harness::new_ui(move |ui| {
+            let resp = ui.add(egui::TextEdit::multiline(&mut buf));
+            resp.request_focus();
+        });
+        harness.run();
+
+        let focused = harness.ctx.memory(|m| m.focused().is_some());
+        assert!(focused, "TextEdit should hold keyboard focus after request_focus()");
+        assert!(!should_apply_list_shortcut(focused));
     }
 }
 
@@ -762,22 +826,48 @@ fn show_detail_panel(ui: &mut egui::Ui, state: &mut AppState) {
         return;
     }
 
-    // Pill tab bar.
+    // Tab bar. Deliberately not filled buttons: a tab strip should read as
+    // part of the content pane it switches, not a row of separate buttons —
+    // the active tab is marked by accent-colored text plus an underline
+    // (flush with the separator below) rather than a solid background.
     let dark = ui.visuals().dark_mode;
-    let inactive_fill = if dark { theme::BG3 } else { egui::Color32::TRANSPARENT };
-    let inactive_fg   = if dark { theme::FG2 } else { ui.visuals().text_color() };
+    let inactive_fg = if dark { theme::FG2 } else { ui.visuals().text_color() };
+    let hover_bg = if dark { theme::BG3 } else { egui::Color32::from_gray(230) };
     ui.horizontal(|ui| {
         for pill in ModelPill::ALL {
             let active = state.ui.active_model_pill == *pill;
-            let btn = egui::Button::new(
-                egui::RichText::new(pill.label())
-                    .size(12.0)
-                    .color(if active { egui::Color32::WHITE } else { inactive_fg }),
-            )
-            .fill(if active { theme::ACCENT } else { inactive_fill })
-            .corner_radius(egui::CornerRadius::same(12))
-            .min_size(egui::vec2(70.0, 24.0));
-            if ui.add(btn).clicked() {
+            let (rect, response) = ui.allocate_exact_size(
+                egui::vec2(70.0, 26.0),
+                egui::Sense::click(),
+            );
+            // `theme::accent(dark)`, not the raw dark-only `theme::ACCENT` —
+            // as text on the light theme's near-white panel, `ACCENT` itself
+            // only measures ~3.1 contrast (below the 4.5 AA floor).
+            let fg = if active {
+                theme::accent(dark)
+            } else if response.hovered() {
+                theme::fg(dark)
+            } else {
+                inactive_fg
+            };
+            if response.hovered() && !active {
+                ui.painter().rect_filled(rect, 4.0, hover_bg);
+            }
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                pill.label(),
+                egui::FontId::proportional(12.0),
+                fg,
+            );
+            if active {
+                let underline_y = rect.bottom() - 1.0;
+                ui.painter().line_segment(
+                    [egui::pos2(rect.left() + 4.0, underline_y), egui::pos2(rect.right() - 4.0, underline_y)],
+                    egui::Stroke::new(2.0, theme::accent(dark)),
+                );
+            }
+            if response.clicked() {
                 state.ui.active_model_pill = *pill;
             }
         }
@@ -824,8 +914,17 @@ fn show_editor_pill(ui: &mut egui::Ui, state: &mut AppState) {
                 }
                 if ui
                     .add(
-                        egui::Button::new(egui::RichText::new("Save").size(12.0))
-                            .fill(theme::GREEN),
+                        // Explicit BLACK text: the button's fill overrides the
+                        // background to a fixed `theme::GREEN` regardless of
+                        // theme, but text color was left to the theme default
+                        // (near-white in dark mode) — near-white on this green
+                        // measures ~1.6 contrast, reported as hard to read.
+                        // BLACK-on-GREEN measures ~9.8, and stays correct in
+                        // both themes since the button's own fill doesn't vary.
+                        egui::Button::new(
+                            egui::RichText::new("Save").size(12.0).color(egui::Color32::BLACK),
+                        )
+                        .fill(theme::GREEN),
                     )
                     .clicked()
                 {
@@ -871,20 +970,7 @@ fn show_editor_pill(ui: &mut egui::Ui, state: &mut AppState) {
                 ui.add_space(4.0);
 
                 // Text editor with syntax highlighting.
-                // Cache the layout job across frames; only recompute when the buffer or theme changes.
-                let cache_valid = state.ui.editor_layout_cache.as_ref()
-                    .is_some_and(|(t, d, _)| t == &state.ui.editor_buffer && *d == dark);
-                if !cache_valid {
-                    let job = highlight_ferx(&state.ui.editor_buffer, dark);
-                    state.ui.editor_layout_cache = Some((state.ui.editor_buffer.clone(), dark, job));
-                }
-                let cached_job = state.ui.editor_layout_cache.as_ref()
-                    .expect("layout cache populated unconditionally above")
-                    .2.clone();
-                let mut layouter = move |ui: &egui::Ui, _text: &str, _wrap: f32| {
-                    ui.fonts(|f| f.layout_job(cached_job.clone()))
-                };
-
+                let mut layouter = editor_layouter(&mut state.ui.editor_layout_cache, dark);
                 let buf = &mut state.ui.editor_buffer;
                 let resp = ui.add(
                     egui::TextEdit::multiline(buf)
@@ -898,6 +984,178 @@ fn show_editor_pill(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             });
         });
+}
+
+/// Builds a `TextEdit` layouter that re-highlights only when the queried
+/// text or theme differs from what's cached.
+///
+/// The cache key must be the `text` the layouter is *asked* about, not some
+/// external buffer (e.g. `editor_buffer`): `TextEdit` calls the layouter
+/// with text as of *this* frame's edit already applied, before any external
+/// copy is guaranteed to match it. The returned galley must correspond
+/// exactly to that `text` argument, or `TextEdit`'s cursor-placement math
+/// (row/column derived from the galley) breaks — previously manifesting as
+/// the cursor jumping to the wrong line while typing.
+fn editor_layouter(
+    cache: &mut Option<(String, bool, egui::text::LayoutJob)>,
+    dark: bool,
+) -> impl FnMut(&egui::Ui, &str, f32) -> std::sync::Arc<egui::Galley> + '_ {
+    move |ui: &egui::Ui, text: &str, _wrap: f32| {
+        let cache_valid = cache.as_ref().is_some_and(|(t, d, _)| t == text && *d == dark);
+        if !cache_valid {
+            let job = highlight_ferx(text, dark);
+            *cache = Some((text.to_string(), dark, job));
+        }
+        let job = cache.as_ref().expect("populated above").2.clone();
+        ui.fonts(|f| f.layout_job(job))
+    }
+}
+
+#[cfg(test)]
+mod editor_layouter_tests {
+    use super::editor_layouter;
+    use egui_kittest::Harness;
+
+    /// Regression test for the root cause: `egui::TextEdit` calls its
+    /// `layouter` twice per frame that changes the text — once with the
+    /// pre-edit text, and again (after applying the keystroke internally)
+    /// with the post-edit text — and trusts that the returned galley always
+    /// matches whatever `text` argument it was just given, since it uses
+    /// that galley to map cursor position to row/column. The original bug
+    /// ignored the `text` argument and always served the last cached job,
+    /// so the second call within an edit frame silently returned a galley
+    /// for the *previous* text — which is exactly what broke cursor
+    /// placement (symptom: cursor jumps to the wrong line while typing).
+    ///
+    /// This asserts the invariant directly: querying the layouter with two
+    /// different strings back to back must yield two galleys whose text
+    /// content actually matches what was asked, not a stale reuse.
+    #[test]
+    fn layouter_output_always_matches_the_queried_text() {
+        let mut cache = None;
+        let mut job_a_text = None;
+        let mut job_b_text = None;
+        let mut harness = Harness::new_ui(|ui| {
+            let mut layouter = editor_layouter(&mut cache, false);
+            job_a_text = Some(layouter(ui, "line1", 200.0).job.text.clone());
+            // Different text, queried immediately after — the exact
+            // situation `TextEdit` creates within a single edit frame.
+            job_b_text = Some(layouter(ui, "line1\nline2", 200.0).job.text.clone());
+        });
+        harness.run();
+        drop(harness); // release the closure's borrows of job_a_text/job_b_text/cache
+
+        // `highlight_ferx` appends a trailing "\n" to its job text (pre-existing
+        // behaviour, unrelated to this fix) — compare against its actual output
+        // rather than the raw query string.
+        assert_eq!(job_a_text, Some(super::highlight_ferx("line1", false).text.clone()));
+        assert_eq!(
+            job_b_text,
+            Some(super::highlight_ferx("line1\nline2", false).text.clone()),
+            "layouter must return a galley matching the text it was just queried with, \
+             not a stale cached job left over from a different (earlier) query"
+        );
+        assert_ne!(
+            job_a_text, job_b_text,
+            "sanity check: the two queries must actually produce different job text"
+        );
+    }
+
+    /// Sanity check on the caching behaviour: querying the *same* text twice
+    /// should reuse the cached job rather than recomputing (the whole point
+    /// of caching), which we can observe via the cache's stored text staying
+    /// equal to what was asked, across repeated identical queries.
+    #[test]
+    fn identical_repeated_queries_stay_cached() {
+        let mut cache = None;
+        let mut harness = Harness::new_ui(|ui| {
+            let mut layouter = editor_layouter(&mut cache, false);
+            let _ = layouter(ui, "same text", 200.0);
+            let _ = layouter(ui, "same text", 200.0);
+        });
+        harness.run();
+        drop(harness); // release the closure's borrow of cache
+
+        let (cached_text, _dark, _job) = cache.expect("cache populated after queries");
+        assert_eq!(cached_text, "same text");
+    }
+}
+
+#[cfg(test)]
+mod contrast_tests {
+    use crate::app::theme;
+    use eframe::egui::Color32;
+
+    // WCAG 2.x relative luminance + contrast ratio (see also app.rs's
+    // theme_contrast_tests, which duplicates this small pure-math helper
+    // rather than sharing it across a two-test-module boundary).
+    fn relative_luminance(c: Color32) -> f64 {
+        let to_linear = |ch: u8| {
+            let c = ch as f64 / 255.0;
+            if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * to_linear(c.r()) + 0.7152 * to_linear(c.g()) + 0.0722 * to_linear(c.b())
+    }
+
+    fn contrast_ratio(a: Color32, b: Color32) -> f64 {
+        let (la, lb) = (relative_luminance(a), relative_luminance(b));
+        let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// Regression test for the model-pill tab-strip restyle: the active tab's
+    /// text/underline color (`theme::accent(dark)`) is painted directly on
+    /// the surrounding `CentralPanel` background (no button fill anymore —
+    /// see `show_detail_panel`), so it must independently clear AA contrast
+    /// against that panel background in both themes. Using the dark-only
+    /// `theme::ACCENT` for this in light mode was the bug (measured ~3.1).
+    #[test]
+    fn active_tab_accent_text_meets_aa_contrast_on_panel_bg_in_both_themes() {
+        let panel_dark  = Color32::from_rgb(0x1a, 0x1a, 0x20); // theme::BG
+        let panel_light = Color32::from_gray(248);             // CentralPanel fill, light theme
+
+        let dark_ratio = contrast_ratio(theme::accent(true), panel_dark);
+        assert!(
+            dark_ratio >= 4.5,
+            "dark-theme active-tab text/panel contrast is {dark_ratio:.2}, below AA floor of 4.5"
+        );
+
+        let light_ratio = contrast_ratio(theme::accent(false), panel_light);
+        assert!(
+            light_ratio >= 4.5,
+            "light-theme active-tab text/panel contrast is {light_ratio:.2}, below AA floor of 4.5"
+        );
+    }
+
+    /// Regression test for "warnings in output are hard to read, make orange
+    /// on black": the warning card's fill is fixed `Color32::BLACK` in both
+    /// themes (see `show_output_pill`'s "Warnings" section), replacing a
+    /// translucent orange-over-panel wash that measured ~2.1 contrast in
+    /// light mode.
+    #[test]
+    fn warning_card_text_meets_aa_contrast_against_its_fixed_black_fill() {
+        let ratio = contrast_ratio(theme::ORANGE, Color32::BLACK);
+        assert!(
+            ratio >= 4.5,
+            "warning card text/fill contrast is {ratio:.2}, below AA floor of 4.5"
+        );
+    }
+
+    /// Regression test for "Save button is hard to read (green on white)":
+    /// the button's fill is the fixed `theme::GREEN` in both themes (see
+    /// `show_editor_pill`), so its text color must be chosen to contrast
+    /// against that fixed green regardless of the active theme — not left
+    /// to the theme's default button text color (which is near-white in
+    /// dark mode, measuring ~1.6 contrast against this green).
+    #[test]
+    fn save_button_text_meets_aa_contrast_against_its_fixed_green_fill() {
+        let text_color = Color32::BLACK; // must match the `.color(...)` used in show_editor_pill
+        let ratio = contrast_ratio(text_color, theme::GREEN);
+        assert!(
+            ratio >= 4.5,
+            "Save button text/fill contrast is {ratio:.2}, below AA floor of 4.5"
+        );
+    }
 }
 
 fn save_editor(state: &mut AppState, idx: usize) {
@@ -1230,8 +1488,9 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
                         .clicked()
                     {
                         if let Some(dp) = data_path {
-                            // Clear any previous result for this stem.
+                            // Clear any previous result/error for this stem.
                             state.workspace.check_init_results.remove(&stem);
+                            state.workspace.check_init_error.remove(&stem);
                             state.workspace.check_init_running.insert(stem.clone());
                             let tx      = state.worker_tx.clone();
                             let ctx     = ui.ctx().clone();
@@ -1267,6 +1526,29 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
                     }
                 });
 
+                // Error card — a failed check_init previously only surfaced
+                // via the tiny status-bar line (reported: "spinner appears
+                // then disappears, nothing else"). Shown with the same
+                // visual weight as the result card below so it can't be missed.
+                if let Some(err) = state.workspace.check_init_error.get(&stem).cloned() {
+                    ui.add_space(6.0);
+                    egui::Frame::new()
+                        .fill(egui::Color32::from_rgba_unmultiplied(0xe8, 0x55, 0x55, 20))
+                        .inner_margin(egui::Margin::same(8))
+                        .corner_radius(egui::CornerRadius::same(5))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(
+                                egui::RichText::new("Check inits failed")
+                                    .color(theme::RED)
+                                    .size(13.0)
+                                    .strong(),
+                            );
+                            ui.add_space(4.0);
+                            ui.label(egui::RichText::new(&err).color(theme::RED).size(11.0));
+                        });
+                }
+
                 // Result card.
                 if let Some(ci) = state.workspace.check_init_results.get(&stem).cloned() {
                     ui.add_space(6.0);
@@ -1275,14 +1557,14 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
                             (
                                 egui::Color32::from_rgba_unmultiplied(0xe8, 0x55, 0x55, 20),
                                 theme::RED,
-                                "✗",
+                                "✖",
                                 "Non-finite start OFV — check model structure or data",
                             )
                         } else if ci.dropping() {
                             (
                                 egui::Color32::from_rgba_unmultiplied(0x3e, 0xc9, 0x7a, 20),
                                 theme::GREEN,
-                                "✓",
+                                "✔",
                                 "Gradient pointing down — inits look healthy",
                             )
                         } else {
@@ -1575,7 +1857,14 @@ pub fn do_launch_queued(state: &mut AppState, queued: crate::domain::QueuedRun) 
                 export_tables: queued.export_tables,
                 run_sir_after: queued.run_sir_after,
             });
+            // `log_text` is a separately-maintained pre-joined cache of
+            // `log_buffer` (see its doc comment in state.rs) — it must be
+            // cleared alongside the buffer, or the Run popup keeps showing
+            // the previous run's full log until enough new lines arrive to
+            // incrementally push it out (reported: "popup shows history of
+            // previous runs" on a fresh run).
             state.run.log_buffer.clear();
+            state.run.log_text.clear();
             state.ui.status_message = format!("Running {}", queued.stem);
         }
         Err(e) => {
@@ -1631,7 +1920,7 @@ fn show_output_pill(ui: &mut egui::Ui, state: &mut AppState) {
                         .spacing([24.0, 6.0])
                         .show(ui, |ui| {
                             // Row 1
-                            kv(ui, "Status", if fit.converged { "✓ Converged" } else { "✗ Not converged" },
+                            kv(ui, "Status", if fit.converged { "✔ Converged" } else { "✖ Not converged" },
                                if fit.converged { theme::GREEN } else { theme::RED });
                             kv(ui, "Method", &fit.method.to_uppercase(), theme::fg(dark));
                             ui.end_row();
@@ -1654,7 +1943,7 @@ fn show_output_pill(ui: &mut egui::Ui, state: &mut AppState) {
                             kv(
                                 ui,
                                 "Covariance",
-                                if fit.covariance_ok { "✓ OK" } else { "✗ Failed" },
+                                if fit.covariance_ok { "✔ OK" } else { "✖ Failed" },
                                 if fit.covariance_ok { theme::GREEN } else { theme::RED },
                             );
                             if fit.cov_condition_number.is_finite() {
@@ -1685,8 +1974,13 @@ fn show_output_pill(ui: &mut egui::Ui, state: &mut AppState) {
             if !fit.warnings_structured.is_empty() {
                 // Severity-grouped display (ferx >= 0.1.5).
                 for (severity, icon, color, bg) in [
-                    ("critical", "✗", theme::RED,    egui::Color32::from_rgba_unmultiplied(0xe8, 0x55, 0x55, 25)),
-                    ("warning",  "⚠", theme::ORANGE, egui::Color32::from_rgba_unmultiplied(0xe8, 0x95, 0x40, 25)),
+                    ("critical", "✖", theme::RED,    egui::Color32::from_rgba_unmultiplied(0xe8, 0x55, 0x55, 25)),
+                    // Solid black (not theme-tinted translucent): the previous
+                    // translucent orange-over-panel washed out to a pale peach
+                    // in light mode (measured contrast ~2.1, below AA's 4.5
+                    // floor) — reported as hard to read. Orange-on-black
+                    // measures ~8.8 and is the same in both themes.
+                    ("warning",  "⚠", theme::ORANGE, egui::Color32::BLACK),
                     ("info",     "ℹ", theme::fg2(dark),    egui::Color32::from_rgba_unmultiplied(0x4c, 0x8a, 0xff, 15)),
                 ] {
                     let group: Vec<_> = fit.warnings_structured.iter()
@@ -1713,10 +2007,12 @@ fn show_output_pill(ui: &mut egui::Ui, state: &mut AppState) {
                         });
                 }
             } else if !fit.warnings.is_empty() {
-                // Flat fallback for older .fitrx bundles.
+                // Flat fallback for older .fitrx bundles. Same solid-black
+                // card as the structured warning block above, for the same
+                // contrast reason.
                 ui.add_space(10.0);
                 egui::Frame::new()
-                    .fill(egui::Color32::from_rgba_unmultiplied(0xe8, 0x95, 0x40, 30))
+                    .fill(egui::Color32::BLACK)
                     .inner_margin(egui::Margin::same(10))
                     .corner_radius(egui::CornerRadius::same(6))
                     .show(ui, |ui| {
@@ -3147,7 +3443,148 @@ fn do_delete(state: &mut AppState, idx: usize) {
     state.ui.status_message = format!("Deleted {}.ferx", stem);
 }
 
+// ── Compare picker ───────────────────────────────────────────────────────────
+
+/// "Compare Models…" picker window — sets `compare_a`/`compare_b` from an
+/// explicit two-model choice, which is what `show_compare_dialog` below
+/// already keys off (same trigger the right-click "Compare with…" row
+/// action uses; this just gives it a second, discoverable entry point).
+fn show_compare_picker(ctx: &egui::Context, state: &mut AppState) {
+    if !state.ui.compare_picker_open { return; }
+
+    let is_dark = ctx.style().visuals.dark_mode;
+    let fitted_stems: Vec<String> = state.workspace.models.iter()
+        .filter(|m| m.fit.is_some())
+        .map(|m| m.model.stem.clone())
+        .collect();
+
+    let mut close = false;
+    let mut start_compare = false;
+
+    // Real OS viewport (matching the About/Run/SIR/Settings popups elsewhere
+    // in this codebase): an in-window `egui::Window` here could render
+    // partially outside the main app window with no way to reach its Cancel
+    // button — reported as "cannot close it anymore and it not fully
+    // visible on screen". A real window gets its own native close button
+    // and isn't bounded by the main window's canvas.
+    ctx.show_viewport_immediate(
+        egui::ViewportId::from_hash_of("compare_picker"),
+        egui::ViewportBuilder::default()
+            .with_title("Compare Models")
+            .with_inner_size(egui::vec2(360.0, 220.0))
+            .with_resizable(true)
+            .with_min_inner_size(egui::vec2(300.0, 180.0)),
+        |ctx, _class| {
+            if is_dark { theme::apply_dark(ctx); } else { theme::apply_light(ctx); }
+
+            if ctx.input(|i| i.viewport().close_requested()) {
+                close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+
+            egui::CentralPanel::default().show(ctx, |ui| {
+                if fitted_stems.len() < 2 {
+                    ui.label("Need at least two models with a completed fit to compare.");
+                } else {
+                    egui::Grid::new("compare_picker_grid").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+                        for (row_label, picker_id, selection) in [
+                            ("Model A:", "compare_picker_a", &mut state.ui.compare_picker_a),
+                            ("Model B:", "compare_picker_b", &mut state.ui.compare_picker_b),
+                        ] {
+                            ui.label(row_label);
+                            egui::ComboBox::from_id_salt(picker_id)
+                                .selected_text(selection.clone().unwrap_or_else(|| "Select…".to_string()))
+                                .show_ui(ui, |ui| {
+                                    for stem in &fitted_stems {
+                                        if ui.selectable_label(selection.as_deref() == Some(stem), stem).clicked() {
+                                            *selection = Some(stem.clone());
+                                        }
+                                    }
+                                });
+                            ui.end_row();
+                        }
+                    });
+                }
+
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    let can_compare = state.ui.compare_picker_a.is_some()
+                        && state.ui.compare_picker_b.is_some()
+                        && state.ui.compare_picker_a != state.ui.compare_picker_b;
+                    if ui.add_enabled(can_compare, egui::Button::new("Compare")).clicked() {
+                        start_compare = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+            });
+        },
+    );
+
+    if start_compare {
+        state.ui.compare_a = state.ui.compare_picker_a.take();
+        state.ui.compare_b = state.ui.compare_picker_b.take();
+        state.ui.compare_picker_open = false;
+    } else if close {
+        state.ui.compare_picker_open = false;
+        state.ui.compare_picker_a = None;
+        state.ui.compare_picker_b = None;
+    }
+}
+
 // ── Compare dialog ────────────────────────────────────────────────────────────
+
+/// DV-vs-PRED scatter points (excluding non-finite rows) and padded axis
+/// bounds, for the compare dialog's GOF-comparison plots.
+fn dv_vs_pred_points_and_bounds(data: &crate::domain::EvalData) -> (Vec<[f64; 2]>, f64, f64) {
+    let [lo, hi] = data.dv_pred_range();
+    let pad = (hi - lo) * 0.05;
+    let pts: Vec<[f64; 2]> = data.rows.iter()
+        .filter(|r| r.pred.is_finite() && r.dv.is_finite())
+        .map(|r| [r.pred, r.dv]).collect();
+    (pts, lo - pad, hi + pad)
+}
+
+#[cfg(test)]
+mod dv_vs_pred_points_and_bounds_tests {
+    use super::dv_vs_pred_points_and_bounds;
+    use crate::domain::{EvalData, PredRow};
+
+    fn row(dv: f64, pred: f64) -> PredRow {
+        PredRow {
+            id: "1".to_string(), time: 0.0, dv, pred, ipred: pred,
+            cwres: 0.0, iwres: 0.0, ebe_ofv: f64::NAN,
+        }
+    }
+
+    #[test]
+    fn excludes_non_finite_rows_and_pads_the_range() {
+        let data = EvalData::from_rows(vec![
+            row(1.0, 1.2),
+            row(f64::NAN, 2.0),   // excluded: DV not finite
+            row(3.0, f64::NAN),   // excluded: PRED not finite
+            row(5.0, 4.8),
+        ]);
+        let (pts, lo, hi) = dv_vs_pred_points_and_bounds(&data);
+
+        assert_eq!(pts.len(), 2, "only the two fully-finite rows should be plotted");
+        assert_eq!(pts[0], [1.2, 1.0]);
+        assert_eq!(pts[1], [4.8, 5.0]);
+
+        // dv_pred_range() spans [1.0, 5.0] (min/max across DV, PRED, IPRED
+        // over all rows, including the ones excluded from `pts` above);
+        // bounds must pad outward from that, not just from the plotted points.
+        assert!(lo < 1.0, "lower bound should be padded below the data minimum");
+        assert!(hi > 5.0, "upper bound should be padded above the data maximum");
+    }
+}
 
 fn show_compare_dialog(ctx: &egui::Context, state: &mut AppState) {
     let (stem_a, stem_b) = match (&state.ui.compare_a, &state.ui.compare_b) {
@@ -3167,51 +3604,60 @@ fn show_compare_dialog(ctx: &egui::Context, state: &mut AppState) {
         _ => return,
     };
 
+    // Lazy-load GOF prediction data for both models, cached by the
+    // (stem_a, stem_b) pairing so each .fitrx is only read once per pairing
+    // rather than on every frame the dialog is open (mirrors eval_tab's
+    // `eval_loaded_stem` caching pattern).
+    if state.ui.compare_gof_loaded_for.as_ref() != Some(&(stem_a.clone(), stem_b.clone())) {
+        let fitrx_a = state.workspace.models.iter()
+            .find(|m| m.model.stem == stem_a)
+            .and_then(|m| m.fitrx_path.clone());
+        let fitrx_b = state.workspace.models.iter()
+            .find(|m| m.model.stem == stem_b)
+            .and_then(|m| m.fitrx_path.clone());
+        state.ui.compare_gof_a = fitrx_a.as_deref()
+            .and_then(|p| crate::io::fitrx::read_predictions(p).ok().flatten());
+        state.ui.compare_gof_b = fitrx_b.as_deref()
+            .and_then(|p| crate::io::fitrx::read_predictions(p).ok().flatten());
+        state.ui.compare_gof_loaded_for = Some((stem_a.clone(), stem_b.clone()));
+    }
+    let gof_a = state.ui.compare_gof_a.clone();
+    let gof_b = state.ui.compare_gof_b.clone();
+
+    let is_dark = ctx.style().visuals.dark_mode;
+    let title = format!("Compare  {stem_a}  vs  {stem_b}");
     let mut close = false;
 
-    egui::Window::new(format!("Compare  {stem_a}  vs  {stem_b}"))
-        .collapsible(false)
-        .resizable(true)
-        .default_width(680.0)
-        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-        .show(ctx, |ui| {
+    // Real OS viewport, not an in-window `egui::Window` — see
+    // `show_compare_picker` above for why (same "can't close it, not fully
+    // visible" report applies here too, and even more so now that this
+    // dialog includes the GOF-comparison plots).
+    ctx.show_viewport_immediate(
+        egui::ViewportId::from_hash_of("compare_dialog"),
+        egui::ViewportBuilder::default()
+            .with_title(&title)
+            .with_inner_size(egui::vec2(720.0, 680.0))
+            .with_resizable(true)
+            .with_min_inner_size(egui::vec2(480.0, 360.0)),
+        |ctx, _class| {
+        if is_dark { theme::apply_dark(ctx); } else { theme::apply_light(ctx); }
+
+        if ctx.input(|i| i.viewport().close_requested()) {
+            close = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            close = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+
+        egui::CentralPanel::default().show(ctx, |ui| {
             let dark = ui.visuals().dark_mode;
             let dim  = theme::fg2(dark);
 
-            // ── Header summary ────────────────────────────────────────────────
-            ui.horizontal(|ui| {
-                let d_ofv = fit_b.ofv - fit_a.ofv;
-                let d_aic = fit_b.aic - fit_a.aic;
-                let ofv_col = if d_ofv < -3.84 { theme::GREEN }
-                              else if d_ofv > 0.0 { theme::ORANGE }
-                              else { theme::fg(dark) };
-                ui.label(egui::RichText::new(format!("ΔOFV: {d_ofv:+.3}")).color(ofv_col).size(13.0).strong());
-                ui.add_space(16.0);
-                ui.label(egui::RichText::new(format!("ΔAIC: {d_aic:+.2}")).color(dim).size(12.0));
-                ui.add_space(16.0);
-                let df = fit_b.n_parameters.abs_diff(fit_a.n_parameters);
-                // Chi-square critical values (p=0.05, upper tail) for df 1..=20.
-                const CHI2_P05: [f64; 20] = [
-                    3.841, 5.991, 7.815, 9.488, 11.070,
-                    12.592, 14.067, 15.507, 16.919, 18.307,
-                    19.675, 21.026, 22.362, 23.685, 24.996,
-                    26.296, 27.587, 28.869, 30.144, 31.410,
-                ];
-                let (lrt, lrt_col) = if df == 0 {
-                    ("LRT: — (Δdf=0)".to_string(), theme::fg2(dark))
-                } else {
-                    let threshold = CHI2_P05.get(df.saturating_sub(1)).copied().unwrap_or(f64::MAX);
-                    if -d_ofv > threshold {
-                        (format!("LRT: ✓ (p<0.05, {df} df)"), theme::GREEN)
-                    } else {
-                        (format!("LRT: ✗ ({df} df)"), theme::RED)
-                    }
-                };
-                ui.label(egui::RichText::new(lrt).color(lrt_col).size(11.0));
-            });
-            ui.add_space(6.0);
-            ui.separator();
-            ui.add_space(4.0);
+            // OFV and AIC are shown as plain per-model rows at the end of the
+            // table below (no delta computed for either) — see the "FIT
+            // STATISTICS" section after SIGMA.
 
             // ── Parameter comparison table ────────────────────────────────────
             egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
@@ -3237,7 +3683,10 @@ fn show_compare_dialog(ctx: &egui::Context, state: &mut AppState) {
                         let fg = theme::fg(dark);
 
                         // THETA section.
-                        for _ in 0..7 { ui.label(egui::RichText::new("── THETA ──").color(dim).size(10.0)); }
+                        // Plain ASCII dashes, not the "──" box-drawing glyph
+                        // (U+2500) — that's not covered by the bundled
+                        // default font and rendered as tofu boxes (reported).
+                        for _ in 0..7 { ui.label(egui::RichText::new("-- THETA --").color(dim).size(10.0)); }
                         ui.end_row();
                         compare_param_rows(ui, fg, dark,
                             &fit_a.theta_names, &fit_b.theta_names,
@@ -3246,7 +3695,7 @@ fn show_compare_dialog(ctx: &egui::Context, state: &mut AppState) {
 
                         // OMEGA diagonal section.
                         if fit_a.n_eta > 0 || fit_b.n_eta > 0 {
-                            for _ in 0..7 { ui.label(egui::RichText::new("── OMEGA (diag) ──").color(dim).size(10.0)); }
+                            for _ in 0..7 { ui.label(egui::RichText::new("-- OMEGA (diag) --").color(dim).size(10.0)); }
                             ui.end_row();
                             let oa: Vec<f64> = (0..fit_a.n_eta).filter_map(|i| fit_a.omega_value(i,i)).collect();
                             let ob: Vec<f64> = (0..fit_b.n_eta).filter_map(|i| fit_b.omega_value(i,i)).collect();
@@ -3257,20 +3706,86 @@ fn show_compare_dialog(ctx: &egui::Context, state: &mut AppState) {
 
                         // SIGMA section.
                         if !fit_a.sigma.is_empty() || !fit_b.sigma.is_empty() {
-                            for _ in 0..7 { ui.label(egui::RichText::new("── SIGMA ──").color(dim).size(10.0)); }
+                            for _ in 0..7 { ui.label(egui::RichText::new("-- SIGMA --").color(dim).size(10.0)); }
                             ui.end_row();
                             compare_param_rows(ui, fg, dark,
                                 &fit_a.sigma_names, &fit_b.sigma_names,
                                 &fit_a.sigma, &fit_b.sigma,
                                 &fit_a.se_sigma, &fit_b.se_sigma);
                         }
+
+                        // Fit statistics — plain per-model values, no delta
+                        // (OFV/AIC aren't per-parameter estimates, so RSE%
+                        // and the Δ columns don't apply; left blank).
+                        for _ in 0..7 { ui.label(egui::RichText::new("-- FIT STATISTICS --").color(dim).size(10.0)); }
+                        ui.end_row();
+                        for (row_label, val_a, val_b) in [
+                            ("OFV", format!("{:.3}", fit_a.ofv), format!("{:.3}", fit_b.ofv)),
+                            ("AIC", format!("{:.2}", fit_a.aic), format!("{:.2}", fit_b.aic)),
+                        ] {
+                            ui.label(egui::RichText::new(row_label).color(fg).size(11.0));
+                            ui.label(egui::RichText::new(val_a).color(fg).size(11.0));
+                            ui.label(""); // RSE% — n/a for OFV/AIC
+                            ui.label(egui::RichText::new(val_b).color(fg).size(11.0));
+                            ui.label(""); // RSE% — n/a for OFV/AIC
+                            ui.label(""); // Δ est. — deliberately not computed
+                            ui.label(""); // Δ % — deliberately not computed
+                            ui.end_row();
+                        }
                     });
+
+                // ── GOF comparison ─────────────────────────────────────────────
+                // Reuses eval_tab's scatter_with_loess as-is (see its
+                // `pub(crate)` visibility bump) rather than duplicating the
+                // scatter+LOESS plotting logic here.
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("GOF Comparison — DV vs PRED").color(dim).size(11.0).strong());
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let avail    = ui.available_width();
+                    let half_w   = (avail / 2.0 - 6.0).max(150.0);
+                    let plot_h   = 220.0;
+                    let pt_col   = if dark { egui::Color32::from_rgba_unmultiplied(76, 138, 255, 200) }
+                                   else    { egui::Color32::from_rgba_unmultiplied(30, 90, 210, 180) };
+                    let ref_col  = if dark { egui::Color32::from_gray(120) } else { egui::Color32::from_gray(160) };
+                    let loess_col = theme::ORANGE;
+
+                    for (label, data) in [(&stem_a, &gof_a), (&stem_b, &gof_b)] {
+                        ui.vertical(|ui| {
+                            ui.set_width(half_w);
+                            match data {
+                                Some(d) if !d.rows.is_empty() => {
+                                    let (pts, lo, hi) = dv_vs_pred_points_and_bounds(d);
+                                    crate::ui::eval_tab::scatter_with_loess(
+                                        ui, &format!("compare_gof_{label}"), label,
+                                        "PRED", "DV", half_w, plot_h, &pts,
+                                        pt_col, ref_col, loess_col, false,
+                                        crate::ui::eval_tab::PlotKind::Identity { lo, hi },
+                                    );
+                                }
+                                _ => {
+                                    ui.set_height(plot_h);
+                                    ui.centered_and_justified(|ui| {
+                                        ui.label(egui::RichText::new(format!("{label}: no prediction data"))
+                                            .color(theme::fg3(dark)).size(11.0));
+                                    });
+                                }
+                            }
+                        });
+                    }
+                });
             });
 
             ui.add_space(10.0);
-            if ui.button("Close").clicked() { close = true; }
-            if ui.input(|i| i.key_pressed(egui::Key::Escape)) { close = true; }
+            if ui.button("Close").clicked() {
+                close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
         });
+        },
+    );
 
     if close {
         state.ui.compare_a = None;

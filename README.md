@@ -198,6 +198,52 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.8.0 (2026-07-07) — usability pass from peer feedback: editor/focus bugs, contrast, native popups, model comparison
+
+A full triage of external peer feedback on the GUI (see `design/ferx-gui-peer-feedback-plan.md`), plus five further bugs found while manually verifying the fixes.
+
+**Fixed: Enter in the model editor jumped out to the Output pill**
+- The model list's `Space`/`Enter` row shortcuts read global key state every frame, with no check for whether another widget (e.g. the code editor) currently had keyboard focus — so pressing Enter while typing in the editor also triggered the list's "jump to Output" shortcut. Now guarded on focus.
+
+**Fixed: the code editor's cursor jumped to the wrong line while typing**
+- The editor's syntax-highlighting layouter cached its output keyed on the *previous* frame's buffer, but `egui::TextEdit` calls the layouter again mid-frame with the *post-edit* text to compute cursor placement — the stale cache mismatched what was asked, corrupting the cursor's row/column mapping. Fixed by keying the cache on the text actually queried, not an external buffer reference.
+
+**Fixed: VPC "Log y-axis" changed the data but not the axis labels**
+- The log transform was applied to the data *and* combined with `egui_plot::log_grid_spacer` (designed for raw, untransformed data) — double-applying log spacing and leaving the axis labelled in small linear numbers instead of 1/10/100/1000. Replaced with a proper axis-tick formatter that converts back to power-of-ten labels.
+
+**Fixed: readability/contrast**
+- App-wide: any selected `selectable_label` (VPC's Continuous/Censored toggle, the theme picker, etc.) rendered accent-coloured text on an accent-coloured background — fixed at the theme level (`Visuals::selection`), which fixes every instance at once, in both themes.
+- The Editor's **Save** button had unreadable near-white text on its green fill in dark mode; the Output pill's warning cards used a translucent orange wash that went nearly invisible in light mode. Both now use explicit, theme-independent, high-contrast colours.
+- The VPC and SIR tabs now show the selected model's name (previously only the Evaluation tab did), so it's never ambiguous which model's fit is being visualised.
+
+**Changed: layout**
+- The Editor/Run/Output/Parameters/Info/Report row now reads as an actual tab strip (accent underline on the active tab, no background fill) instead of a row of pill-shaped buttons.
+- Individual Fits now lays subjects out in a roughly square grid (2×2, 3×3, …) instead of forcing 2 columns regardless of how many are shown per page; the per-page count goes up to 9 (new default) instead of maxing at 6.
+
+**New: Settings is a floating window, not a sidebar tab**
+- Opens via a header button or **Cmd/Ctrl+,**, matching the native-app convention that Preferences lives in its own window, not the main document view.
+
+**New: a File / View / About menu bar**
+- An in-window bar (not the OS-native macOS menu bar — that would need a separate crate and platform-specific integration this pass didn't take on), so it renders identically on macOS/Linux/Windows. File has Settings and Quit; View has the theme toggle, sidebar collapse, and the tab list; there's no Edit menu, since the editor's Cut/Copy/Paste/Undo already work via native OS shortcuts with nothing else for it to expose.
+
+**New: model comparison — GOF plots, a discoverable entry point, real windows**
+- The existing (but easy-to-miss, right-click-only) "Compare with…" now has a visible **Compare Models…** button in the Models tab toolbar, opening a picker restricted to models with a completed fit.
+- The compare dialog gained a GOF-comparison section (DV vs PRED, side by side per model), reusing the Evaluation tab's existing scatter/LOESS plotting code rather than duplicating it.
+- Both the picker and the compare dialog are now real OS windows (matching the existing About/Run/SIR/Settings popups), not in-window dialogs — the latter could render partially outside the main window with the Cancel/Close button unreachable (reported: "cannot close it anymore and it not fully visible on screen").
+- The comparison table now ends with a plain OFV/AIC row per model (no delta computed) instead of a separate ΔOFV/ΔAIC/LRT summary line above the table.
+
+**Fixed: app-wide missing-glyph "tofu" boxes**
+- ✓ (U+2713) and ✗ (U+2717) — used as status icons in the model list, Check Init, Info pill, VPC package status, and the compare dialog — aren't covered by *any* font `eframe`'s `default_fonts` feature bundles (confirmed by direct inspection of each font's character map), so they always rendered as empty boxes. Replaced with ✔/✖ (U+2714/U+2716), which are covered. Added a regression test that scans the whole source tree for the broken codepoints so this can't silently reappear.
+
+**Fixed: switching to an unrun model kept showing the previous model's GOF plots**
+- The Evaluation tab's prediction-data reload was gated on the newly-selected model having a completed fit, so switching *to* a model without one skipped the staleness check entirely and left the previous model's data cached and displayed.
+
+**Fixed: a failed "Check inits" was invisible**
+- A failed run only surfaced as a few words in the small status bar at the bottom of the window — easy to miss entirely ("spinner appears then disappears, nothing else"). Failures now show a proper error card with the actual R error message, next to the Check inits button.
+
+**Fixed: starting a run showed the previous run's log history**
+- The run popup's log text is a separately-maintained cache of the log-line buffer, rebuilt incrementally rather than every frame; starting a new run cleared the buffer but not this cache, so the popup kept showing the entire previous run's output until enough new lines arrived to push it out.
+
 ### v0.7.0 (2026-07-06) — fit.json parsing fix for single-parameter/single-warning models, surfaced parse errors
 
 **Fixed: a completed run could show "no run output" for a valid, converged fit**

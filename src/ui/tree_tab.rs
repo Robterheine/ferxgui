@@ -403,7 +403,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                     egui::Align2::LEFT_TOP, &meth,
                     egui::FontId::proportional(7.5 * fscale), fg2c,
                 );
-                let cov_str = if fit.covariance_ok { "✓" } else { "✗" };
+                let cov_str = if fit.covariance_ok { "✔" } else { "✖" };
                 let cov_col = if fit.covariance_ok { theme::GREEN } else { theme::RED };
                 painter.text(
                     to_screen(egui::pos2(lr.max.x - 16.0, lr.min.y + 35.0)),
@@ -497,7 +497,7 @@ fn show_info_panel(
         // ── Fit results ───────────────────────────────────────────────────────
         if let Some(f) = fit {
             let status_col = if f.converged { theme::GREEN } else { theme::RED };
-            let status_str = if f.converged { "✓ Converged" } else { "✗ Not converged" };
+            let status_str = if f.converged { "✔ Converged" } else { "✖ Not converged" };
             info_row(ui, "Status",  status_str, status_col, dark);
             info_row(ui, "Method",  &f.method.to_uppercase(), theme::fg(dark), dark);
             info_row(ui, "OFV",     &format!("{:.4}", f.ofv), theme::fg(dark), dark);
@@ -517,7 +517,7 @@ fn show_info_panel(
             // COV + CN
             let cov_col = if f.covariance_ok { theme::GREEN } else { theme::RED };
             info_row(ui, "Covariance",
-                if f.covariance_ok { "✓ OK" } else { "✗ Failed" }, cov_col, dark);
+                if f.covariance_ok { "✔ OK" } else { "✖ Failed" }, cov_col, dark);
             if f.cov_condition_number.is_finite() {
                 let cn_col = if f.cov_condition_number > 1000.0 { theme::ORANGE } else { dim };
                 info_row(ui, "Cond. number", &format!("{:.0}", f.cov_condition_number), cn_col, dark);

@@ -155,7 +155,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                 .selected_text(state.ui.eval_subjects_per_page.to_string())
                 .width(42.0)
                 .show_ui(ui, |ui| {
-                    for n in 1usize..=6 {
+                    for n in 1usize..=9 {
                         if ui.selectable_label(state.ui.eval_subjects_per_page == n,
                             n.to_string()).clicked() {
                             state.ui.eval_subjects_per_page = n;
@@ -178,20 +178,24 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     ui.separator();
 
     // ── Lazy-load predictions + ebes ─────────────────────────────────────
-    if has_fit {
-        let stem = state.workspace.models[model_idx].model.stem.clone();
-        if state.ui.eval_loaded_stem.as_deref() != Some(&stem) {
-            let fitrx = state.workspace.models[model_idx].fitrx_path.clone();
-            state.ui.eval_data = fitrx.as_deref()
-                .and_then(|p| crate::io::fitrx::read_predictions(p).ok().flatten());
-            state.ui.eval_ebes = fitrx.as_deref()
-                .and_then(|p| crate::io::fitrx::read_ebes(p).ok().flatten());
-            state.ui.eval_conddist = fitrx.as_deref()
-                .and_then(|p| crate::io::fitrx::read_conddist(p).ok().flatten());
-            state.ui.eval_loaded_stem = Some(stem);
-            state.ui.eval_subject_idx = 0;
-            state.ui.eval_conddist_eta_idx = 0;
-        }
+    // Staleness must be checked on every model switch — even to a model
+    // without a completed fit — otherwise switching from a fitted model to
+    // an unfitted one leaves the previous model's predictions in place
+    // (reported bug: GOF plots for a not-yet-run model showed the
+    // previously selected model's plots). Gating the whole reload on
+    // `has_fit` skipped the staleness check entirely in that case.
+    let stem = state.workspace.models[model_idx].model.stem.clone();
+    if eval_cache_is_stale(state.ui.eval_loaded_stem.as_deref(), &stem) {
+        let fitrx = if has_fit { state.workspace.models[model_idx].fitrx_path.clone() } else { None };
+        state.ui.eval_data = fitrx.as_deref()
+            .and_then(|p| crate::io::fitrx::read_predictions(p).ok().flatten());
+        state.ui.eval_ebes = fitrx.as_deref()
+            .and_then(|p| crate::io::fitrx::read_ebes(p).ok().flatten());
+        state.ui.eval_conddist = fitrx.as_deref()
+            .and_then(|p| crate::io::fitrx::read_conddist(p).ok().flatten());
+        state.ui.eval_loaded_stem = Some(stem);
+        state.ui.eval_subject_idx = 0;
+        state.ui.eval_conddist_eta_idx = 0;
     }
 
     // ── Export dialog (floats above everything) ───────────────────────────
@@ -206,6 +210,38 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         EvalSection::EtaCov         => show_eta_cov(ui, state, model_idx, dark),
         EvalSection::ParamCorr      => show_param_corr(ui, state, model_idx, dark),
         EvalSection::CondDist       => show_cond_dist(ui, state, model_idx, dark),
+    }
+}
+
+/// Whether the cached prediction/EBE/conddist data needs reloading for
+/// `current_stem`. Must be evaluated unconditionally on every model switch —
+/// see the call site in `show()` for why gating this on `has_fit` was the bug.
+fn eval_cache_is_stale(loaded_stem: Option<&str>, current_stem: &str) -> bool {
+    loaded_stem != Some(current_stem)
+}
+
+#[cfg(test)]
+mod eval_cache_is_stale_tests {
+    use super::eval_cache_is_stale;
+
+    #[test]
+    fn stale_when_switching_to_a_different_model_even_without_a_fit() {
+        // Regression test for the reported bug: switching from a fitted
+        // model to a model with no completed fit must still be treated as
+        // stale, so the previous model's predictions get cleared instead of
+        // continuing to display in the newly selected (unfitted) model's
+        // GOF/Individual-Fits views.
+        assert!(eval_cache_is_stale(Some("model_a"), "model_b"));
+    }
+
+    #[test]
+    fn not_stale_when_the_stem_matches() {
+        assert!(!eval_cache_is_stale(Some("model_a"), "model_a"));
+    }
+
+    #[test]
+    fn stale_when_nothing_loaded_yet() {
+        assert!(eval_cache_is_stale(None, "model_a"));
     }
 }
 
@@ -353,13 +389,16 @@ fn show_gof(ui: &mut egui::Ui, state: &AppState, _idx: usize, dark: bool) {
     });
 }
 
-enum PlotKind {
+// `pub(crate)`, not private: reused as-is by the Models tab's compare dialog
+// (`models_tab::show_compare_dialog`) for its GOF-comparison section, rather
+// than duplicating this plotting logic there.
+pub(crate) enum PlotKind {
     Identity { lo: f64, hi: f64 },
     #[allow(dead_code)]
     Residual { x_lo: f64, x_hi: f64, y_pad: f64 },
 }
 
-fn scatter_with_loess(
+pub(crate) fn scatter_with_loess(
     ui:        &mut egui::Ui,
     id:        &str,
     title:     &str,
@@ -439,6 +478,34 @@ fn scatter_with_loess(
 
 // ── Individual Fits ───────────────────────────────────────────────────────────
 
+/// Column count for a roughly-square subject grid: 4 -> 2x2, 9 -> 3x3,
+/// instead of always forcing 2 columns regardless of how many subjects are
+/// shown per page.
+fn subject_grid_cols(subjects_per_page: usize) -> usize {
+    (subjects_per_page as f64).sqrt().ceil() as usize
+}
+
+#[cfg(test)]
+mod subject_grid_cols_tests {
+    use super::subject_grid_cols;
+
+    #[test]
+    fn produces_square_grids_for_perfect_squares() {
+        assert_eq!(subject_grid_cols(1), 1);
+        assert_eq!(subject_grid_cols(4), 2, "4 subjects should form a 2x2 grid");
+        assert_eq!(subject_grid_cols(9), 3, "9 subjects should form a 3x3 grid");
+    }
+
+    #[test]
+    fn rounds_up_for_non_square_counts() {
+        assert_eq!(subject_grid_cols(2), 2);
+        assert_eq!(subject_grid_cols(3), 2, "3 subjects: 2 cols x 2 rows, one empty cell");
+        assert_eq!(subject_grid_cols(6), 3, "6 subjects: 3 cols x 2 rows, not a forced 2-wide column");
+        assert_eq!(subject_grid_cols(7), 3);
+        assert_eq!(subject_grid_cols(8), 3);
+    }
+}
+
 fn show_individual_fits(ui: &mut egui::Ui, state: &mut AppState, _idx: usize, dark: bool) {
     let data = match &state.ui.eval_data {
         Some(d) if !d.rows.is_empty() => d,
@@ -448,7 +515,7 @@ fn show_individual_fits(ui: &mut egui::Ui, state: &mut AppState, _idx: usize, da
     let n_subj = data.subject_ids.len();
     if n_subj == 0 { no_predictions(ui, dark); return; }
 
-    let spp   = state.ui.eval_subjects_per_page.clamp(1, 6);
+    let spp   = state.ui.eval_subjects_per_page.clamp(1, 9);
     let pages = n_subj.div_ceil(spp);
     let page  = (state.ui.eval_subject_idx / spp).min(pages.saturating_sub(1));
     let start = page * spp;
@@ -485,7 +552,9 @@ fn show_individual_fits(ui: &mut egui::Ui, state: &mut AppState, _idx: usize, da
     ui.add_space(4.0);
 
     let avail = ui.available_size();
-    let cols  = if spp <= 1 { 1usize } else { 2 };
+    // Square-ish grid rather than a fixed 2 columns, so e.g. 4 subjects
+    // renders as 2x2 and 9 as 3x3 instead of a forced 2-wide column.
+    let cols  = subject_grid_cols(spp);
     let rows  = spp.div_ceil(cols);
     let pw    = avail.x / cols as f32 - 6.0;
     let ph    = (avail.y / rows as f32 - 28.0).max(80.0);

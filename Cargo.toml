@@ -1,6 +1,6 @@
 [package]
 name = "ferxgui"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 description = "FeRx GUI — desktop application for FeRx NLME modelling"
 license = "MIT"
@@ -50,3 +50,6 @@ thiserror = "1"
 
 [profile.release]
 lto = "thin"
+
+[dev-dependencies]
+egui_kittest = { version = "0.31", default-features = false }

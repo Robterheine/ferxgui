@@ -119,6 +119,11 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
 
         // ── Right: plot / spinner / hint ─────────────────────────────────────
         ui.vertical(|ui| {
+            // Which model this VPC belongs to — mirrors the Evaluation tab so
+            // it's never ambiguous which model's fit is being visualised.
+            ui.label(egui::RichText::new(&stem).size(12.0).strong().color(theme::fg(dark)));
+            ui.add_space(4.0);
+
             if state.workspace.vpc_computing.contains(&stem) {
                 computing_spinner(ui, &state.ui.vpc_opts);
                 ui.ctx().request_repaint();
@@ -565,7 +570,7 @@ fn show_options(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
 fn pkg_banner(ui: &mut egui::Ui, state: &AppState, dark: bool) {
     let (text, color) = match &state.ui.vpc_pkg_status {
         None       => ("Checking vpc package…".to_string(), theme::fg3(dark)),
-        Some(Ok(v)) => (format!("vpc package v{v} ✓"), theme::GREEN),
+        Some(Ok(v)) => (format!("vpc package v{v} ✔"), theme::GREEN),
         Some(Err(_)) => (
             "vpc package not installed — run install.packages(\"vpc\") in R".to_string(),
             theme::RED,
@@ -844,15 +849,24 @@ fn show_vpc_plot(ui: &mut egui::Ui, vpc: &VpcResult, opts: &VpcOpts, dark: bool)
             let obs_med = obs_line(&|b| b.obs50);
             let obs_hi  = if !is_censored { obs_line(&|b| b.obs95) } else { vec![] };
 
-            let mut pl = Plot::new(format!("vpc_plot_{si}"))
+            // Note: the y-values plotted below are already `ly()`-transformed
+            // (log10) where `log_y` is set, i.e. the plot's own coordinate
+            // space is linear in log10 units. `egui_plot::log_grid_spacer` is
+            // for the opposite situation — raw, untransformed values on an
+            // axis that itself lays out gridlines log-scale — so it must not
+            // be combined with the manual transform above (doing so double-
+            // applies log spacing and produces gridlines that don't read as
+            // a log axis at all). The default (linear) grid spacer is what's
+            // wanted here; only the tick *labels* need to be converted back
+            // from log10 units to concentration units so the axis reads
+            // 1 / 10 / 100 / 1000 instead of 0 / 1 / 2 / 3.
+            let pl = Plot::new(format!("vpc_plot_{si}"))
                 .height(plot_h)
                 .x_axis_label("Time")
                 .y_axis_label(y_label)
                 .legend(Legend::default())
-                .show_grid(egui::Vec2b::new(opts.show_grid_v, opts.show_grid_h));
-            if log_y {
-                pl = pl.y_grid_spacer(egui_plot::log_grid_spacer(10));
-            }
+                .show_grid(egui::Vec2b::new(opts.show_grid_v, opts.show_grid_h))
+                .y_axis_formatter(move |mark, _range| format_y_tick(mark.value, log_y));
             pl.show(ui, |plot_ui| {
                     // Bin-edge separators.
                     if t.bin_sep_show {
@@ -905,6 +919,67 @@ fn show_vpc_plot(ui: &mut egui::Ui, vpc: &VpcResult, opts: &VpcOpts, dark: bool)
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Formats a y-axis gridline value for display.
+///
+/// When `log_y` is set, the plotted data was pre-transformed with `log10`
+/// (see `ly()` in `show_vpc_plot`), so `mark_value` is in log10 units —
+/// this converts it back to concentration units (`10^mark_value`) so the
+/// axis reads as 1 / 10 / 100 / 1000 rather than 0 / 1 / 2 / 3, which is
+/// what a "log y-axis" is expected to look like.
+fn format_y_tick(mark_value: f64, log_y: bool) -> String {
+    let display = if log_y { 10f64.powf(mark_value) } else { mark_value };
+    if !display.is_finite() {
+        return String::new();
+    }
+    if display == 0.0 {
+        return "0".to_string();
+    }
+    let abs = display.abs();
+    if abs >= 100_000.0 || abs < 0.001 {
+        format!("{display:.2e}")
+    } else {
+        let s = format!("{display:.4}");
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
+#[cfg(test)]
+mod format_y_tick_tests {
+    use super::format_y_tick;
+
+    #[test]
+    fn linear_mode_passes_value_through() {
+        assert_eq!(format_y_tick(42.5, false), "42.5");
+        assert_eq!(format_y_tick(0.0, false), "0");
+    }
+
+    #[test]
+    fn log_mode_converts_log10_units_back_to_powers_of_ten() {
+        // These are exactly the gridline values a linear spacer would place
+        // over log10-transformed concentration data spanning 0.1..1000.
+        assert_eq!(format_y_tick(-1.0, true), "0.1");
+        assert_eq!(format_y_tick(0.0, true), "1");
+        assert_eq!(format_y_tick(1.0, true), "10");
+        assert_eq!(format_y_tick(2.0, true), "100");
+        assert_eq!(format_y_tick(3.0, true), "1000");
+    }
+
+    #[test]
+    fn log_mode_handles_non_integer_gridlines_without_panicking() {
+        // Zoomed-in views can place gridlines at fractional log10 positions;
+        // must still produce a finite, non-crashing label.
+        let s = format_y_tick(0.5, true);
+        assert!(!s.is_empty());
+        assert!(s.parse::<f64>().is_ok(), "expected a plain parseable number, got {s:?}");
+    }
+
+    #[test]
+    fn non_finite_values_produce_no_label_instead_of_panicking() {
+        assert_eq!(format_y_tick(f64::NAN, false), "");
+        assert_eq!(format_y_tick(f64::INFINITY, true), "");
+    }
+}
 
 fn computing_spinner(ui: &mut egui::Ui, opts: &VpcOpts) {
     ui.centered_and_justified(|ui| {

@@ -109,7 +109,7 @@ fn show_run_summary(
             kv(ui, "BIC",   &fmt_f64_1dp(fit.bic),   dark);
             kv(ui, "Observations", &fit.n_obs.to_string(), dark);
             ui.end_row();
-            let cov_str = if fit.covariance_ok { "✓ computed" } else { "✗ not computed" };
+            let cov_str = if fit.covariance_ok { "✔ computed" } else { "✖ not computed" };
             let cov_col = if fit.covariance_ok { theme::GREEN } else { theme::RED };
             kv_col(ui, "Covariance", cov_str, cov_col, dark);
             let cn_str = if fit.cov_condition_number.is_finite() {
@@ -122,7 +122,7 @@ fn show_run_summary(
             } else { "—".to_string() };
             let cn_col = if fit.cn_high() { theme::ORANGE } else { theme::fg(dark) };
             kv_col(ui, "Condition Number", &cn_str, cn_col, dark);
-            let conv_str = if fit.converged { "✓ converged" } else { "✗ not converged" };
+            let conv_str = if fit.converged { "✔ converged" } else { "✖ not converged" };
             let conv_col = if fit.converged { theme::GREEN } else { theme::RED };
             kv_col(ui, "Convergence", conv_str, conv_col, dark);
             kv(ui, "Subjects", &fit.n_subjects.to_string(), dark);
@@ -555,7 +555,7 @@ fn generate_html(
     // ── Run Summary ──
     let method = if fit.method_chain.is_empty() { fit.method.clone() }
                  else { fit.method_chain.join(" + ") };
-    let cov_str = if fit.covariance_ok { "✓ computed" } else { "✗ not computed" };
+    let cov_str = if fit.covariance_ok { "✔ computed" } else { "✖ not computed" };
     let cn_str = if fit.cov_condition_number.is_finite() {
         if fit.cn_high() {
             format!("{:.1} &mdash; <span class=\"warn\">⚠ High (&gt;1000) — potential overparameterisation or strong parameter correlations</span>",
@@ -564,7 +564,7 @@ fn generate_html(
             format!("{:.1}", fit.cov_condition_number)
         }
     } else { "—".into() };
-    let conv_str = if fit.converged { "✓ converged" } else { "✗ not converged" };
+    let conv_str = if fit.converged { "✔ converged" } else { "✖ not converged" };
     let wt = if fit.wall_time_secs > 0.0 { fmt_duration(fit.wall_time_secs) } else { "—".into() };
 
     b.push_str("<section><h2>Run Summary</h2><table class=\"kv\">\n");

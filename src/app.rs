@@ -33,6 +33,14 @@ pub mod theme {
     const FG_L:     Color32 = Color32::from_rgb(0x0f, 0x11, 0x1a);
     const FG2_L:    Color32 = Color32::from_rgb(0x50, 0x54, 0x69);  // WCAG AA on white
     const FG3_L:    Color32 = Color32::from_rgb(0x8c, 0x8f, 0xa3);
+    // `ACCENT` (0x4c8aff) is tuned for dark backgrounds — as *text* on a
+    // light background it only measures ~3.1 contrast (below the 4.5 AA
+    // floor). This darker/more saturated variant is what `light_visuals()`
+    // already used locally for its own accent-as-text needs (hyperlinks,
+    // the active widget state); it's promoted to a shared constant here so
+    // other call sites (e.g. tab-strip active-state text) can reuse it via
+    // `accent(dark)` instead of reaching for the dark-only `ACCENT`.
+    pub const ACCENT_LIGHT: Color32 = Color32::from_rgb(0x25, 0x63, 0xeb);
 
     // ── Theme-aware helpers ───────────────────────────────────────────────
 
@@ -46,10 +54,20 @@ pub mod theme {
     pub fn fg2(dark: bool)           -> Color32 { if dark { FG2    } else { FG2_L } }
     /// Muted / hint / placeholder text colour.
     pub fn fg3(dark: bool)           -> Color32 { if dark { FG3    } else { FG3_L } }
+    /// Accent colour safe to use as *text* in either theme (see `ACCENT_LIGHT`).
+    pub fn accent(dark: bool)        -> Color32 { if dark { ACCENT } else { ACCENT_LIGHT } }
 
     // ── Theme application ─────────────────────────────────────────────────
 
     pub fn apply_dark(ctx: &eframe::egui::Context) {
+        ctx.set_visuals(dark_visuals());
+    }
+
+    pub fn apply_light(ctx: &eframe::egui::Context) {
+        ctx.set_visuals(light_visuals());
+    }
+
+    pub(crate) fn dark_visuals() -> eframe::egui::Visuals {
         let mut v = eframe::egui::Visuals::dark();
         v.panel_fill            = BG;
         v.window_fill           = BG2;
@@ -63,14 +81,20 @@ pub mod theme {
         v.widgets.active.bg_fill               = ACCENT;
         v.widgets.active.fg_stroke.color       = eframe::egui::Color32::WHITE;
         v.selection.bg_fill    = ACCENT.linear_multiply(0.4);
-        v.selection.stroke.color = ACCENT;
+        // Selected-state text: WHITE, not ACCENT — `interact_selectable()` (egui's
+        // mechanism behind `selectable_label`/segmented controls) paints this
+        // color as the *text* on top of `selection.bg_fill` above. Using the same
+        // accent hue for both was reported as "light blue on blue" / hard to read
+        // (measured contrast ratio ~2.0, below even the WCAG AA large-text floor
+        // of 3.0); WHITE on this background measures ~6.6, comfortably AA-normal.
+        v.selection.stroke.color = eframe::egui::Color32::WHITE;
         v.hyperlink_color      = ACCENT;
         v.window_stroke        = eframe::egui::Stroke::new(1.0, BORDER);
-        ctx.set_visuals(v);
+        v
     }
 
-    pub fn apply_light(ctx: &eframe::egui::Context) {
-        let accent = eframe::egui::Color32::from_rgb(0x25, 0x63, 0xeb);
+    pub(crate) fn light_visuals() -> eframe::egui::Visuals {
+        let accent = ACCENT_LIGHT;
         let mut v  = eframe::egui::Visuals::light();
         // Surface hierarchy — matches the light-mode token values above.
         v.panel_fill            = eframe::egui::Color32::from_gray(248);
@@ -84,11 +108,66 @@ pub mod theme {
         v.widgets.hovered.bg_fill              = eframe::egui::Color32::from_rgb(0xda, 0xdb, 0xe3);
         v.widgets.active.bg_fill               = accent;
         v.widgets.active.fg_stroke.color       = eframe::egui::Color32::WHITE;
-        v.selection.bg_fill    = eframe::egui::Color32::from_rgba_unmultiplied(0x25, 0x63, 0xeb, 45);
-        v.selection.stroke.color = accent;
+        // Solid (not translucent) accent background with WHITE text — mirrors
+        // `widgets.active` above. The previous translucent bg_fill (alpha
+        // 45/255) mostly showed the pale panel through it, so the same-hue
+        // `accent` text sat at only ~3.5 contrast (below the 4.5 AA-normal
+        // floor); solid bg + WHITE text measures ~5.2.
+        v.selection.bg_fill    = accent;
+        v.selection.stroke.color = eframe::egui::Color32::WHITE;
         v.hyperlink_color      = accent;
         v.window_stroke        = eframe::egui::Stroke::new(1.0, eframe::egui::Color32::from_gray(210));
-        ctx.set_visuals(v);
+        v
+    }
+}
+
+#[cfg(test)]
+mod theme_contrast_tests {
+    use super::theme::{dark_visuals, light_visuals};
+    use eframe::egui::Color32;
+
+    /// WCAG 2.x relative luminance + contrast ratio, computed directly from
+    /// sRGB channel bytes (no egui context needed — pure color math).
+    fn relative_luminance(c: Color32) -> f64 {
+        let to_linear = |ch: u8| {
+            let c = ch as f64 / 255.0;
+            if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * to_linear(c.r()) + 0.7152 * to_linear(c.g()) + 0.0722 * to_linear(c.b())
+    }
+
+    fn contrast_ratio(a: Color32, b: Color32) -> f64 {
+        let (la, lb) = (relative_luminance(a), relative_luminance(b));
+        let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    // WCAG AA for normal-size text.
+    const AA_NORMAL_TEXT: f64 = 4.5;
+
+    /// Regression test for the "light blue on blue" / hard-to-read report:
+    /// `selection.stroke.color` is the text color `interact_selectable()`
+    /// paints on top of `selection.bg_fill` for any selected
+    /// `selectable_label`/segmented control (e.g. VPC's "Continuous" toggle,
+    /// the Dark/Light theme picker). Both themes must clear WCAG AA.
+    #[test]
+    fn selection_text_meets_aa_contrast_in_dark_theme() {
+        let v = dark_visuals();
+        let ratio = contrast_ratio(v.selection.stroke.color, v.selection.bg_fill);
+        assert!(
+            ratio >= AA_NORMAL_TEXT,
+            "dark-theme selection text/bg contrast is {ratio:.2}, below AA floor of {AA_NORMAL_TEXT}"
+        );
+    }
+
+    #[test]
+    fn selection_text_meets_aa_contrast_in_light_theme() {
+        let v = light_visuals();
+        let ratio = contrast_ratio(v.selection.stroke.color, v.selection.bg_fill);
+        assert!(
+            ratio >= AA_NORMAL_TEXT,
+            "light-theme selection text/bg contrast is {ratio:.2}, below AA floor of {AA_NORMAL_TEXT}"
+        );
     }
 }
 
@@ -214,8 +293,16 @@ impl eframe::App for FerxApp {
             }
         });
 
+        // Cmd+, on macOS / Ctrl+, on Windows and Linux — `Modifiers::command`
+        // is egui's cross-platform abstraction for this (true Cmd on macOS,
+        // aliased to Ctrl elsewhere), so no per-OS branching is needed here.
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Comma)) {
+            self.state.ui.settings_open = true;
+        }
+
         // Panel declaration order matters: top panels first, then bottom panels
         // (outermost first), then side panels, then central.
+        render_menu_bar(ctx, &mut self.state);
         render_header(ctx, &mut self.state);
         render_status_bar(ctx, &self.state);
         render_sidebar(ctx, &mut self.state);
@@ -223,6 +310,7 @@ impl eframe::App for FerxApp {
         render_run_popup(ctx, &mut self.state);
         render_sir_popup(ctx, &mut self.state);
         render_about_popup(ctx, &mut self.state);
+        render_settings_popup(ctx, &mut self.state);
 
         // Request repaint while a run is active to keep log streaming live.
         if self.state.run.active_run.is_some() {
@@ -240,6 +328,63 @@ impl eframe::App for FerxApp {
             self.state.ui.tree_export_awaiting = true;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Menu bar — File / View / About. An in-window bar drawn by egui itself, not
+// the OS-native macOS menu bar (that would need a separate crate wired
+// through the window handle); this renders identically on macOS/Linux/
+// Windows with no platform-specific code. There is deliberately no "Edit"
+// menu: the only editable surface in the app is the model script editor,
+// and its Cut/Copy/Paste/Undo already work via native OS shortcuts (handled
+// internally by egui's `TextEdit`) — there's nothing else "Edit" would
+// expose without inventing a feature that isn't there today.
+// ---------------------------------------------------------------------------
+
+fn render_menu_bar(ctx: &egui::Context, state: &mut AppState) {
+    egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+        egui::menu::bar(ui, |ui| {
+            ui.menu_button("File", |ui| {
+                if ui.button("Settings…").on_hover_text("Cmd/Ctrl+,").clicked() {
+                    state.ui.settings_open = true;
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui.button("Quit").clicked() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    ui.close_menu();
+                }
+            });
+
+            ui.menu_button("View", |ui| {
+                let theme = &mut state.workspace.settings.theme;
+                let changed = ui.radio_value(theme, crate::io::persistence::Theme::Dark, "Dark").changed()
+                    | ui.radio_value(theme, crate::io::persistence::Theme::Light, "Light").changed();
+                if changed {
+                    if let Some(w) = state.workspace.save_settings() { state.ui.status_message = w; }
+                }
+
+                ui.separator();
+                let mut collapsed = state.ui.sidebar_collapsed;
+                if ui.checkbox(&mut collapsed, "Collapse Sidebar").changed() {
+                    set_sidebar_collapsed(state, collapsed);
+                }
+
+                ui.separator();
+                for tab in Tab::ALL {
+                    let label = format!("{}    Ctrl+{}", tab.label(), tab.shortcut_index());
+                    if ui.selectable_label(state.ui.active_tab == *tab, label).clicked() {
+                        state.ui.active_tab = *tab;
+                        ui.close_menu();
+                    }
+                }
+            });
+
+            if ui.button("About").clicked() {
+                state.ui.about_open = true;
+            }
+        });
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -312,12 +457,11 @@ fn render_header(ctx: &egui::Context, state: &mut AppState) {
                     }
                 }
 
-                // Right-side buttons.
+                // Right-side buttons. About/Settings now live in the menu bar
+                // (File > Settings…, and a top-level About button) — kept out
+                // of this row to avoid duplicate affordances for the same action.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(8.0);
-                    if ui.small_button("About").clicked() {
-                        state.ui.about_open = true;
-                    }
                     if state.workspace.settings.rstudio_path.is_some()
                         && ui.small_button("Open RStudio").clicked()
                     {
@@ -430,13 +574,19 @@ fn render_sidebar(ctx: &egui::Context, state: &mut AppState) {
                         .on_hover_text(if state.ui.sidebar_collapsed { "Expand" } else { "Collapse" })
                         .clicked()
                     {
-                        state.ui.sidebar_collapsed = !state.ui.sidebar_collapsed;
-                        state.workspace.settings.sidebar_collapsed = state.ui.sidebar_collapsed;
-                        if let Some(w) = state.workspace.save_settings() { state.ui.status_message = w; }
+                        set_sidebar_collapsed(state, !state.ui.sidebar_collapsed);
                     }
                 });
             });
         });
+}
+
+/// Sets the sidebar collapsed/expanded state and persists it — shared by the
+/// sidebar's own toggle button and the View menu's "Collapse Sidebar" item.
+fn set_sidebar_collapsed(state: &mut AppState, collapsed: bool) {
+    state.ui.sidebar_collapsed = collapsed;
+    state.workspace.settings.sidebar_collapsed = collapsed;
+    if let Some(w) = state.workspace.save_settings() { state.ui.status_message = w; }
 }
 
 // ---------------------------------------------------------------------------
@@ -454,15 +604,54 @@ fn render_body(ctx: &egui::Context, state: &mut AppState) {
             Tab::Uncertainty => crate::ui::sir_tab::show(ui, state),
             Tab::SimPlot => crate::ui::sim_tab::show(ui, state),
             Tab::History => crate::ui::history_tab::show(ui, state),
-            Tab::Settings => render_settings(ui, state),
         }
     });
 }
 
+// ---------------------------------------------------------------------------
+// Settings popup (floating window, not a sidebar tab — opened via the header
+// button or Cmd/Ctrl+, to match the native-app convention of Preferences
+// being a separate window rather than part of the main document view).
+// ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// Settings panel (minimal, Phase 1 — just directory + binary path)
-// ---------------------------------------------------------------------------
+fn render_settings_popup(ctx: &egui::Context, state: &mut AppState) {
+    if !state.ui.settings_open { return; }
+
+    let is_dark = ctx.style().visuals.dark_mode;
+    let mut do_close = false;
+
+    // Real OS viewport, matching the About/Run/SIR popups elsewhere in this
+    // file — see the Wayland caveat noted on `render_run_popup`, which
+    // applies here too since this uses the same mechanism.
+    ctx.show_viewport_immediate(
+        egui::ViewportId::from_hash_of("settings_popup"),
+        egui::ViewportBuilder::default()
+            .with_title("Settings")
+            .with_inner_size(egui::vec2(520.0, 560.0))
+            .with_min_inner_size(egui::vec2(420.0, 360.0)),
+        |ctx, _class| {
+            if is_dark { theme::apply_dark(ctx); } else { theme::apply_light(ctx); }
+
+            if ctx.input(|i| i.viewport().close_requested()) {
+                do_close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            // Esc also closes it, matching typical Preferences-window behaviour.
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                do_close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+
+            egui::CentralPanel::default().show(ctx, |ui| {
+                render_settings(ui, state);
+            });
+        },
+    );
+
+    if do_close {
+        state.ui.settings_open = false;
+    }
+}
 
 fn render_settings(ui: &mut egui::Ui, state: &mut AppState) {
     egui::ScrollArea::vertical().show(ui, |ui| {
@@ -511,7 +700,7 @@ fn render_settings(ui: &mut egui::Ui, state: &mut AppState) {
             use crate::io::persistence::FerxBinarySource;
             let (source_text, source_color) = match &state.workspace.ferx_binary_source {
                 FerxBinarySource::Detecting  => ("Detecting R + ferx package…",        theme::fg3(ui.visuals().dark_mode)),
-                FerxBinarySource::RPackage   => ("✓ ferx package found — runs via R",   theme::GREEN),
+                FerxBinarySource::RPackage   => ("✔ ferx package found — runs via R",   theme::GREEN),
                 FerxBinarySource::SystemPath => ("Found on system PATH",                ui.visuals().text_color()),
                 FerxBinarySource::Custom     => ("Custom Rscript path",                 theme::FG2),
                 FerxBinarySource::NotFound   => ("ferx package not found via R",        theme::ORANGE),
@@ -763,7 +952,7 @@ fn render_run_popup(ctx: &egui::Context, state: &mut AppState) {
                     });
                     ui.horizontal(|ui| {
                         ui.label(
-                            egui::RichText::new("✓ Detached — run continues if GUI closes")
+                            egui::RichText::new("✔ Detached — run continues if GUI closes")
                                 .color(theme::GREEN).size(10.0),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -911,7 +1100,7 @@ fn render_sir_popup(ctx: &egui::Context, state: &mut AppState) {
                     let (icon, col) = if low_ess {
                         ("⚠  SIR complete — low ESS", theme::ORANGE)
                     } else {
-                        ("✓  SIR complete", theme::GREEN)
+                        ("✔  SIR complete", theme::GREEN)
                     };
                     ui.label(egui::RichText::new(icon).color(col).size(13.0).strong());
                     if let Some(ess_v) = ess {

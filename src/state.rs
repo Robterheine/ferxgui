@@ -21,7 +21,6 @@ pub enum Tab {
     Uncertainty,
     SimPlot,
     History,
-    Settings,
 }
 
 #[allow(dead_code)]
@@ -35,7 +34,6 @@ impl Tab {
         Tab::Uncertainty,
         Tab::SimPlot,
         Tab::History,
-        Tab::Settings,
     ];
 
     pub fn label(self) -> &'static str {
@@ -48,7 +46,6 @@ impl Tab {
             Tab::Uncertainty => "SIR",
             Tab::SimPlot => "Sim Plot",
             Tab::History => "History",
-            Tab::Settings => "Settings",
         }
     }
 
@@ -62,7 +59,6 @@ impl Tab {
             Tab::Uncertainty => "SIR",
             Tab::SimPlot     => "Sim",
             Tab::History     => "Hist",
-            Tab::Settings    => "Set",
         }
     }
 
@@ -403,7 +399,7 @@ pub struct UiState {
     /// instead of the raw per-evaluation trace (which includes rejected
     /// line-search trial steps). Mirrors ferx-r's own `plot(fit)` default.
     pub eval_monotonic_ofv: bool,
-    /// Number of subjects shown per page in Individual Fits (1–6).
+    /// Number of subjects shown per page in Individual Fits (1–9).
     pub eval_subjects_per_page: usize,
     /// Column name used as X-axis for the first CWRES scatter panel.
     pub eval_cwres_x_col: String,
@@ -437,6 +433,8 @@ pub struct UiState {
     /// Whether the floating run-output window is visible.
     pub run_popup_open: bool,
     pub about_open: bool,
+    /// Whether the floating Settings window is visible.
+    pub settings_open: bool,
     /// ID of the run that last auto-opened the popup (prevents re-opening after dismiss for same run).
     pub run_popup_last_run_id: Option<String>,
 
@@ -473,6 +471,18 @@ pub struct UiState {
     /// Two model stems open for side-by-side parameter comparison.
     pub compare_a: Option<String>,
     pub compare_b: Option<String>,
+    /// GOF prediction data for the compare dialog's GOF-plot section, cached
+    /// per the `(compare_a, compare_b)` pair so each `.fitrx` is only read
+    /// once per pairing rather than on every frame the dialog is open.
+    pub compare_gof_a: Option<crate::domain::EvalData>,
+    pub compare_gof_b: Option<crate::domain::EvalData>,
+    pub compare_gof_loaded_for: Option<(String, String)>,
+    /// "Compare Models…" picker — an explicit, discoverable entry point into
+    /// the compare dialog, alongside the existing right-click "Compare
+    /// with…" row action.
+    pub compare_picker_open: bool,
+    pub compare_picker_a: Option<String>,
+    pub compare_picker_b: Option<String>,
 
     // ---- VPC tab ----
     /// Data CSV used for VPC simulation (persists across model selections).
@@ -590,7 +600,7 @@ impl Default for UiState {
             eval_subject_idx: 0,
             eval_log_scale: false,
             eval_monotonic_ofv: true,
-            eval_subjects_per_page: 1,
+            eval_subjects_per_page: 9,
             eval_cwres_x_col:    "TIME".to_string(),
             eval_cwres_x_col_2:  "PRED".to_string(),
             eval_export_dialog:  false,
@@ -605,6 +615,7 @@ impl Default for UiState {
             eval_eta_cov_view: EtaCovView::default(),
             run_popup_open:        false,
             about_open:            false,
+            settings_open:         false,
             run_popup_last_run_id: None,
             sir_popup_open:        false,
             sir_popup_last_stem:   None,
@@ -619,6 +630,12 @@ impl Default for UiState {
             pending_delete: None,
             compare_a: None,
             compare_b: None,
+            compare_gof_a: None,
+            compare_gof_b: None,
+            compare_gof_loaded_for: None,
+            compare_picker_open: false,
+            compare_picker_a: None,
+            compare_picker_b: None,
             vpc_data_path: None,
             vpc_opts: VpcOpts::default(),
             vpc_pkg_status: None,
@@ -693,6 +710,12 @@ pub struct WorkspaceState {
     pub check_init_results: HashMap<String, crate::domain::CheckInitResult>,
     /// Stems for which a check_init is currently in flight.
     pub check_init_running: HashSet<String>,
+    /// Error message from the last failed check_init per model stem — without
+    /// this, a failed check_init was only visible as a tiny, easy-to-miss
+    /// status-bar line (reported: "spinner appears then disappears, nothing
+    /// else"). Rendered as a proper error card next to the "Check inits"
+    /// button instead.
+    pub check_init_error: HashMap<String, String>,
     /// Cached SIR results keyed by model stem.
     pub sir_results: HashMap<String, crate::domain::SirResult>,
     /// Stems for which a SIR run is currently in flight.
@@ -764,6 +787,7 @@ impl WorkspaceState {
             vpc_computing:      HashSet::new(),
             check_init_results: HashMap::new(),
             check_init_running: HashSet::new(),
+            check_init_error:   HashMap::new(),
             sir_results:        HashMap::new(),
             sir_running:        HashSet::new(),
             sir_started_at:     HashMap::new(),
@@ -844,6 +868,36 @@ impl RunState {
         crate::io::persistence::save_runs(dir, &self.run_history)
             .err()
             .map(|e| format!("Warning: could not save run history — {e}"))
+    }
+}
+
+#[cfg(test)]
+mod run_state_log_tests {
+    use super::RunState;
+
+    /// Regression test for "starting a run shows the previous run's output":
+    /// `log_text` is a separately-maintained pre-joined cache of
+    /// `log_buffer` (see its doc comment above) — clearing only `log_buffer`
+    /// at run-start left `log_text` holding the entire previous run's log
+    /// until enough new lines arrived to incrementally push it out via
+    /// `push_log`'s eviction path. Both must be cleared together.
+    #[test]
+    fn clearing_log_buffer_and_text_together_removes_previous_run_output() {
+        let mut run = RunState::load(None);
+        run.push_log("old run line 1".to_string());
+        run.push_log("old run line 2".to_string());
+        assert!(run.log_text.contains("old run"));
+
+        run.log_buffer.clear();
+        run.log_text.clear();
+        assert!(
+            run.log_text.is_empty(),
+            "log_text must be empty immediately after a new run starts, not just log_buffer"
+        );
+
+        run.push_log("new run line 1".to_string());
+        assert_eq!(run.log_text, "new run line 1");
+        assert!(!run.log_text.contains("old run"));
     }
 }
 
@@ -1083,6 +1137,7 @@ impl AppState {
             }
             RCheckInitComplete { stem, result } => {
                 self.workspace.check_init_running.remove(&stem);
+                self.workspace.check_init_error.remove(&stem);
                 self.workspace.check_init_results.insert(stem, *result);
             }
             SirComplete { stem, result } => {
@@ -1138,6 +1193,7 @@ impl AppState {
                 }
                 if let Some(stem) = context.strip_prefix("check_init ") {
                     self.workspace.check_init_running.remove(stem);
+                    self.workspace.check_init_error.insert(stem.to_string(), message.clone());
                 }
                 if let Some(stem) = context.strip_prefix("sir:manual:") {
                     self.workspace.sir_running.remove(stem.trim());
