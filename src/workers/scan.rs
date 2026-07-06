@@ -68,12 +68,18 @@ fn build_entry(ferx_path: PathBuf, meta_map: &HashMap<String, ModelMeta>) -> Opt
 
     // Look for a paired .fitrx bundle in the same directory.
     let fitrx_path = ferx_path.with_extension("fitrx");
-    let (fit, is_stale) = if fitrx_path.exists() {
-        let fit = fitrx::read_fit_summary(&fitrx_path).ok();
+    let (fit, fit_parse_error, is_stale) = if fitrx_path.exists() {
+        let (fit, err) = match fitrx::read_fit_summary(&fitrx_path) {
+            Ok(f) => (Some(f), None),
+            // A bundle exists but couldn't be parsed — keep the error instead
+            // of silently discarding it, so the GUI can tell this apart from
+            // "never run" (e.g. an incompatible ferx schema, not a missing run).
+            Err(e) => (None, Some(e.to_string())),
+        };
         let stale = is_stale(&ferx_path, &fitrx_path);
-        (fit, stale)
+        (fit, err, stale)
     } else {
-        (None, false)
+        (None, None, false)
     };
 
     let meta = meta_map.get(&stem).cloned().unwrap_or_default();
@@ -82,6 +88,7 @@ fn build_entry(ferx_path: PathBuf, meta_map: &HashMap<String, ModelMeta>) -> Opt
         model,
         fitrx_path: if fitrx_path.exists() { Some(fitrx_path) } else { None },
         fit,
+        fit_parse_error,
         meta,
         is_stale,
     })

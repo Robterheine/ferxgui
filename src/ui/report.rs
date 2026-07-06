@@ -25,8 +25,20 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         Some(f) => f.clone(),
         None => {
             ui.centered_and_justified(|ui| {
-                ui.label(egui::RichText::new("No run output yet.\nRun the model to generate a report.")
-                    .color(theme::fg3(dark)).size(13.0));
+                ui.vertical_centered(|ui| {
+                    if let Some(err) = &entry.fit_parse_error {
+                        ui.label(egui::RichText::new("Could not read fit results")
+                            .strong().color(theme::fg2(dark)).size(13.0));
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new(format!(
+                            "A .fitrx bundle exists but ferxgui failed to parse it — likely an \
+                             incompatibility with the ferx version that produced it.\n\n{err}"
+                        )).color(theme::fg3(dark)).size(11.0));
+                    } else {
+                        ui.label(egui::RichText::new("No run output yet.\nRun the model to generate a report.")
+                            .color(theme::fg3(dark)).size(13.0));
+                    }
+                });
             });
             return;
         }

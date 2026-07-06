@@ -198,6 +198,16 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.7.0 (2026-07-06) — fit.json parsing fix for single-parameter/single-warning models, surfaced parse errors
+
+**Fixed: a completed run could show "no run output" for a valid, converged fit**
+- R's jsonlite `auto_unbox = TRUE` serializes a length-1 vector as a bare scalar instead of a single-element array — e.g. a model with exactly one theta serializes `theta.estimates` as `0.134`, not `[0.134]`; a fit with exactly one warning serializes `warnings` as a bare string, not a one-element array. This is not a rare edge case: a single-method (non-chained) fit's `method_chain` collapses the same way, and it hit the bundled warfarin tutorial model directly, whose `.fitrx` had a `converged: true`, fully valid fit that FeRx GUI reported as "no run output yet."
+- Several fields (`sigma`, `shrinkage_eps`, `method_chain`, `eta_param_info`) already had deliberate scalar-or-array handling for exactly this reason — `warnings`, and the nested `theta`/`omega`/`iov` names/SE/shrinkage/estimates fields, did not. All of them now go through the same scalar-or-array conversion, so a model with exactly one theta, one ETA, one kappa, or one warning parses correctly. Consolidated two byte-identical duplicate helper functions in the process.
+- Added a dedicated regression test reproducing this exact single-element shape end-to-end, independent of any local file, so this class of bug is caught on every machine and in CI — not just by chance on whichever `.fitrx` happens to be lying around during manual testing.
+
+**Fixed: a `.fitrx` parse failure was silently indistinguishable from "never run"**
+- The scanner discarded any `.fitrx` parse error via `.ok()`, so a bundle that failed to parse for *any* reason — this bug, a future ferx-schema change, a corrupt file — looked identical to a model that had simply never been run. `ModelEntry` now carries the parse error when this happens, distinguished from "never run" everywhere it's shown: the Models list (a distinct row colour, with the actual error on hover), and the Output, Parameters, Report, and Param Corr empty-states, which now explain that a bundle exists but couldn't be read instead of prompting the user to re-run a model that already produced valid results.
+
 ### v0.6.0 (2026-07-06) — ferx 0.2.0 impact audit: ETA-Cov fix + declared-covariate screen, convergence trace fix, DSL parser hardening
 
 A full audit of the ferx-core/ferx-r 0.2.0 release against every R call and parser FeRx GUI relies on. Two things were confirmed broken, one recently-added GUI feature is now confirmed live, one latent parser bug (unrelated to the version bump, but found while checking the new DSL sections) is fixed, and the ETA-Cov section gains a second, more formal screening view.

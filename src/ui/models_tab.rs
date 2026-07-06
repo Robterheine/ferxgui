@@ -249,6 +249,8 @@ struct ModelRow {
     n_parameters: usize,
     wall_time_secs: f64,
     has_boundary: bool,
+    /// Set when a `.fitrx` exists but ferxgui failed to parse it.
+    parse_error: Option<String>,
 }
 
 fn build_rows(state: &AppState) -> Vec<ModelRow> {
@@ -300,6 +302,7 @@ fn build_rows(state: &AppState) -> Vec<ModelRow> {
                 n_parameters: fit.map(|f| f.n_parameters).unwrap_or(0),
                 wall_time_secs: fit.map(|f| f.wall_time_secs).unwrap_or(0.0),
                 has_boundary: fit.map(|f| f.has_boundary_hit()).unwrap_or(false),
+                parse_error: e.fit_parse_error.clone(),
             }
         })
         .collect()
@@ -459,12 +462,13 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
                         // NAME (coloured by run status, "(ref)" badge, context menu)
                         tr.col(|ui| {
                             let color = match row.run_status {
-                                RunStatus::Converged => theme::GREEN,
-                                RunStatus::Failed    => theme::RED,
-                                RunStatus::Stale     => theme::ORANGE,
+                                RunStatus::Converged  => theme::GREEN,
+                                RunStatus::Failed     => theme::RED,
+                                RunStatus::Stale      => theme::ORANGE,
+                                RunStatus::ParseError => theme::RED,
                                 // Not-run models use the secondary text colour so they
                                 // don't compete visually with converged models.
-                                RunStatus::NotRun    => theme::fg2(dark),
+                                RunStatus::NotRun     => theme::fg2(dark),
                             };
                             // Build label text, appending a "(ref)" marker when relevant.
                             let label_text = if row.is_reference {
@@ -472,13 +476,22 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
                             } else {
                                 row.stem.clone()
                             };
-                            let resp = ui.add(
+                            let name_label = ui.add(
                                 egui::Label::new(
                                     egui::RichText::new(&label_text).color(color).size(12.0),
                                 )
                                 .sense(egui::Sense::click())
                                 .truncate(),
                             );
+                            let resp = if let Some(err) = &row.parse_error {
+                                name_label.on_hover_text(format!(
+                                    "Could not read this model's fit results — a .fitrx bundle \
+                                     exists but ferxgui failed to parse it (likely an \
+                                     incompatibility with the ferx version that produced it):\n\n{err}"
+                                ))
+                            } else {
+                                name_label
+                            };
                             if resp.clicked() {
                                 new_selection = Some(row.idx);
                             }
@@ -1581,11 +1594,23 @@ fn show_output_pill(ui: &mut egui::Ui, state: &mut AppState) {
         Some(f) => f.clone(),
         None => {
             ui.centered_and_justified(|ui| {
-                ui.label(
-                    egui::RichText::new("No run output yet\nRun the model from the Run tab")
-                        .color(theme::fg3(dark))
-                        .size(13.0),
-                );
+                ui.vertical_centered(|ui| {
+                    if let Some(err) = &state.workspace.models[idx].fit_parse_error {
+                        ui.label(egui::RichText::new("Could not read fit results")
+                            .strong().color(theme::fg2(dark)).size(13.0));
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new(format!(
+                            "A .fitrx bundle exists but ferxgui failed to parse it — likely an \
+                             incompatibility with the ferx version that produced it.\n\n{err}"
+                        )).color(theme::fg3(dark)).size(11.0));
+                    } else {
+                        ui.label(
+                            egui::RichText::new("No run output yet\nRun the model from the Run tab")
+                                .color(theme::fg3(dark))
+                                .size(13.0),
+                        );
+                    }
+                });
             });
             return;
         }
@@ -1741,7 +1766,19 @@ fn show_params_pill(ui: &mut egui::Ui, state: &mut AppState) {
         Some(f) => f.clone(),
         None => {
             ui.centered_and_justified(|ui| {
-                ui.label(egui::RichText::new("No run output yet").color(theme::fg3(dark)).size(13.0));
+                ui.vertical_centered(|ui| {
+                    if let Some(err) = &entry.fit_parse_error {
+                        ui.label(egui::RichText::new("Could not read fit results")
+                            .strong().color(theme::fg2(dark)).size(13.0));
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new(format!(
+                            "A .fitrx bundle exists but ferxgui failed to parse it — likely an \
+                             incompatibility with the ferx version that produced it.\n\n{err}"
+                        )).color(theme::fg3(dark)).size(11.0));
+                    } else {
+                        ui.label(egui::RichText::new("No run output yet").color(theme::fg3(dark)).size(13.0));
+                    }
+                });
             });
             return;
         }

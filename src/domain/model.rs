@@ -109,6 +109,11 @@ pub struct ModelEntry {
     pub fitrx_path: Option<PathBuf>,
     /// Parsed fit summary from the `.fitrx` bundle.  None if no run yet.
     pub fit: Option<FitSummary>,
+    /// Set when a `.fitrx` bundle exists but failed to parse (e.g. a ferx
+    /// schema change this version of ferxgui doesn't yet handle) — distinct
+    /// from `fit: None` meaning "never run", so the two aren't confused in
+    /// the UI. `fit` is also `None` in this case.
+    pub fit_parse_error: Option<String>,
     pub meta: ModelMeta,
     /// True when the `.ferx` mtime is newer than the `.fitrx` mtime.
     pub is_stale: bool,
@@ -144,6 +149,9 @@ impl ModelEntry {
     }
 
     pub fn run_status(&self) -> RunStatus {
+        if self.fit_parse_error.is_some() {
+            return RunStatus::ParseError;
+        }
         match &self.fit {
             None => RunStatus::NotRun,
             Some(f) if !f.converged => RunStatus::Failed,
@@ -158,6 +166,8 @@ impl ModelEntry {
 pub enum RunStatus {
     NotRun,
     Converged,
+    /// A `.fitrx` bundle exists but ferxgui failed to parse it.
+    ParseError,
     Failed,
     Stale,
 }
