@@ -46,6 +46,7 @@ fn build_entry(ferx_path: PathBuf, meta_map: &HashMap<String, ModelMeta>) -> Opt
     let bytes = std::fs::read(&ferx_path).ok()?;
     let source = String::from_utf8_lossy(&bytes).into_owned();
     let params = ferx_file::parse_params(&source);
+    let data_path = ferx_file::parse_data_path(&source);
 
     // File creation time (falls back to modified time on Linux which lacks st_birthtime).
     let created_at = std::fs::metadata(&ferx_path)
@@ -64,6 +65,7 @@ fn build_entry(ferx_path: PathBuf, meta_map: &HashMap<String, ModelMeta>) -> Opt
         source,
         params,
         created_at,
+        data_path,
     };
 
     // Look for a paired .fitrx bundle in the same directory.

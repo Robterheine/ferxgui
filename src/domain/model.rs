@@ -13,6 +13,10 @@ pub struct FerxModel {
     pub params: ParsedParams,
     /// File creation/modification time as "YYYY-MM-DD HH:MM" for the audit trail.
     pub created_at: Option<String>,
+    /// Dataset path declared in the model's own `[data]` block, if any
+    /// (verbatim, relative to the model file's own directory) — `None` if
+    /// the model has no `[data]` block.
+    pub data_path: Option<String>,
 }
 
 /// Names and initial values parsed from a `.ferx` file.

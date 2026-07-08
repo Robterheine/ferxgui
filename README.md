@@ -198,6 +198,22 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.8.5 (2026-07-07) — model-list context menu overhaul, run-launch guard fix, declared-dataset column
+
+**Changed: the model-list right-click menu**
+- Removed "Open in Finder" and the three Copy path/folder/name items.
+- Added a **Run** submenu: flip Method, Covariance step, and Optimizer trace right there, then "Run now" — no need to visit the Run pill first. Shares the same launch guard the Run pill uses (`can_launch_run`), so it can't be used to sneak a second run past an already-active one.
+- "View run log" / "View run record…" are now greyed out (with a tooltip) for a model that has never run, instead of silently going nowhere.
+
+**Fixed: Run was disabled for a model that had already run, just not the currently-selected one**
+- The data path used to launch a run is a single global field, only auto-populated for whichever model is currently *selected* in the list. Right-clicking a different model — one that had run before, just not this session's selected one — saw that field as unset and showed Run as permanently disabled. It now falls back to that specific model's own run-history entry when the global field is empty.
+
+**Fixed: the Run submenu showed a cluster of redundant triangles**
+- `egui::menu_button` already draws its own submenu arrow; a manually-typed `▶` on both sides of the label was piling two more triangles on top of it. Now just "Run".
+
+**New: a DATA column in the model list**
+- Shows the dataset path declared in a model's own `[data]` block (ferx's equivalent of NONMEM's `$DATA` record — `path = warfarin.csv`, resolved relative to the model file's directory), blank when the model has none. Parsing this also surfaced that ferxgui doesn't yet read a model's own `[data]` block when launching a run — it always supplies an explicit external data path, which silently overrides the model's declaration; noted as a follow-up, not fixed in this pass.
+
 ### v0.8.0 (2026-07-07) — usability pass from peer feedback: editor/focus bugs, contrast, native popups, model comparison
 
 A full triage of external peer feedback on the GUI (see `design/ferx-gui-peer-feedback-plan.md`), plus five further bugs found while manually verifying the fixes.

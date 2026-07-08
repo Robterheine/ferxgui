@@ -19,6 +19,7 @@ use crate::workers::{
 const W_STAR:   f32 = 22.0;
 const W_NAME:   f32 = 140.0;
 const W_DESC:   f32 = 190.0;
+const W_DATA:   f32 = 110.0;
 const W_OFV:    f32 = 78.0;
 const W_DOFV:   f32 = 70.0;
 const W_COV:    f32 = 36.0;
@@ -252,6 +253,8 @@ struct ModelRow {
     idx: usize,
     stem: String,
     description: String,
+    /// Dataset filename declared in the model's own `[data]` block, if any.
+    data_file: Option<String>,
     starred: bool,
     is_reference: bool,
     run_status: RunStatus,
@@ -296,6 +299,7 @@ fn build_rows(state: &AppState) -> Vec<ModelRow> {
                 idx,
                 stem: e.model.stem.clone(),
                 description: e.description().to_string(),
+                data_file: e.model.data_path.clone(),
                 starred: e.meta.starred,
                 is_reference: state.ui.reference_model == Some(idx),
                 run_status: e.run_status(),
@@ -425,6 +429,7 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
             .column(Column::exact(W_STAR))
             .column(Column::exact(W_NAME).resizable(true))
             .column(Column::exact(W_DESC).resizable(true))
+            .column(Column::exact(W_DATA).resizable(true))
             .column(Column::exact(W_OFV))
             .column(Column::exact(W_DOFV))
             .column(Column::exact(W_COV))
@@ -438,7 +443,7 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
             .column(Column::exact(W_TIME))
             .column(Column::exact(W_FLAG))
             .header(22.0, |mut h| {
-                for label in ["★","NAME","DESCRIPTION","OFV","ΔOFV","COV","AIC","CN",
+                for label in ["★","NAME","DESCRIPTION","DATA","OFV","ΔOFV","COV","AIC","CN",
                               "METHOD","IND/OBS","ETA%","EPS%","nPAR","TIME","⚠"] {
                     h.col(|ui| {
                         ui.label(egui::RichText::new(label).color(theme::fg2(dark)).size(11.0).strong());
@@ -524,6 +529,65 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
                             resp.context_menu(|ui| {
                                 ui.set_min_width(190.0);
 
+                                // ── Run ────────────────────────────────────
+                                // A submenu, not a single click — lets the
+                                // most commonly-changed-per-run options
+                                // (method, covariance, trace) be checked/
+                                // flipped right here instead of silently
+                                // firing off whatever the Run pill last had
+                                // configured. These mutate the same global
+                                // `state.ui.run_*` fields the Run pill itself
+                                // edits, so changes here show up there too.
+                                // Plain "Run" — no manual "▶" — `menu_button`
+                                // already appends its own submenu arrow.
+                                ui.menu_button("Run", |ui| {
+                                    ui.set_min_width(170.0);
+                                    ui.label(egui::RichText::new("Method").color(theme::fg2(dark)).size(11.0));
+                                    egui::ComboBox::from_id_salt(("ctx_run_method", row_idx))
+                                        .selected_text(state.ui.run_method.as_str())
+                                        .width(150.0)
+                                        .show_ui(ui, |ui| {
+                                            for m in ["foce", "focei", "saem", "gn", "gn_hybrid",
+                                                      "saem+focei", "focei+imp"] {
+                                                if ui.selectable_label(state.ui.run_method == m, m).clicked() {
+                                                    state.ui.run_method = m.to_string();
+                                                }
+                                            }
+                                        });
+                                    ui.checkbox(&mut state.ui.run_covariance, "Covariance step");
+                                    ui.checkbox(&mut state.ui.run_optimizer_trace, "Optimizer trace");
+
+                                    ui.separator();
+
+                                    // `resolve_data_path_for_run`, not the raw
+                                    // `run_data_path` — this row may never
+                                    // have been the *selected* model this
+                                    // session, so that global field may never
+                                    // have been auto-populated for it even
+                                    // though it has run (and has a data path)
+                                    // before.
+                                    let can_run = can_launch_run(
+                                        state.run.active_run.is_some(),
+                                        state.workspace.settings.ferx_binary.is_some(),
+                                        resolve_data_path_for_run(state, &row.stem).is_some(),
+                                    );
+                                    let run_resp = ui.add_enabled(can_run, egui::Button::new("Run now"));
+                                    let run_resp = if !can_run {
+                                        run_resp.on_disabled_hover_text(
+                                            "A run is already active, ferx isn't configured, \
+                                             or no data file is selected"
+                                        )
+                                    } else {
+                                        run_resp
+                                    };
+                                    if run_resp.clicked() {
+                                        ctx_action = Some((row_idx, CtxAction::Run));
+                                        ui.close_menu();
+                                    }
+                                });
+
+                                ui.separator();
+
                                 // ── Model actions ─────────────────────────
                                 if ui.button("Duplicate as child…").clicked() {
                                     ctx_action = Some((row_idx, CtxAction::Duplicate));
@@ -555,32 +619,33 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
 
                                 ui.separator();
 
+                                // Neither of these apply to a model that has never been
+                                // run — greyed out rather than silently jumping to an
+                                // empty History tab or a nonexistent log file.
+                                let has_run = row.run_status != crate::domain::RunStatus::NotRun;
+
                                 // ── File / folder ─────────────────────────
-                                if ui.button("Open in Finder").clicked() {
-                                    ctx_action = Some((row_idx, CtxAction::OpenInFinder));
-                                    ui.close_menu();
-                                }
-                                if ui.button("View run log").clicked() {
+                                let log_resp = ui.add_enabled(has_run, egui::Button::new("View run log"));
+                                let log_resp = if !has_run {
+                                    log_resp.on_disabled_hover_text("This model has not run yet")
+                                } else {
+                                    log_resp
+                                };
+                                if log_resp.clicked() {
                                     ctx_action = Some((row_idx, CtxAction::ViewRunLog));
-                                    ui.close_menu();
-                                }
-                                if ui.button("Copy model path").clicked() {
-                                    ctx_action = Some((row_idx, CtxAction::CopyModelPath));
-                                    ui.close_menu();
-                                }
-                                if ui.button("Copy folder path").clicked() {
-                                    ctx_action = Some((row_idx, CtxAction::CopyFolderPath));
-                                    ui.close_menu();
-                                }
-                                if ui.button("Copy Name").clicked() {
-                                    ctx_action = Some((row_idx, CtxAction::CopyName));
                                     ui.close_menu();
                                 }
 
                                 ui.separator();
 
                                 // ── History ───────────────────────────────
-                                if ui.button("View run record…").clicked() {
+                                let record_resp = ui.add_enabled(has_run, egui::Button::new("View run record…"));
+                                let record_resp = if !has_run {
+                                    record_resp.on_disabled_hover_text("This model has not run yet")
+                                } else {
+                                    record_resp
+                                };
+                                if record_resp.clicked() {
                                     ctx_action = Some((row_idx, CtxAction::ViewRunRecord));
                                     ui.close_menu();
                                 }
@@ -610,6 +675,20 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
                                 )
                                 .truncate(),
                             );
+                        });
+
+                        // DATA — the model's own declared [data] path, blank if none.
+                        tr.col(|ui| {
+                            if let Some(data_file) = &row.data_file {
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(data_file)
+                                            .color(theme::fg2(dark))
+                                            .size(12.0),
+                                    )
+                                    .truncate(),
+                                );
+                            }
                         });
 
                         // OFV
@@ -753,7 +832,7 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
         save_meta_for(state, idx);
     }
     if let Some((idx, action)) = ctx_action {
-        apply_ctx_action(ui, state, idx, action);
+        apply_ctx_action(state, idx, action);
     }
 
     // Keyboard: Space = toggle star, Enter = switch to Output pill.
@@ -1360,9 +1439,11 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
 
             // ── Action buttons ──
             ui.horizontal(|ui| {
-                let can_run = !running
-                    && state.workspace.settings.ferx_binary.is_some()
-                    && state.ui.run_data_path.is_some();
+                let can_run = can_launch_run(
+                    running,
+                    state.workspace.settings.ferx_binary.is_some(),
+                    state.ui.run_data_path.is_some(),
+                );
                 let can_queue = state.workspace.settings.ferx_binary.is_some()
                     && state.ui.run_data_path.is_some();
 
@@ -1715,6 +1796,105 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
                     .size(11.0),
             );
         });
+}
+
+/// Whether a run can be launched right now — shared by the Run pill's button
+/// and the model list's right-click "Run" item, so the two can't drift apart
+/// (e.g. one allowing a second concurrent run that the other would block).
+fn can_launch_run(running: bool, has_ferx_binary: bool, has_data_path: bool) -> bool {
+    !running && has_ferx_binary && has_data_path
+}
+
+#[cfg(test)]
+mod can_launch_run_tests {
+    use super::can_launch_run;
+
+    #[test]
+    fn requires_not_already_running_and_binary_and_data_path() {
+        assert!(can_launch_run(false, true, true));
+        assert!(!can_launch_run(true, true, true), "must not allow launching while a run is active");
+        assert!(!can_launch_run(false, false, true), "must not allow launching without ferx configured");
+        assert!(!can_launch_run(false, true, false), "must not allow launching without a data path");
+    }
+}
+
+/// Resolves the data path that `stem` would run with right now, without
+/// mutating any state — either the already-configured global
+/// `run_data_path` (used regardless of which model is selected, matching
+/// `launch_run`'s own read of it), or that model's own most recent run
+/// history entry as a fallback.
+///
+/// Needed because `show_run_pill`'s auto-populate ([models_tab.rs:1205])
+/// only runs for whichever model is currently *selected* — a context-menu
+/// "Run" targeting a different, never-selected row would otherwise see
+/// `run_data_path` as unset and show as disabled even though that row has
+/// run (and has a data path) before.
+fn resolve_data_path_for_run(state: &AppState, stem: &str) -> Option<std::path::PathBuf> {
+    state.ui.run_data_path.clone().or_else(|| {
+        state.run.run_history
+            .iter()
+            .rev()
+            .find(|r| r.model_stem == stem && r.data_path.as_ref().is_some_and(|p| p.exists()))
+            .and_then(|r| r.data_path.clone())
+    })
+}
+
+#[cfg(test)]
+mod resolve_data_path_for_run_tests {
+    use super::resolve_data_path_for_run;
+    use crate::domain::{JobStatus, RunRecord};
+    use crate::state::AppState;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    fn run_record(stem: &str, data_path: Option<PathBuf>) -> RunRecord {
+        RunRecord {
+            id: format!("{stem}-1"),
+            model_stem: stem.to_string(),
+            tool: "ferx".to_string(),
+            method: None,
+            status: JobStatus::Completed,
+            started: String::new(),
+            completed: None,
+            duration_secs: None,
+            command: String::new(),
+            directory: PathBuf::new(),
+            data_path,
+            file_hashes: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn prefers_the_already_configured_global_path() {
+        let mut state = AppState::new();
+        state.ui.run_data_path = Some(PathBuf::from("/tmp/current.csv"));
+        state.run.run_history.push(run_record("model_a", Some(PathBuf::from("/tmp/other.csv"))));
+        assert_eq!(
+            resolve_data_path_for_run(&state, "model_a"),
+            Some(PathBuf::from("/tmp/current.csv"))
+        );
+    }
+
+    #[test]
+    fn falls_back_to_the_stems_own_run_history_when_global_path_unset() {
+        // This is the reported bug: right-clicking a model that was never the
+        // *selected* one this session (so run_data_path was never
+        // auto-populated for it) must still resolve its own past data path,
+        // not show as permanently disabled.
+        let mut state = AppState::new();
+        state.ui.run_data_path = None;
+        state.run.run_history.push(run_record("model_a", Some(std::env::temp_dir())));
+        assert_eq!(
+            resolve_data_path_for_run(&state, "model_a"),
+            Some(std::env::temp_dir())
+        );
+    }
+
+    #[test]
+    fn none_when_neither_global_nor_history_has_a_path() {
+        let state = AppState::new();
+        assert_eq!(resolve_data_path_for_run(&state, "model_a"), None);
+    }
 }
 
 fn launch_run(state: &mut AppState, idx: usize, stem: &str) {
@@ -2858,12 +3038,9 @@ use crate::workers::run::{now_iso, now_unix};
 
 /// Actions that can be triggered by the model-row context menu.
 enum CtxAction {
+    Run,
     Duplicate,
     ToggleReference,
-    OpenInFinder,
-    CopyName,
-    CopyModelPath,
-    CopyFolderPath,
     ViewRunLog,
     CompareWith(String), // target model stem
     ViewRunRecord,
@@ -2871,12 +3048,21 @@ enum CtxAction {
 }
 
 fn apply_ctx_action(
-    ui:     &egui::Ui,
     state:  &mut AppState,
     idx:    usize,
     action: CtxAction,
 ) {
     match action {
+        CtxAction::Run => {
+            let stem = state.workspace.models[idx].model.stem.clone();
+            // `launch_run` reads the global `run_data_path` directly; make
+            // sure it's actually set for this row before calling it (see
+            // `resolve_data_path_for_run`'s doc comment).
+            if state.ui.run_data_path.is_none() {
+                state.ui.run_data_path = resolve_data_path_for_run(state, &stem);
+            }
+            launch_run(state, idx, &stem);
+        }
         CtxAction::Duplicate => {
             if let Some(m) = state.workspace.models.get(idx) {
                 let stem = m.model.stem.clone();
@@ -2891,37 +3077,6 @@ fn apply_ctx_action(
             } else {
                 Some(idx)
             };
-        }
-        CtxAction::OpenInFinder => {
-            if let Some(m) = state.workspace.models.get(idx) {
-                if let Some(parent) = m.model.path.parent() {
-                    if let Err(e) = open::that(parent) {
-                        state.ui.status_message = format!("Could not open folder: {e}");
-                    }
-                }
-            }
-        }
-        CtxAction::CopyName => {
-            if let Some(m) = state.workspace.models.get(idx) {
-                ui.ctx().copy_text(m.model.stem.clone());
-                state.ui.status_message = format!("Copied \"{}\" to clipboard", m.model.stem);
-            }
-        }
-        CtxAction::CopyModelPath => {
-            if let Some(m) = state.workspace.models.get(idx) {
-                let path = m.model.path.to_string_lossy().to_string();
-                ui.ctx().copy_text(path.clone());
-                state.ui.status_message = "Copied model path to clipboard".to_string();
-            }
-        }
-        CtxAction::CopyFolderPath => {
-            if let Some(m) = state.workspace.models.get(idx) {
-                if let Some(parent) = m.model.path.parent() {
-                    let path = parent.to_string_lossy().to_string();
-                    ui.ctx().copy_text(path);
-                    state.ui.status_message = "Copied folder path to clipboard".to_string();
-                }
-            }
         }
         CtxAction::ViewRunLog => {
             if let Some(m) = state.workspace.models.get(idx) {

@@ -105,6 +105,34 @@ pub fn parse_fit_options(source: &str) -> FitOptions {
     opts
 }
 
+/// Parse the `[data]` block of a `.ferx` file, if present — the model's own
+/// declared dataset path (`path = <path-to-csv>`, resolved relative to the
+/// model file's own directory), analogous to NONMEM's `$DATA` record.
+/// `None` when the block or key is absent/commented out.
+pub fn parse_data_path(source: &str) -> Option<String> {
+    let mut in_section = false;
+    let mut path = None;
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') || trimmed.is_empty() {
+            continue;
+        }
+        if let Some(sec) = section_name(trimmed) {
+            in_section = sec == "data";
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let Some((key, val)) = trimmed.split_once('=') else { continue; };
+        let val = val.split('#').next().unwrap_or("").trim();
+        if key.trim() == "path" && !val.is_empty() {
+            path = Some(val.to_string());
+        }
+    }
+    path
+}
+
 fn parse_bool(s: &str) -> Option<bool> {
     match s.to_ascii_lowercase().as_str() {
         "true"  | "t" | "yes" | "1" => Some(true),
@@ -146,6 +174,7 @@ fn section_name(line: &str) -> Option<&'static str> {
         "adaptive_dosing" => Some("adaptive_dosing"),
         "initial_conditions" => Some("initial_conditions"),
         "covariates" => Some("covariates"),
+        "data" => Some("data"),
         _ => None,
     }
 }
@@ -428,6 +457,38 @@ mod tests {
     fn fit_options_strips_inline_comment_and_parses_false() {
         let src = "[fit_options]\n  covariance = false  # no SE step\n";
         assert_eq!(parse_fit_options(src).covariance, Some(false));
+    }
+
+    #[test]
+    fn data_path_reads_explicit_value() {
+        let src = "[data]\n  path = warfarin.csv\n";
+        assert_eq!(parse_data_path(src).as_deref(), Some("warfarin.csv"));
+    }
+
+    #[test]
+    fn data_path_absent_when_no_data_block() {
+        let src = "[parameters]\n  theta TVCL(0.134, 0.001, 10.0)\n";
+        assert_eq!(parse_data_path(src), None);
+    }
+
+    #[test]
+    fn data_path_commented_out_reads_as_absent() {
+        let src = "[data]\n#  path = warfarin.csv\n";
+        assert_eq!(parse_data_path(src), None, "commented directive must read as absent");
+    }
+
+    #[test]
+    fn data_path_strips_inline_comment() {
+        let src = "[data]\n  path = warfarin.csv  # primary dataset\n";
+        assert_eq!(parse_data_path(src).as_deref(), Some("warfarin.csv"));
+    }
+
+    #[test]
+    fn data_path_does_not_leak_into_other_sections() {
+        // A `path = ...` line outside [data] (e.g. in an unrelated section)
+        // must not be picked up.
+        let src = "[parameters]\n  theta TVCL(0.134, 0.001, 10.0)\n[fit_options]\n  method = foce\n";
+        assert_eq!(parse_data_path(src), None);
     }
 
     #[test]
