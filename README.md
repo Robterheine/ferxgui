@@ -198,6 +198,13 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.8.6 (2026-07-08) — About popup: duplicate title removed, invisible text fixed
+
+**Fixed: the About popup's title text was nearly invisible, and "FeRx GUI" appeared twice**
+- `show_ferx_logo()` already renders "FeRx" + "GUI" as its own wordmark next to the curve icon; the About popup then repeated a separate "FeRx GUI" label right after it. That label was also hard to read: `.strong()` resolves to `visuals.widgets.active.text_color()`, which this theme sets to white in both themes (correct for text on accent-filled buttons, invisible on this popup's plain light-mode background).
+- Also fixed the underlying layout bug that caused the wordmark itself to render as two stacked lines instead of one: `show_ferx_logo` assumes a horizontal layout from its caller (correct in the header, where it's already inside one), but the About popup called it inside a vertical, centered layout. Now wrapped in its own horizontal group.
+- The duplicate white-text pattern likely affects other `.strong()` labels elsewhere in the app that sit on a plain (non-accent-filled) background — flagged as a follow-up, not fixed in this pass.
+
 ### v0.8.5 (2026-07-07) — model-list context menu overhaul, run-launch guard fix, declared-dataset column
 
 **Changed: the model-list right-click menu**

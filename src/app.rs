@@ -1197,10 +1197,23 @@ fn render_about_popup(ctx: &egui::Context, state: &mut AppState) {
                     ui.add_space(14.0);
 
                     // ── Logo + title ──────────────────────────────────────
+                    // `show_ferx_logo` already renders the "FeRx"+"GUI"
+                    // wordmark next to the curve icon — it just needs a
+                    // horizontal layout to flow correctly (its caller in the
+                    // header already provides one; `vertical_centered` here
+                    // does not, which previously stacked "FeRx"/"GUI"
+                    // vertically). A second, separate "FeRx GUI" label
+                    // used to follow it — redundant, and additionally
+                    // rendered in `Color32::WHITE` (`.strong()` resolves to
+                    // `visuals.widgets.active.text_color()`, which this
+                    // theme sets to white for text on accent-filled
+                    // buttons — invisible on this popup's plain light-mode
+                    // background). Removed rather than recoloured.
                     ui.vertical_centered(|ui| {
-                        crate::ui::icons::show_ferx_logo(ui, 36.0);
+                        ui.horizontal(|ui| {
+                            crate::ui::icons::show_ferx_logo(ui, 36.0);
+                        });
                         ui.add_space(6.0);
-                        ui.label(egui::RichText::new("FeRx GUI").size(22.0).strong());
                         ui.label(egui::RichText::new(
                             format!("v{}  ·  Population PK/PD modelling",
                                     env!("CARGO_PKG_VERSION")))
