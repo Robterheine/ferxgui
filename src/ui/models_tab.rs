@@ -530,30 +530,43 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
                                 ui.set_min_width(190.0);
 
                                 // ── Run ────────────────────────────────────
-                                // A submenu, not a single click — lets the
-                                // most commonly-changed-per-run options
-                                // (method, covariance, trace) be checked/
-                                // flipped right here instead of silently
-                                // firing off whatever the Run pill last had
-                                // configured. These mutate the same global
-                                // `state.ui.run_*` fields the Run pill itself
-                                // edits, so changes here show up there too.
+                                // A submenu, not a single click — lets
+                                // per-run options (covariance, trace) be
+                                // checked/flipped right here instead of
+                                // silently firing off whatever the Run pill
+                                // last had configured. These mutate the same
+                                // global `state.ui.run_*` fields the Run
+                                // pill itself edits, so changes here show up
+                                // there too.
+                                //
+                                // Estimation method is deliberately NOT
+                                // editable here: the model file's own
+                                // `[fit_options]` is authoritative for this
+                                // row (unlike covariance/trace, which aren't
+                                // tied to a specific model the way method
+                                // is). If the file doesn't declare one,
+                                // "Run now" is disabled — nothing to run
+                                // with otherwise.
+                                //
                                 // Plain "Run" — no manual "▶" — `menu_button`
                                 // already appends its own submenu arrow.
                                 ui.menu_button("Run", |ui| {
                                     ui.set_min_width(170.0);
-                                    ui.label(egui::RichText::new("Method").color(theme::fg2(dark)).size(11.0));
-                                    egui::ComboBox::from_id_salt(("ctx_run_method", row_idx))
-                                        .selected_text(state.ui.run_method.as_str())
-                                        .width(150.0)
-                                        .show_ui(ui, |ui| {
-                                            for m in ["foce", "focei", "saem", "gn", "gn_hybrid",
-                                                      "saem+focei", "focei+imp"] {
-                                                if ui.selectable_label(state.ui.run_method == m, m).clicked() {
-                                                    state.ui.run_method = m.to_string();
-                                                }
-                                            }
-                                        });
+                                    let declared_method = crate::io::ferx_file::parse_fit_options(
+                                        &state.workspace.models[row_idx].model.source
+                                    ).method;
+                                    match &declared_method {
+                                        Some(m) => {
+                                            ui.label(egui::RichText::new(format!("Method: {m}"))
+                                                .color(theme::fg2(dark)).size(11.0))
+                                                .on_hover_text("Declared in this model's [fit_options] block");
+                                        }
+                                        None => {
+                                            ui.label(egui::RichText::new(
+                                                "No estimation method declared in [fit_options]")
+                                                .color(theme::ORANGE).size(11.0));
+                                        }
+                                    }
                                     ui.checkbox(&mut state.ui.run_covariance, "Covariance step");
                                     ui.checkbox(&mut state.ui.run_optimizer_trace, "Optimizer trace");
 
@@ -570,17 +583,25 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
                                         state.run.active_run.is_some(),
                                         state.workspace.settings.ferx_binary.is_some(),
                                         resolve_data_path_for_run(state, &row.stem).is_some(),
-                                    );
+                                    ) && declared_method.is_some();
                                     let run_resp = ui.add_enabled(can_run, egui::Button::new("Run now"));
                                     let run_resp = if !can_run {
                                         run_resp.on_disabled_hover_text(
-                                            "A run is already active, ferx isn't configured, \
-                                             or no data file is selected"
+                                            "A run is already active, ferx isn't configured, no \
+                                             data file is selected, or this model has no \
+                                             [fit_options] method declared"
                                         )
                                     } else {
                                         run_resp
                                     };
                                     if run_resp.clicked() {
+                                        // Use the row's own declared method, not whatever
+                                        // `state.ui.run_method` currently holds (which may
+                                        // reflect a different model's last-edited value via
+                                        // the Run pill).
+                                        if let Some(m) = declared_method.clone() {
+                                            state.ui.run_method = m;
+                                        }
                                         ctx_action = Some((row_idx, CtxAction::Run));
                                         ui.close_menu();
                                     }
@@ -1269,6 +1290,18 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
             .and_then(|r| r.data_path.clone());
     }
 
+    // Estimation method is not user-editable here — the model's own
+    // [fit_options] is authoritative. Parsed fresh from the current source
+    // (not just on model switch), so editing the file and coming back to
+    // this tab always reflects the latest declared method rather than a
+    // stale value left over from before an edit.
+    let declared_method = crate::io::ferx_file::parse_fit_options(
+        &state.workspace.models[idx].model.source
+    ).method;
+    if let Some(m) = &declared_method {
+        state.ui.run_method = m.clone();
+    }
+
     let running = state.run.active_run.is_some();
 
     egui::ScrollArea::vertical()
@@ -1319,27 +1352,21 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
                         }
                     });
 
-                    // Method (text field for chains) + quick-pick dropdown + gradient.
+                    // Method: read-only — declared in the model's own
+                    // [fit_options], not editable here (see `declared_method`
+                    // above). A warning if the file doesn't declare one.
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("Method:").color(theme::fg2(dark)).size(12.0));
-                        ui.add(
-                            egui::TextEdit::singleline(&mut state.ui.run_method)
-                                .desired_width(100.0)
-                                .hint_text("focei"),
-                        ).on_hover_text("Single method (focei) or chain with +, e.g. saem+focei");
-                        // Quick-pick dropdown.
-                        egui::ComboBox::from_id_salt("run_method_combo")
-                            .selected_text("▾")
-                            .width(32.0)
-                            .show_ui(ui, |ui| {
-                                for m in ["foce","focei","saem","gn","gn_hybrid",
-                                          "saem+focei","focei+imp"] {
-                                    if ui.selectable_label(false,
-                                        egui::RichText::new(m).size(12.0)).clicked() {
-                                        state.ui.run_method = m.to_string();
-                                    }
-                                }
-                            });
+                        match &declared_method {
+                            Some(m) => {
+                                ui.label(egui::RichText::new(m).color(theme::fg(dark)).size(12.0).monospace())
+                                    .on_hover_text("Declared in this model's [fit_options] block");
+                            }
+                            None => {
+                                ui.label(egui::RichText::new("No method declared in [fit_options]")
+                                    .color(theme::ORANGE).size(12.0));
+                            }
+                        }
                         ui.add_space(8.0);
                         ui.label(egui::RichText::new("Gradient:").color(theme::fg2(dark)).size(12.0));
                         egui::ComboBox::from_id_salt("run_gradient_combo")
@@ -1443,9 +1470,10 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
                     running,
                     state.workspace.settings.ferx_binary.is_some(),
                     state.ui.run_data_path.is_some(),
-                );
+                ) && declared_method.is_some();
                 let can_queue = state.workspace.settings.ferx_binary.is_some()
-                    && state.ui.run_data_path.is_some();
+                    && state.ui.run_data_path.is_some()
+                    && declared_method.is_some();
 
                 if ui
                     .add_enabled(
@@ -2895,11 +2923,12 @@ fn sync_editor_buffer(state: &mut AppState) {
                 state.ui.editor_loaded_stem = Some(stem.clone());
 
                 // The model file's [fit_options] is authoritative: initialise the
-                // run controls from it on load. Covariance is opt-in — an absent
-                // or commented-out directive means the covariance step is off.
+                // run controls from it on load. Covariance defaults on — an absent
+                // or commented-out directive means the covariance step still runs;
+                // an explicit `covariance = false` in the file is what opts out.
                 let opts = crate::io::ferx_file::parse_fit_options(
                     &state.workspace.models[idx].model.source);
-                state.ui.run_covariance = opts.covariance.unwrap_or(false);
+                state.ui.run_covariance = opts.covariance.unwrap_or(true);
                 if let Some(m) = opts.method   { state.ui.run_method = m; }
                 if let Some(g) = opts.gradient { state.ui.run_gradient = g; }
                 if let Some(t) = opts.threads  { state.ui.run_threads = t; }

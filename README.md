@@ -198,6 +198,18 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.8.7 (2026-07-08) — estimation method now file-declared only, method-chain bracket syntax fixed, covariance defaults on
+
+**Changed: estimation method is no longer user-editable in the Run tab or the model list's right-click Run submenu**
+- The model's own `[fit_options]` is now authoritative for which method(s) to fit with, in both places — matching how the model file already governs everything else about the fit. Both surfaces show the declared method as read-only text, parsed fresh from the current file content on every frame (this also fixes a staleness bug: the method previously only refreshed on model *selection*, so editing `[fit_options]` and coming back to the Run tab could still show the old value).
+- If a model's file doesn't declare a method at all, both surfaces show a warning ("No estimation method declared in `[fit_options]`") and disable Run/Queue — there's nothing to run with otherwise.
+
+**Fixed: a bracket-syntax method chain in `[fit_options]` failed to run at all**
+- `method = [saem, imp]` was passed through as the literal string `"[saem, imp]"` (brackets included) instead of being parsed as a two-step chain — `ferx_fit()`'s method validation rejected it outright, since it isn't a recognised method name. The bracket-array syntax is consistent with how `[initial_values]` already declares lists (`theta = [0.2, 10.0, 1.5]`), so this was a reasonable thing to write; ferxgui just didn't handle it for this field. Now normalised into the "+"-joined chain format (`"saem+imp"`) the run pipeline already expects.
+
+**Changed: covariance step now defaults on**
+- Previously, a model file that didn't mention `covariance` in `[fit_options]` defaulted the Covariance step checkbox to off (opt-in). It now defaults on (opt-out) — an explicit `covariance = false` in the file still turns it off.
+
 ### v0.8.6 (2026-07-08) — About popup: duplicate title removed, invisible text fixed
 
 **Fixed: the About popup's title text was nearly invisible, and "FeRx GUI" appeared twice**

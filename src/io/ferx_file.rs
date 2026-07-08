@@ -95,7 +95,7 @@ pub fn parse_fit_options(source: &str) -> FitOptions {
         // Strip any inline comment from the value.
         let val = val.split('#').next().unwrap_or("").trim();
         match key.trim() {
-            "method"   if !val.is_empty() => opts.method = Some(val.to_string()),
+            "method"   if !val.is_empty() => opts.method = Some(normalise_method_chain(val)),
             "gradient" if !val.is_empty() => opts.gradient = Some(val.to_string()),
             "covariance" => opts.covariance = parse_bool(val),
             "threads"    => opts.threads = val.parse().ok(),
@@ -103,6 +103,31 @@ pub fn parse_fit_options(source: &str) -> FitOptions {
         }
     }
     opts
+}
+
+/// Normalises a `[fit_options] method` value into the "+"-joined chain
+/// format used throughout ferxgui and the run pipeline (e.g. `"saem+imp"`),
+/// which is what gets split back apart by `strsplit(method_raw, "\\+")` in
+/// the R run script.
+///
+/// The DSL also allows bracket-array syntax for a method chain — matching
+/// the convention already used for `[initial_values]` (`theta = [0.2, 10.0,
+/// 1.5]`) — e.g. `method = [saem, imp]`. Passing that bracketed text through
+/// unprocessed produced a single malformed method string ("[saem, imp]")
+/// that `ferx_fit()`'s `match.arg`-based validation rejected outright
+/// (reported: chained methods declared this way failed to run at all).
+/// A bare, non-bracketed value (e.g. `method = focei`) passes through
+/// unchanged.
+fn normalise_method_chain(val: &str) -> String {
+    match val.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        Some(inner) => inner
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("+"),
+        None => val.to_string(),
+    }
 }
 
 /// Parse the `[data]` block of a `.ferx` file, if present — the model's own
@@ -457,6 +482,28 @@ mod tests {
     fn fit_options_strips_inline_comment_and_parses_false() {
         let src = "[fit_options]\n  covariance = false  # no SE step\n";
         assert_eq!(parse_fit_options(src).covariance, Some(false));
+    }
+
+    #[test]
+    fn fit_options_method_chain_bracket_syntax_normalises_to_plus_joined() {
+        // Regression test: this bracketed method chain previously passed
+        // through as the literal string "[saem, imp]", which `ferx_fit()`
+        // rejected outright (not a recognised method) instead of being
+        // treated as a two-step saem-then-imp chain.
+        let src = "[fit_options]\n  method = [saem, imp]\n";
+        assert_eq!(parse_fit_options(src).method.as_deref(), Some("saem+imp"));
+    }
+
+    #[test]
+    fn fit_options_method_bare_value_is_unaffected() {
+        let src = "[fit_options]\n  method = focei\n";
+        assert_eq!(parse_fit_options(src).method.as_deref(), Some("focei"));
+    }
+
+    #[test]
+    fn fit_options_method_chain_bracket_syntax_handles_extra_whitespace() {
+        let src = "[fit_options]\n  method = [ saem ,  imp  ]\n";
+        assert_eq!(parse_fit_options(src).method.as_deref(), Some("saem+imp"));
     }
 
     #[test]
