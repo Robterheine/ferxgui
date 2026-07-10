@@ -732,7 +732,11 @@ fn curve_pts(
 // File loading
 // ---------------------------------------------------------------------------
 
-fn load_sim_file(state: &mut AppState) {
+/// Parse the file at `state.sim.file_path` and populate `state.sim.data` plus
+/// sensible default column selections. Exposed so other tabs (e.g. Simulate)
+/// can hand off a freshly written CSV without requiring the user to also
+/// click "Load" themselves.
+pub(crate) fn load_sim_file(state: &mut AppState) {
     let path = PathBuf::from(state.sim.file_path.trim());
     if !path.is_file() { state.sim.status = "File not found.".into(); return; }
     match parse_table_file(&path) {

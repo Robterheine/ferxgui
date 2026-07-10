@@ -19,6 +19,7 @@ pub enum Tab {
     Evaluation,
     Vpc,
     Uncertainty,
+    Simulate,
     SimPlot,
     History,
 }
@@ -32,6 +33,7 @@ impl Tab {
         Tab::Evaluation,
         Tab::Vpc,
         Tab::Uncertainty,
+        Tab::Simulate,
         Tab::SimPlot,
         Tab::History,
     ];
@@ -44,6 +46,7 @@ impl Tab {
             Tab::Evaluation => "Evaluation",
             Tab::Vpc => "VPC",
             Tab::Uncertainty => "SIR",
+            Tab::Simulate => "Simulate",
             Tab::SimPlot => "Sim Plot",
             Tab::History => "History",
         }
@@ -57,6 +60,7 @@ impl Tab {
             Tab::Evaluation  => "Eval",
             Tab::Vpc         => "VPC",
             Tab::Uncertainty => "SIR",
+            Tab::Simulate    => "Simu",
             Tab::SimPlot     => "Sim",
             Tab::History     => "Hist",
         }
@@ -177,6 +181,23 @@ pub enum HistorySortCol {
     Method,
     Ofv,
     Duration,
+}
+
+/// Which parameter set the Simulate tab's bridge script simulates at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SimBasis {
+    /// The model file's initial estimates (`fit = NULL`) — prior predictive.
+    #[default]
+    Initial,
+    /// The saved `.fitrx` bundle's fitted estimates — posterior predictive.
+    Fitted,
+    /// Parameter sets drawn from a multivariate normal around the ML
+    /// estimate, using the fit's covariance matrix. Requires the fit to have
+    /// been run with `covariance = TRUE`.
+    AsymptoticUncertainty,
+    /// Parameter sets resampled from the SIR tab's kept resamples. Requires a
+    /// SIR run for this model with "Keep resamples" enabled.
+    SirUncertainty,
 }
 
 /// Line style for VPC observed-percentile lines. Maps to an egui `LineStyle`
@@ -504,6 +525,23 @@ pub struct UiState {
     /// Column names from the selected data CSV, for the stratification pickers.
     pub vpc_data_cols: Vec<String>,
 
+    // ---- Simulate tab ----
+    /// Data CSV used for the simulation (persists across model selections).
+    pub simrun_data_path: Option<PathBuf>,
+    /// "Initial estimates" (prior predictive) or "Fitted estimates" (posterior
+    /// predictive, requires a `.fitrx` bundle).
+    pub simrun_basis: SimBasis,
+    pub simrun_n_sim: u32,
+    pub simrun_seed:  u32,
+    /// Output CSV path, editable. Empty = auto-derive alongside the model.
+    pub simrun_out_path: String,
+    /// Number of parameter draws — used only when `simrun_basis` is an
+    /// uncertainty mode.
+    pub simrun_n_draws: u32,
+    /// Eta/epsilon replicates per parameter draw — used only when
+    /// `simrun_basis` is an uncertainty mode.
+    pub simrun_n_sim_per_draw: u32,
+
     // ---- History tab ----
     pub history_filter: String,
     /// Index into the *sorted+filtered* view (not into run_history directly).
@@ -644,6 +682,13 @@ impl Default for UiState {
             vpc_script: String::new(),
             vpc_script_open: false,
             vpc_data_cols: vec![],
+            simrun_data_path: None,
+            simrun_basis: SimBasis::default(),
+            simrun_n_sim: 500,
+            simrun_seed:  42,
+            simrun_out_path: String::new(),
+            simrun_n_draws: 100,
+            simrun_n_sim_per_draw: 1,
             history_filter: String::new(),
             history_selected: None,
             history_sort_col: HistorySortCol::Started,
@@ -706,6 +751,10 @@ pub struct WorkspaceState {
     pub vpc_data: HashMap<String, crate::domain::VpcResult>,
     /// Stems for which a VPC computation is currently in flight.
     pub vpc_computing: HashSet<String>,
+    /// Simulate-tab results (status summary only — the CSV lives on disk) keyed by model stem.
+    pub simrun_results: HashMap<String, crate::domain::SimRunResult>,
+    /// Stems for which a Simulate-tab run is currently in flight.
+    pub simrun_computing: HashSet<String>,
     /// Cached `ferx_check_init()` results keyed by model stem.
     pub check_init_results: HashMap<String, crate::domain::CheckInitResult>,
     /// Stems for which a check_init is currently in flight.
@@ -785,6 +834,8 @@ impl WorkspaceState {
             r_inspect_failed: HashSet::new(),
             vpc_data:           HashMap::new(),
             vpc_computing:      HashSet::new(),
+            simrun_results:     HashMap::new(),
+            simrun_computing:   HashSet::new(),
             check_init_results: HashMap::new(),
             check_init_running: HashSet::new(),
             check_init_error:   HashMap::new(),
@@ -1131,6 +1182,11 @@ impl AppState {
                 self.sim.running = false;
                 self.sim.status = format!("Error: {msg}");
             }
+            SimRunComplete { stem, result } => {
+                self.workspace.simrun_computing.remove(&stem);
+                self.ui.status_message = format!("Simulation ready: {stem} ({} rows)", result.n_rows);
+                self.workspace.simrun_results.insert(stem, *result);
+            }
             ModelCreated(stem) => {
                 self.ui.status_message = format!("Created {stem}.ferx");
                 self.trigger_scan();
@@ -1190,6 +1246,9 @@ impl AppState {
                 }
                 if context.starts_with("vpc_export ") {
                     self.ui.vpc_exporting = false;
+                }
+                if let Some(stem) = context.strip_prefix("simulate ") {
+                    self.workspace.simrun_computing.remove(stem);
                 }
                 if let Some(stem) = context.strip_prefix("check_init ") {
                     self.workspace.check_init_running.remove(stem);

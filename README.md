@@ -35,6 +35,13 @@ Powered by the R [vpc package](https://vpc.ronkeizer.com/) — all two-stage sta
 ### SIR uncertainty
 - Sequential Importance Resampling with effective sample size, 95% CI table, parameter correlation heatmap, and marginal distribution histograms
 
+### Simulate
+Runs `ferx_simulate()` and writes a CSV — paired with Simulation plot below, which displays whatever file it's pointed at.
+
+- **Basis**: initial estimates (prior predictive), fitted estimates (posterior predictive), or with parameter uncertainty (asymptotic MVN draws around the ML estimate, or resampled from the SIR tab's kept results)
+- Output CSV carries the full input dataset (covariates, `EVID`, `CMT`, dose rows, …) alongside the simulated `IPRED`/`DV_SIM` — not just `ferx_simulate()`'s bare return columns
+- "Open in Sim Plot" hands the written file straight to the Simulation plot tab below
+
 ### Simulation plot
 Pure-Rust simulation plotter (no R required): load NONMEM-format or CSV simulation output, configure prediction-interval bands, MDV/column filters, observed data overlay, log Y-axis, and export PNG.
 
@@ -197,6 +204,15 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 ---
 
 ## Changelog
+
+### v0.9.0 (2026-07-10) — new Simulate tab: `ferx_simulate()` with parameter-uncertainty modes
+
+**Added: a "Simulate" tab, paired with Sim Plot**
+
+- Runs `ferx_simulate()` against a model + dataset and writes the result as a CSV file — Sim Plot (unchanged) is the viewer, not a component this tab calls into directly. An "Open in Sim Plot" button hands the written file straight to Sim Plot and switches tabs, with the replicate/X/Y columns auto-selected.
+- The output CSV carries the **full input dataset** alongside the simulated values — covariates, `EVID`, `CMT`, `AMT`, etc. all survive, not just `ferx_simulate()`'s bare `SIM`/`TIME`/`IPRED`/`DV_SIM` columns. Dose rows are kept with blank `IPRED`/`DV_SIM` (no corresponding simulated observation), so `EVID` stays meaningful and dosing events remain visible/filterable downstream.
+- **Basis picker**: "Initial estimates" (prior predictive, no fit required), "Fitted estimates" (posterior predictive, requires a completed fit), "With uncertainty (asymptotic)" (parameter draws from a multivariate normal around the ML estimate, requires `covariance = TRUE`), and "With uncertainty (SIR)" (parameter draws resampled from the SIR tab's own results, requires a SIR run with "Keep resamples" enabled) — each greyed out with a tooltip when its prerequisite is missing.
+- SIR-based uncertainty needed one extra piece of plumbing: `ferx_load_fit()` doesn't restore SIR resamples the way it restores theta/omega/sigma/covariance, so the SIR tab's cached results now also persist the raw resample matrix, which gets re-injected onto the fit before simulating.
 
 ### v0.8.7 (2026-07-08) — estimation method now file-declared only, method-chain bracket syntax fixed, covariance defaults on
 

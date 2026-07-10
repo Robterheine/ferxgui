@@ -107,6 +107,7 @@ pub fn paint_tab_icon(
         Tab::Evaluation  => evaluation(painter, cx, cy, s, color),
         Tab::Vpc         => vpc(painter, cx, cy, s, st),
         Tab::Uncertainty => uncertainty(painter, cx, cy, s, color, st),
+        Tab::Simulate    => simulate(painter, cx, cy, s, color, st),
         Tab::SimPlot     => simplot(painter, cx, cy, s, st),
         Tab::History     => history(painter, cx, cy, s, color, st),
     }
@@ -235,6 +236,20 @@ fn uncertainty(painter: &egui::Painter, cx: f32, cy: f32, s: f32, color: egui::C
     painter.line_segment([p(cx, cy, -s * 0.75, s * 0.5), p(cx, cy, s * 0.75, s * 0.5)], st);
     // peak dot
     painter.circle_filled(p(cx, cy, 0.0, -s * 0.55), s * 0.16, color);
+}
+
+// ── Simulate: one origin dot fanning out into several replicate traces ───────
+fn simulate(painter: &egui::Painter, cx: f32, cy: f32, s: f32, color: egui::Color32, st: egui::Stroke) {
+    let origin = p(cx, cy, -s * 0.75, 0.0);
+    let thin = egui::Stroke::new(1.0, st.color);
+    for end_dy in [-s * 0.55, 0.0, s * 0.55] {
+        poly(painter, vec![
+            origin,
+            p(cx, cy, s * 0.1,  end_dy * 0.5),
+            p(cx, cy, s * 0.75, end_dy),
+        ], thin);
+    }
+    painter.circle_filled(origin, s * 0.16, color);
 }
 
 // ── SimPlot: observed trace (bold) + one simulation trace (thin) ─────────────

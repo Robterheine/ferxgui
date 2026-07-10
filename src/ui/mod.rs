@@ -1,6 +1,7 @@
 pub mod eval_tab;
 pub mod files_tab;
 pub mod sim_tab;
+pub mod simulate_tab;
 pub mod report;
 pub mod history_tab;
 pub mod icons;

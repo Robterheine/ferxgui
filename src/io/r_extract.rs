@@ -5,7 +5,7 @@
 /// a background thread.
 use std::path::Path;
 
-use crate::domain::{CheckInitResult, CovScreenResult, EtaCovResult, RModelInfo, SirCi, SirResult, VpcConfig, VpcResult};
+use crate::domain::{CheckInitResult, CovScreenResult, EtaCovResult, RModelInfo, SimRunConfig, SimRunResult, SirCi, SirResult, VpcConfig, VpcResult};
 
 // ---------------------------------------------------------------------------
 // Embedded R scripts
@@ -257,6 +257,120 @@ result <- list(
 cat(toJSON(result, auto_unbox = TRUE, na = "null", digits = 6))
 "#;
 
+// Simulation bridge: calls ferx_simulate() (basis = initial estimates when
+// cfg$fitrx_path is absent, fitted estimates via ferx_load_fit() otherwise)
+// and writes the result CSV directly from R (no JSON round-trip — the merged
+// table can be large: n_sim * n_input_rows).
+//
+// ferx_simulate()'s own return is limited to observation-time rows (SIM, ID,
+// TIME, CMT, IPRED, DV_SIM, plus a DRAW column even for the non-uncertainty
+// case) — it does not carry covariates, EVID, AMT, etc. from the input
+// dataset. To give the GUI a table with the full original row (covariates,
+// EVID, CMT, ...) alongside the simulated values, this script replicates the
+// original input dataset once per SIM value, then left-joins IPRED/DV_SIM
+// onto matching rows by (SIM, ID, TIME[, CMT]). Dose rows (EVID = 1) have no
+// simulated counterpart (ferx_simulate() only predicts at observation times)
+// and are kept with IPRED/DV_SIM blank, so EVID remains meaningful in the
+// output and dosing rows stay visible/filterable downstream.
+const SIM_R: &str = r#"
+args <- commandArgs(trailingOnly = TRUE)
+if (length(args) < 1) stop("usage: simulate.R <config_json_path>")
+
+emit_error <- function(kind, msg) {
+  cat(jsonlite::toJSON(list(error = msg, error_kind = kind), auto_unbox = TRUE))
+  quit(save = "no", status = 0)
+}
+
+if (!requireNamespace("jsonlite", quietly = TRUE))
+  stop("jsonlite package not available")
+if (!requireNamespace("ferx", quietly = TRUE))
+  emit_error("ferx_not_installed", "The 'ferx' package is not installed.")
+
+suppressMessages(suppressWarnings({ library(ferx); library(jsonlite) }))
+
+cfg <- jsonlite::fromJSON(args[1])
+
+uncertainty_method <- if (!is.null(cfg$uncertainty_method) && nchar(cfg$uncertainty_method) > 0)
+  cfg$uncertainty_method else NULL
+
+fit <- NULL
+if (!is.null(cfg$fitrx_path) && nchar(cfg$fitrx_path) > 0) {
+  if (!file.exists(cfg$fitrx_path))
+    emit_error("fitrx_missing", paste0("Fit bundle not found: ", cfg$fitrx_path))
+  fit <- tryCatch(ferx_load_fit(cfg$fitrx_path),
+                   error = function(e) emit_error("fitrx_load_failed", conditionMessage(e)))
+}
+
+if (!is.null(uncertainty_method) && is.null(fit))
+  emit_error("fitrx_required", "Parameter-uncertainty simulation requires a saved fit (.fitrx).")
+
+# ferx_load_fit() does not restore SIR resamples (unlike theta/omega/sigma/
+# cov_matrix, which round-trip fine) — the GUI already has them cached from
+# the SIR tab's own run, so they're sent inline in the config and re-injected
+# here rather than re-running SIR.
+if (identical(uncertainty_method, "sir")) {
+  if (is.null(cfg$sir_resamples_flat) || length(cfg$sir_resamples_flat) == 0 ||
+      is.null(cfg$sir_resamples_n) || is.null(cfg$sir_resamples_dim))
+    emit_error("sir_resamples_required",
+      "SIR uncertainty simulation requires SIR results with samples kept — run SIR in the SIR tab first (Keep resamples enabled).")
+  fit$sir_resamples     <- as.numeric(cfg$sir_resamples_flat)
+  fit$sir_resamples_n   <- as.integer(cfg$sir_resamples_n)
+  fit$sir_resamples_dim <- as.integer(cfg$sir_resamples_dim)
+}
+
+sim <- if (!is.null(uncertainty_method)) {
+  tryCatch(
+    ferx_simulate_with_uncertainty(cfg$model_path, cfg$data_path, fit,
+      n_uncertainty_draws = cfg$n_uncertainty_draws, n_sim_per_draw = cfg$n_sim_per_draw,
+      method = uncertainty_method, seed = cfg$seed),
+    error = function(e) emit_error("simulate_failed", conditionMessage(e))
+  )
+} else {
+  tryCatch(
+    ferx_simulate(cfg$model_path, cfg$data_path, n_sim = cfg$n_sim, seed = cfg$seed, fit = fit),
+    error = function(e) emit_error("simulate_failed", conditionMessage(e))
+  )
+}
+names(sim) <- toupper(names(sim))
+
+orig <- tryCatch(read.csv(cfg$data_path), error = function(e) emit_error("data_read_failed", conditionMessage(e)))
+names(orig) <- toupper(names(orig))
+
+# "Replicate dimensions": SIM alone for the plain path, DRAW+SIM when
+# ferx_simulate_with_uncertainty() adds a parameter-draw dimension. The rest
+# of the merge is identical either way — the original dataset is replicated
+# once per unique combination of these columns, then IPRED/DV_SIM are
+# left-joined onto matching rows by (replicate dims..., ID, TIME[, CMT]).
+rep_dims <- intersect(c("DRAW", "SIM"), names(sim))
+join_key <- c(rep_dims, "ID", "TIME")
+if ("CMT" %in% names(orig) && "CMT" %in% names(sim)) join_key <- c(join_key, "CMT")
+
+sim_keep_cols <- intersect(c(rep_dims, "ID", "TIME", "CMT", "IPRED", "DV_SIM"), names(sim))
+sim_keep <- sim[, sim_keep_cols, drop = FALSE]
+
+rep_combos <- unique(sim_keep[, rep_dims, drop = FALSE])
+expanded <- do.call(rbind, lapply(seq_len(nrow(rep_combos)), function(i) {
+  d <- orig
+  for (col in rep_dims) d[[col]] <- rep_combos[i, col]
+  d
+}))
+
+merged <- merge(expanded, sim_keep, by = join_key, all.x = TRUE)
+out_cols <- c(setdiff(names(orig), rep_dims), rep_dims, "IPRED", "DV_SIM")
+merged <- merged[, out_cols]
+merged <- merged[do.call(order, merged[, c(rep_dims, "ID", "TIME")]), ]
+
+dir.create(dirname(cfg$out_path), showWarnings = FALSE, recursive = TRUE)
+write.csv(merged, cfg$out_path, row.names = FALSE, na = "")
+
+result <- list(
+  out_path = cfg$out_path,
+  n_rows   = nrow(merged),
+  columns  = as.list(names(merged))
+)
+cat(toJSON(result, auto_unbox = TRUE))
+"#;
+
 const SIR_R: &str = r#"
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) < 4) stop("usage: sir.R <fitrx_path> <sir_samples> <sir_resamples> <sir_seed> [keep_samples]")
@@ -301,6 +415,14 @@ if (keep_samples &&
 
   n_r   <- sir_fit$sir_resamples_n
   n_dim <- sir_fit$sir_resamples_dim
+
+  # Raw (unconstrained-parameterisation) resamples, persisted as-is —
+  # ferx_simulate_with_uncertainty(method = "sir") needs exactly this shape
+  # re-injected onto a fit object later (ferx_load_fit() doesn't restore it),
+  # so this must NOT go through the natural-scale back-transform below.
+  result$sir_resamples_flat <- as.list(as.numeric(sir_fit$sir_resamples))
+  result$sir_resamples_n    <- n_r
+  result$sir_resamples_dim  <- n_dim
 
   # Resamples are packed row-major: [resample1_p1, resample1_p2, ..., resample2_p1, ...]
   mat <- matrix(sir_fit$sir_resamples, nrow = n_r, ncol = n_dim, byrow = TRUE)
@@ -642,6 +764,33 @@ pub fn compute_vpc(cfg: &VpcConfig) -> Result<VpcResult, String> {
         .map_err(|e| format!("VPC JSON parse error: {e}\nR output: {}", &json[..json.len().min(500)]))
 }
 
+/// Run `ferx_simulate()` and write the merged CSV (original data columns +
+/// SIM + IPRED/DV_SIM) directly from R. Blocking — run from a background thread.
+pub fn compute_simulation(cfg: &SimRunConfig) -> Result<SimRunResult, String> {
+    let cfg_json = serde_json::to_string(cfg)
+        .map_err(|e| format!("could not serialize simulation config: {e}"))?;
+
+    let cfg_path = {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("ferxgui_simcfg_{}_{seq}.json", std::process::id()))
+    };
+    std::fs::write(&cfg_path, cfg_json)
+        .map_err(|e| format!("could not write simulation config: {e}"))?;
+
+    let cfg_path_str = path_as_str(&cfg_path)?;
+    let json = run_script(SIM_R, &[cfg_path_str]);
+    let _ = std::fs::remove_file(&cfg_path);
+    let json = json?;
+
+    if let Ok(err) = serde_json::from_str::<RBridgeError>(&json) {
+        return Err(err.error);
+    }
+    serde_json::from_str(&json)
+        .map_err(|e| format!("simulation JSON parse error: {e}\nR output: {}", &json[..json.len().min(500)]))
+}
+
 /// A structured error emitted by an R bridge script (e.g. package not installed).
 #[derive(serde::Deserialize)]
 struct RBridgeError {
@@ -902,6 +1051,9 @@ fn parse_sir_result(json: &str) -> Result<SirResult, serde_json::Error> {
         #[serde(default)] corr_dim:      usize,
         #[serde(default)] corr_flat:     Vec<f64>,
         #[serde(default)] param_samples: HashMap<String, Vec<f64>>,
+        #[serde(default)] sir_resamples_flat: Vec<f64>,
+        #[serde(default)] sir_resamples_n:    usize,
+        #[serde(default)] sir_resamples_dim:  usize,
     }
     let w: Wire = serde_json::from_str(json)?;
     Ok(SirResult {
@@ -913,6 +1065,9 @@ fn parse_sir_result(json: &str) -> Result<SirResult, serde_json::Error> {
         corr_dim:      w.corr_dim,
         corr_flat:     w.corr_flat,
         param_samples: w.param_samples,
+        sir_resamples_flat: w.sir_resamples_flat,
+        sir_resamples_n:    w.sir_resamples_n,
+        sir_resamples_dim:  w.sir_resamples_dim,
     })
 }
 
@@ -1117,4 +1272,271 @@ fn which_on_path(name: &str) -> Option<std::path::PathBuf> {
         if p.is_file() { return Some(p); }
     }
     None
+}
+
+#[cfg(test)]
+mod simulation_tests {
+    use super::*;
+
+    /// Live integration test against a real ferx-r example model + covariate
+    /// dataset (self-documented "skip on other machines", matching the
+    /// existing `warfarin_fitrx_parses_correctly` pattern). Confirms the
+    /// merge-back-to-input-data behaviour end-to-end: row count matches
+    /// `n_sim * input_rows`, dose rows (EVID=1) get blank IPRED/DV_SIM since
+    /// `ferx_simulate()` only predicts at observation times, observation rows
+    /// get populated IPRED/DV_SIM, and covariate columns from the input
+    /// dataset survive into the output untouched.
+    #[test]
+    fn simulate_merges_covariates_and_evid_from_input_data() {
+        let base = std::path::Path::new(
+            "/Users/robterheine/Downloads/ferx_inspect/ferx-r/ferx-r-main"
+        );
+        let model_path = base.join("inst/examples/models/two_cpt_oral_cov.ferx");
+        let data_path  = base.join("examples/data/two_cpt_oral_cov.csv");
+        if !model_path.exists() || !data_path.exists() { return; } // skip on other machines
+
+        let out_path = std::env::temp_dir().join("ferxgui_test_sim_output.csv");
+        let cfg = SimRunConfig {
+            model_path: model_path.to_string_lossy().into_owned(),
+            data_path:  data_path.to_string_lossy().into_owned(),
+            fitrx_path: None, // "initial estimates" basis — no fit required
+            n_sim: 2,
+            seed:  42,
+            out_path: out_path.to_string_lossy().into_owned(),
+            uncertainty_method: None,
+            n_uncertainty_draws: None,
+            n_sim_per_draw: None,
+            sir_resamples_flat: None,
+            sir_resamples_n: None,
+            sir_resamples_dim: None,
+        };
+
+        let result = compute_simulation(&cfg).expect("simulation should succeed");
+        assert_eq!(result.out_path, cfg.out_path);
+
+        // Count input rows directly rather than hardcoding, so the test
+        // still holds if the fixture file changes.
+        let input_rows = std::fs::read_to_string(&data_path).unwrap().lines().count() - 1; // minus header
+        assert_eq!(result.n_rows, input_rows * cfg.n_sim as usize);
+
+        for col in ["ID", "TIME", "DV", "EVID", "CMT", "WT", "CRCL", "SIM", "IPRED", "DV_SIM"] {
+            assert!(result.columns.contains(&col.to_string()), "missing column: {col}");
+        }
+
+        let written = std::fs::read_to_string(&out_path).expect("output CSV should exist");
+        let mut rdr = csv::Reader::from_reader(written.as_bytes());
+        let headers: Vec<String> = rdr.headers().unwrap().iter().map(str::to_string).collect();
+        let evid_idx    = headers.iter().position(|h| h == "EVID").unwrap();
+        let ipred_idx   = headers.iter().position(|h| h == "IPRED").unwrap();
+        let dv_sim_idx  = headers.iter().position(|h| h == "DV_SIM").unwrap();
+        let wt_idx      = headers.iter().position(|h| h == "WT").unwrap();
+
+        let mut saw_dose_row = false;
+        let mut saw_obs_row  = false;
+        for record in rdr.records() {
+            let record = record.unwrap();
+            let is_dose = &record[evid_idx] == "1";
+            let ipred_blank  = record[ipred_idx].trim().is_empty();
+            let dv_sim_blank = record[dv_sim_idx].trim().is_empty();
+            assert!(!record[wt_idx].trim().is_empty(), "covariate WT must survive the merge on every row");
+            if is_dose {
+                saw_dose_row = true;
+                assert!(ipred_blank && dv_sim_blank, "dose rows must have blank IPRED/DV_SIM");
+            } else {
+                saw_obs_row = true;
+                assert!(!ipred_blank && !dv_sim_blank, "observation rows must have populated IPRED/DV_SIM");
+            }
+        }
+        assert!(saw_dose_row, "fixture should contain at least one dose row");
+        assert!(saw_obs_row,  "fixture should contain at least one observation row");
+
+        let _ = std::fs::remove_file(&out_path);
+    }
+
+    /// Live integration test for Phase 3's asymptotic-uncertainty path.
+    /// Self-fits the small warfarin example with `covariance = TRUE` (rather
+    /// than depending on a pre-existing `.fitrx` whose convergence state
+    /// fluctuates with whatever was last run on this machine — see
+    /// `io::fitrx::tests::warfarin_fitrx_parses_correctly`), then confirms
+    /// `ferx_simulate_with_uncertainty()` produces a merged CSV whose row
+    /// count is `n_uncertainty_draws * n_sim_per_draw * n_obs`, and that
+    /// `IPRED` genuinely varies across draws (proof the parameter-uncertainty
+    /// dimension is real, not just replicated eta/epsilon noise at one draw).
+    /// Self-documented "skip on other machines".
+    #[test]
+    fn simulate_with_asymptotic_uncertainty_produces_draw_varying_output() {
+        let base = std::path::Path::new(
+            "/Users/robterheine/Downloads/ferx_inspect/ferx-r/ferx-r-main"
+        );
+        let model_path = base.join("inst/examples/models/warfarin.ferx");
+        let data_path  = base.join("inst/examples/data/warfarin.csv");
+        if !model_path.exists() || !data_path.exists() { return; } // skip on other machines
+
+        let fitrx_path = std::env::temp_dir().join("ferxgui_test_uncertainty.fitrx");
+        let fit_script = r#"
+args <- commandArgs(trailingOnly = TRUE)
+suppressMessages(library(ferx))
+fit <- ferx_fit(args[1], args[2], method = "focei", covariance = TRUE)
+ferx_save_fit(fit, args[3])
+cat("ok")
+"#;
+        run_script(fit_script, &[
+            path_as_str(&model_path).unwrap(),
+            path_as_str(&data_path).unwrap(),
+            path_as_str(&fitrx_path).unwrap(),
+        ]).expect("warfarin fit with covariance should succeed");
+
+        let out_path = std::env::temp_dir().join("ferxgui_test_uncertainty_output.csv");
+        let cfg = SimRunConfig {
+            model_path: model_path.to_string_lossy().into_owned(),
+            data_path:  data_path.to_string_lossy().into_owned(),
+            fitrx_path: Some(fitrx_path.to_string_lossy().into_owned()),
+            n_sim: 0, // unused in uncertainty mode
+            seed:  1,
+            out_path: out_path.to_string_lossy().into_owned(),
+            uncertainty_method: Some("asymptotic".to_string()),
+            n_uncertainty_draws: Some(3),
+            n_sim_per_draw: Some(2),
+            sir_resamples_flat: None,
+            sir_resamples_n: None,
+            sir_resamples_dim: None,
+        };
+
+        let result = compute_simulation(&cfg).expect("uncertainty simulation should succeed");
+
+        let input_rows = std::fs::read_to_string(&data_path).unwrap().lines().count() - 1;
+        let n_obs = std::fs::read_to_string(&data_path).unwrap()
+            .lines().skip(1)
+            .filter(|l| l.split(',').nth(3) == Some("0")) // EVID column
+            .count();
+        assert_eq!(result.n_rows, 6 * n_obs + 6 * (input_rows - n_obs));
+        assert!(result.columns.contains(&"DRAW".to_string()), "output must carry the DRAW column");
+
+        let written = std::fs::read_to_string(&out_path).expect("output CSV should exist");
+        let mut rdr = csv::Reader::from_reader(written.as_bytes());
+        let headers: Vec<String> = rdr.headers().unwrap().iter().map(str::to_string).collect();
+        let draw_idx  = headers.iter().position(|h| h == "DRAW").unwrap();
+        let id_idx    = headers.iter().position(|h| h == "ID").unwrap();
+        let time_idx  = headers.iter().position(|h| h == "TIME").unwrap();
+        let ipred_idx = headers.iter().position(|h| h == "IPRED").unwrap();
+
+        // Same (ID, TIME) observation under DRAW=1 vs DRAW=2 should differ —
+        // proof the parameter draw actually varies, not just noise reseeded
+        // at a fixed parameter set.
+        let mut by_draw: std::collections::HashMap<(String, String), String> = std::collections::HashMap::new();
+        for record in rdr.records() {
+            let record = record.unwrap();
+            if &record[draw_idx] == "1" && !record[ipred_idx].trim().is_empty() {
+                by_draw.insert((record[id_idx].to_string(), record[time_idx].to_string()), record[ipred_idx].to_string());
+            }
+        }
+        assert!(!by_draw.is_empty(), "should have found DRAW=1 observation rows");
+
+        let out_content2 = std::fs::read_to_string(&out_path).unwrap();
+        let mut rdr2 = csv::Reader::from_reader(out_content2.as_bytes());
+        let mut found_difference = false;
+        for record in rdr2.records() {
+            let record = record.unwrap();
+            if &record[draw_idx] == "2" && !record[ipred_idx].trim().is_empty() {
+                let key = (record[id_idx].to_string(), record[time_idx].to_string());
+                if let Some(draw1_ipred) = by_draw.get(&key) {
+                    if draw1_ipred != &record[ipred_idx] { found_difference = true; break; }
+                }
+            }
+        }
+        assert!(found_difference, "IPRED should differ across parameter draws");
+
+        let _ = std::fs::remove_file(&out_path);
+        let _ = std::fs::remove_file(&fitrx_path);
+    }
+
+    /// Live integration test for Phase 3's SIR-uncertainty path — the one
+    /// that needs raw resamples re-injected onto a freshly `ferx_load_fit()`-ed
+    /// fit, since `ferx_load_fit()` does not itself restore them. Runs the
+    /// full real pipeline: fit → `compute_sir()` (the existing SIR bridge) →
+    /// pass its `sir_resamples_flat/_n/_dim` into `SimRunConfig` →
+    /// `compute_simulation()`. Confirms the output merges correctly and that
+    /// IPRED genuinely varies across draws. Self-documented "skip on other
+    /// machines".
+    #[test]
+    fn simulate_with_sir_uncertainty_produces_draw_varying_output() {
+        let base = std::path::Path::new(
+            "/Users/robterheine/Downloads/ferx_inspect/ferx-r/ferx-r-main"
+        );
+        let model_path = base.join("inst/examples/models/warfarin.ferx");
+        let data_path  = base.join("inst/examples/data/warfarin.csv");
+        if !model_path.exists() || !data_path.exists() { return; } // skip on other machines
+
+        let fitrx_path = std::env::temp_dir().join("ferxgui_test_sir_uncertainty.fitrx");
+        let fit_script = r#"
+args <- commandArgs(trailingOnly = TRUE)
+suppressMessages(library(ferx))
+fit <- ferx_fit(args[1], args[2], method = "focei", covariance = TRUE)
+ferx_save_fit(fit, args[3])
+cat("ok")
+"#;
+        run_script(fit_script, &[
+            path_as_str(&model_path).unwrap(),
+            path_as_str(&data_path).unwrap(),
+            path_as_str(&fitrx_path).unwrap(),
+        ]).expect("warfarin fit with covariance should succeed");
+
+        let sir = compute_sir(&fitrx_path, 200, 100, 1, true)
+            .expect("SIR with kept samples should succeed");
+        assert!(sir.sir_resamples_n > 0, "SIR result should carry raw resamples");
+        assert!(!sir.sir_resamples_flat.is_empty());
+
+        let out_path = std::env::temp_dir().join("ferxgui_test_sir_uncertainty_output.csv");
+        let cfg = SimRunConfig {
+            model_path: model_path.to_string_lossy().into_owned(),
+            data_path:  data_path.to_string_lossy().into_owned(),
+            fitrx_path: Some(fitrx_path.to_string_lossy().into_owned()),
+            n_sim: 0, // unused in uncertainty mode
+            seed:  1,
+            out_path: out_path.to_string_lossy().into_owned(),
+            uncertainty_method: Some("sir".to_string()),
+            n_uncertainty_draws: Some(3),
+            n_sim_per_draw: Some(2),
+            sir_resamples_flat: Some(sir.sir_resamples_flat.clone()),
+            sir_resamples_n: Some(sir.sir_resamples_n),
+            sir_resamples_dim: Some(sir.sir_resamples_dim),
+        };
+
+        let result = compute_simulation(&cfg).expect("SIR uncertainty simulation should succeed");
+        assert!(result.columns.contains(&"DRAW".to_string()));
+
+        let written = std::fs::read_to_string(&out_path).expect("output CSV should exist");
+        let mut rdr = csv::Reader::from_reader(written.as_bytes());
+        let headers: Vec<String> = rdr.headers().unwrap().iter().map(str::to_string).collect();
+        let draw_idx  = headers.iter().position(|h| h == "DRAW").unwrap();
+        let id_idx    = headers.iter().position(|h| h == "ID").unwrap();
+        let time_idx  = headers.iter().position(|h| h == "TIME").unwrap();
+        let ipred_idx = headers.iter().position(|h| h == "IPRED").unwrap();
+
+        let mut by_draw: std::collections::HashMap<(String, String), String> = std::collections::HashMap::new();
+        for record in rdr.records() {
+            let record = record.unwrap();
+            if &record[draw_idx] == "1" && !record[ipred_idx].trim().is_empty() {
+                by_draw.insert((record[id_idx].to_string(), record[time_idx].to_string()), record[ipred_idx].to_string());
+            }
+        }
+        assert!(!by_draw.is_empty());
+
+        let out_content2 = std::fs::read_to_string(&out_path).unwrap();
+        let mut rdr2 = csv::Reader::from_reader(out_content2.as_bytes());
+        let mut found_difference = false;
+        for record in rdr2.records() {
+            let record = record.unwrap();
+            if &record[draw_idx] == "2" && !record[ipred_idx].trim().is_empty() {
+                let key = (record[id_idx].to_string(), record[time_idx].to_string());
+                if let Some(draw1_ipred) = by_draw.get(&key) {
+                    if draw1_ipred != &record[ipred_idx] { found_difference = true; break; }
+                }
+            }
+        }
+        assert!(found_difference, "IPRED should differ across SIR parameter draws");
+
+        let _ = std::fs::remove_file(&out_path);
+        let _ = std::fs::remove_file(&fitrx_path);
+    }
 }

@@ -101,4 +101,11 @@ pub enum WorkerMsg {
     SimComplete(Box<crate::domain::SimPlotResult>),
     /// Sim plot computation failed.
     SimError(String),
+
+    /// Simulate-tab `ferx_simulate()` run completed — the CSV is already
+    /// written to disk; this only carries the status summary.
+    SimRunComplete {
+        stem:   String,
+        result: Box<crate::domain::SimRunResult>,
+    },
 }

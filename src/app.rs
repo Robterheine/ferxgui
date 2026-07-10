@@ -602,6 +602,7 @@ fn render_body(ctx: &egui::Context, state: &mut AppState) {
             Tab::Evaluation => crate::ui::eval_tab::show(ui, state),
             Tab::Vpc => crate::ui::vpc_tab::show(ui, state),
             Tab::Uncertainty => crate::ui::sir_tab::show(ui, state),
+            Tab::Simulate => crate::ui::simulate_tab::show(ui, state),
             Tab::SimPlot => crate::ui::sim_tab::show(ui, state),
             Tab::History => crate::ui::history_tab::show(ui, state),
         }

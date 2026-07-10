@@ -158,6 +158,57 @@ pub struct VpcResult {
 }
 
 // ---------------------------------------------------------------------------
+// Simulation (ferx_simulate) — Phase 1 foundational engine.
+// The bridge script writes the merged CSV directly (not a JSON round-trip);
+// these types are only the config sent in and the small status summary
+// echoed back (path/row-count/columns), not the simulated data itself.
+// ---------------------------------------------------------------------------
+
+/// Options the GUI sends to the simulation bridge script (serialized to a JSON file).
+#[derive(Debug, Clone, Serialize)]
+pub struct SimRunConfig {
+    pub model_path: String,
+    pub data_path:  String,
+    /// Existing `.fitrx` bundle to simulate at ("fitted" basis, or required for
+    /// any `uncertainty_method`). `None` simulates at the model file's initial
+    /// estimates ("initial" basis).
+    pub fitrx_path: Option<String>,
+    /// Replicates — used only when `uncertainty_method` is `None`.
+    pub n_sim: u32,
+    pub seed:  u32,
+    /// Destination CSV path. The bridge script writes here directly.
+    pub out_path: String,
+    /// `Some("asymptotic")` or `Some("sir")` routes to
+    /// `ferx_simulate_with_uncertainty()` instead of `ferx_simulate()`; `None`
+    /// is the plain Phase 1/2 path. Requires `fitrx_path`.
+    pub uncertainty_method: Option<String>,
+    /// Number of parameter draws — used only when `uncertainty_method` is `Some`.
+    pub n_uncertainty_draws: Option<u32>,
+    /// Eta/epsilon replicates per parameter draw — used only when
+    /// `uncertainty_method` is `Some`.
+    pub n_sim_per_draw: Option<u32>,
+    /// Raw SIR resample matrix (`SirResult::sir_resamples_flat`) — required
+    /// when `uncertainty_method == Some("sir")`. Sent inline rather than as a
+    /// file path because `ferx_load_fit()` does not restore SIR resamples;
+    /// the bridge script re-injects these fields onto the freshly loaded fit
+    /// before calling `ferx_simulate_with_uncertainty(method = "sir")`.
+    pub sir_resamples_flat: Option<Vec<f64>>,
+    pub sir_resamples_n:    Option<usize>,
+    pub sir_resamples_dim:  Option<usize>,
+}
+
+/// Small status summary echoed back after the bridge script writes the CSV.
+/// The simulated data itself is never round-tripped through Rust — only its
+/// shape, for a status display.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SimRunResult {
+    pub out_path: String,
+    pub n_rows:   usize,
+    #[serde(default)]
+    pub columns:  Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Init check (ferx_check_init)
 // ---------------------------------------------------------------------------
 
@@ -213,6 +264,21 @@ pub struct SirResult {
     pub corr_flat:     Vec<f64>,
     /// Per-parameter marginal SIR samples (for distribution histograms).
     pub param_samples: std::collections::HashMap<String, Vec<f64>>,
+
+    /// Raw (unconstrained-parameterization) row-major resample matrix, as
+    /// `sir_fit$sir_resamples` returns it — distinct from `param_samples`
+    /// above, which is back-transformed to natural scale for display. This is
+    /// what `ferx_simulate_with_uncertainty(method = "sir")` needs re-injected
+    /// onto a freshly `ferx_load_fit()`-ed fit object, since `ferx_load_fit()`
+    /// does not itself restore SIR resamples.
+    #[serde(default)]
+    pub sir_resamples_flat: Vec<f64>,
+    /// Number of resamples (rows of the matrix above).
+    #[serde(default)]
+    pub sir_resamples_n:    usize,
+    /// Parameter dimension (columns of the matrix above).
+    #[serde(default)]
+    pub sir_resamples_dim:  usize,
 }
 
 impl SirResult {
@@ -407,6 +473,24 @@ mod tests {
         // R `na = "null"` must become None, not an error.
         assert_eq!(r.obs_points[1].dv, None);
         assert_eq!(r.obs_points[0].dv, Some(5.3653));
+    }
+
+    #[test]
+    fn sim_run_result_parses_bridge_json() {
+        // A trimmed but faithful sample of what the simulate.R bridge emits
+        // after writing the merged CSV (original data + SIM + IPRED/DV_SIM).
+        const FIXTURE: &str = r#"{
+          "out_path": "/tmp/sim_out.csv",
+          "n_rows": 660,
+          "columns": ["ID","TIME","DV","EVID","AMT","CMT","RATE","MDV","WT","CRCL","SIM","IPRED","DV_SIM"]
+        }"#;
+        let r: SimRunResult = serde_json::from_str(FIXTURE).expect("parse SimRunResult");
+        assert_eq!(r.out_path, "/tmp/sim_out.csv");
+        assert_eq!(r.n_rows, 660);
+        assert_eq!(r.columns.len(), 13);
+        assert!(r.columns.contains(&"EVID".to_string()));
+        assert!(r.columns.contains(&"IPRED".to_string()));
+        assert!(r.columns.contains(&"DV_SIM".to_string()));
     }
 
     #[test]
