@@ -40,7 +40,6 @@ CODE_REVIEW_HANDOFF.md
 *.json.bak
 *.tmp
 design/
-.github/workflows/
 
 # ── Temporary test / log artefacts ────────────────────────────────────────────
 *.log
