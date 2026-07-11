@@ -39,6 +39,7 @@ CLAUDE.md
 CODE_REVIEW_HANDOFF.md
 *.json.bak
 *.tmp
+design/
 
 # ── Temporary test / log artefacts ────────────────────────────────────────────
 *.log
