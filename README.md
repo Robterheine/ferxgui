@@ -199,7 +199,7 @@ The binary is at `target/release/ferxgui` (or `ferxgui.exe` on Windows). No inst
 
 ## Continuous integration
 
-CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflows/ci.yml`), building and testing on macOS, Windows, and Ubuntu.
+This repo previously ran GitHub Actions CI on every push (build + test on macOS, Windows, Ubuntu) and an automated release build on tag push. Both workflows are now kept locally only (not tracked in the repo), so releases are built and published manually.
 
 ---
 
