@@ -2946,13 +2946,14 @@ fn save_meta_for(state: &mut AppState, _idx: usize) {
         Some(d) => d.clone(),
         None => return,
     };
+    let Some(app_dir) = state.workspace.app_dir.clone() else { return };
     let meta_map: HashMap<String, _> = state
         .workspace
         .models
         .iter()
         .map(|e| (e.model.stem.clone(), e.meta.clone()))
         .collect();
-    let _ = save_model_meta(&dir, &meta_map);
+    let _ = save_model_meta(&app_dir, &dir, &meta_map);
 }
 
 /// Syntax-highlight a .ferx source string into an egui LayoutJob.
@@ -3352,14 +3353,14 @@ fn do_duplicate(state: &mut AppState, src_idx: usize) {
             // Establish tree lineage: persist based_on for the new model
             // by merging into the existing meta map before the scan.
             if set_child {
-                if let Some(dir) = &state.workspace.directory {
-                    let mut meta_map = crate::io::persistence::load_model_meta(dir);
+                if let (Some(app_dir), Some(dir)) = (&state.workspace.app_dir, &state.workspace.directory) {
+                    let mut meta_map = crate::io::persistence::load_model_meta(app_dir, dir);
                     let new_meta = crate::domain::ModelMeta {
                         based_on: Some(src_stem.clone()),
                         ..Default::default()
                     };
                     meta_map.insert(new_stem.clone(), new_meta);
-                    let _ = save_model_meta(dir, &meta_map);
+                    let _ = save_model_meta(app_dir, dir, &meta_map);
                 }
             }
             state.ui.status_message = format!("Created {new_stem}.ferx (child of {src_stem})");

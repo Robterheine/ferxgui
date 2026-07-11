@@ -180,18 +180,44 @@ pub fn save_bookmarks(app_dir: &Path, bookmarks: &[Bookmark]) -> std::io::Result
 // Model metadata
 // ---------------------------------------------------------------------------
 
-/// Loads the `model_meta.json` for a given workspace directory.
-/// Keyed by model stem.
-pub fn load_model_meta(workspace: &Path) -> HashMap<String, ModelMeta> {
-    let path = workspace.join("model_meta.json");
-    load_json(path).unwrap_or_default()
+/// Per-user, per-workspace path for model annotations (starred, comment,
+/// status, decision, tags, notes, lineage). Kept under the current user's
+/// own `app_dir` — keyed by a hash of the workspace path — rather than in
+/// the workspace directory itself, so multiple people pointed at the same
+/// shared project each get their own annotations instead of overwriting
+/// each other's.
+fn model_meta_path(app_dir: &Path, workspace: &Path) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    workspace.hash(&mut h);
+    app_dir.join("model_meta").join(format!("{:016x}.json", h.finish()))
+}
+
+/// Loads model annotations for `workspace`, scoped to the current user.
+/// Keyed by model stem. On first use for a (user, workspace) pair that has
+/// no per-user file yet, imports the legacy shared `model_meta.json` from
+/// the workspace directory if one exists, so existing starred/tagged/
+/// commented models don't appear to vanish on upgrade — the legacy file is
+/// left in place untouched, not deleted, since other users on the same
+/// workspace may not have upgraded yet.
+pub fn load_model_meta(app_dir: &Path, workspace: &Path) -> HashMap<String, ModelMeta> {
+    let path = model_meta_path(app_dir, workspace);
+    if let Some(meta) = load_json::<HashMap<String, ModelMeta>>(path) {
+        return meta;
+    }
+    load_json(workspace.join("model_meta.json")).unwrap_or_default()
 }
 
 pub fn save_model_meta(
+    app_dir: &Path,
     workspace: &Path,
     meta: &HashMap<String, ModelMeta>,
 ) -> std::io::Result<()> {
-    save_json(workspace.join("model_meta.json"), meta)
+    let path = model_meta_path(app_dir, workspace);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    save_json(path, meta)
 }
 
 // ---------------------------------------------------------------------------
@@ -255,4 +281,100 @@ fn save_json<T: Serialize + ?Sized>(path: PathBuf, value: &T) -> std::io::Result
     std::fs::write(&tmp, json)?;
     std::fs::rename(&tmp, &path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod model_meta_tests {
+    use super::*;
+
+    /// Scratch dirs unique across concurrent tests *and* across separate
+    /// `cargo test` process invocations (PID + a per-process counter, not
+    /// just the counter alone — a counter that resets to 0 on every fresh
+    /// test-binary run can otherwise deterministically reuse the same path
+    /// a previous run already left files under). Removed on drop so
+    /// repeated local test runs don't accumulate junk in the OS temp dir.
+    struct ScratchDirs {
+        app_dir:   PathBuf,
+        workspace: PathBuf,
+    }
+
+    impl Drop for ScratchDirs {
+        fn drop(&mut self) {
+            if let Some(base) = self.app_dir.parent() {
+                let _ = std::fs::remove_dir_all(base);
+            }
+        }
+    }
+
+    fn scratch_dirs(tag: &str) -> ScratchDirs {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let base = std::env::temp_dir()
+            .join(format!("ferxgui_test_model_meta_{tag}_{}_{seq}", std::process::id()));
+        let app_dir   = base.join("app_dir");
+        let workspace = base.join("workspace");
+        std::fs::create_dir_all(&app_dir).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        ScratchDirs { app_dir, workspace }
+    }
+
+    #[test]
+    fn save_then_load_round_trips_from_the_per_user_location() {
+        let s = scratch_dirs("roundtrip");
+        let mut meta = HashMap::new();
+        meta.insert("model_a".to_string(), ModelMeta { starred: true, ..Default::default() });
+        save_model_meta(&s.app_dir, &s.workspace, &meta).expect("save should succeed");
+
+        // Written under the user's app_dir, not into the workspace directory.
+        assert!(!s.workspace.join("model_meta.json").exists());
+
+        let loaded = load_model_meta(&s.app_dir, &s.workspace);
+        assert!(loaded.get("model_a").unwrap().starred);
+    }
+
+    #[test]
+    fn first_load_imports_the_legacy_shared_file_once() {
+        let s = scratch_dirs("legacy_import");
+
+        // Simulate a pre-upgrade shared model_meta.json sitting in the
+        // workspace directory (the old storage location).
+        let mut legacy = HashMap::new();
+        legacy.insert("legacy_model".to_string(), ModelMeta { comment: "from before".into(), ..Default::default() });
+        save_json(s.workspace.join("model_meta.json"), &legacy).expect("legacy write should succeed");
+
+        // No per-user file exists yet — load should import the legacy one.
+        let loaded = load_model_meta(&s.app_dir, &s.workspace);
+        assert_eq!(loaded.get("legacy_model").unwrap().comment, "from before");
+
+        // The legacy file must be left untouched (not deleted/modified) —
+        // other users on the same workspace may not have upgraded yet.
+        assert!(s.workspace.join("model_meta.json").exists());
+
+        // Once this user has their own saved data, subsequent loads must
+        // read the per-user file, not keep re-importing the legacy one.
+        let mut mine = HashMap::new();
+        mine.insert("my_model".to_string(), ModelMeta { starred: true, ..Default::default() });
+        save_model_meta(&s.app_dir, &s.workspace, &mine).expect("save should succeed");
+        let reloaded = load_model_meta(&s.app_dir, &s.workspace);
+        assert!(reloaded.contains_key("my_model"));
+        assert!(!reloaded.contains_key("legacy_model"));
+    }
+
+    #[test]
+    fn different_workspaces_for_the_same_user_get_independent_per_user_files() {
+        let s_a = scratch_dirs("ws_a");
+        let s_b = scratch_dirs("ws_b");
+
+        let mut meta_a = HashMap::new();
+        meta_a.insert("a".to_string(), ModelMeta::default());
+        // Same app_dir (same user) as s_b, deliberately — this is testing
+        // that two different *workspaces* under one user don't collide,
+        // not that two different users don't collide (which is trivially
+        // true and not what the hashing logic needs to get right).
+        save_model_meta(&s_a.app_dir, &s_a.workspace, &meta_a).unwrap();
+
+        let loaded_b = load_model_meta(&s_a.app_dir, &s_b.workspace);
+        assert!(loaded_b.is_empty());
+    }
 }

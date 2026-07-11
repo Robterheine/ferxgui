@@ -205,6 +205,12 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.9.2 (2026-07-11) — model annotations (starred/comment/tags/status/lineage) are now per-user
+
+**Changed: `model_meta.json` moved from the shared workspace folder to a per-user location**
+- Model annotations (starred, comment, status, decision, tags, notes, and lineage/`based_on` used by the Ancestry Tree) now live under `~/.ferxgui/model_meta/` instead of directly in the workspace directory alongside the `.ferx` files. Relevant for FeRx GUI's documented SSH/X11 central-deployment use case: previously, everyone pointed at the same shared project folder shared one `model_meta.json`, so starring/tagging/commenting on a model — or duplicating one "as a child" to set its lineage — silently overwrote whatever anyone else had set. Each user now gets their own file, keyed by the workspace path, so annotations (including Ancestry Tree lineage) are personal to whoever set them rather than shared team state.
+- On first use for a given (user, workspace) pair, any existing shared `model_meta.json` already sitting in the workspace directory is imported once as a starting point, so previously starred/tagged/commented models don't appear to reset on upgrade. The legacy file itself is left in place, not deleted — other users on the same shared project may not have upgraded yet.
+
 ### v0.9.1 (2026-07-11) — security, reliability, and accessibility audit fixes
 
 A full pass triggered by a comprehensive security/reliability/accessibility audit, addressing every High- and Medium-severity finding plus the outstanding Low-severity items.

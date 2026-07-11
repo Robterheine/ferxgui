@@ -1109,9 +1109,10 @@ impl AppState {
                 // time to flush the zip to disk before we try to open it.
                 let tx = self.worker_tx.clone();
                 let dir = self.workspace.directory.clone();
-                let meta = self.workspace.directory.as_deref()
-                    .map(crate::io::persistence::load_model_meta)
-                    .unwrap_or_default();
+                let meta = match (self.workspace.app_dir.as_deref(), self.workspace.directory.as_deref()) {
+                    (Some(app_dir), Some(ws)) => crate::io::persistence::load_model_meta(app_dir, ws),
+                    _ => Default::default(),
+                };
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(400));
                     if let Some(d) = dir {
@@ -1355,9 +1356,10 @@ impl AppState {
     /// Kick off an asynchronous directory scan on a background thread.
     pub fn trigger_scan(&mut self) {
         let Some(dir) = self.workspace.directory.clone() else { return };
-        let meta_map = self.workspace.directory.as_deref()
-            .map(load_model_meta)
-            .unwrap_or_default();
+        let meta_map = match (self.workspace.app_dir.as_deref(), self.workspace.directory.as_deref()) {
+            (Some(app_dir), Some(ws)) => load_model_meta(app_dir, ws),
+            _ => Default::default(),
+        };
         let tx = self.worker_tx.clone();
         self.workspace.scanning = true;
         std::thread::spawn(move || {
