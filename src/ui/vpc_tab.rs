@@ -77,6 +77,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                 });
 
             let computing  = state.workspace.vpc_computing.contains(&stem);
+            let exporting  = state.ui.vpc_exporting;
             let pkg_ok     = matches!(state.ui.vpc_pkg_status, Some(Ok(_)));
             let has_data   = state.ui.vpc_data_path.is_some();
             let valid_bins = manual_bins_valid(&state.ui.vpc_opts);
@@ -85,9 +86,11 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
             ui.add_space(2.0);
 
             // Primary: Compute VPC
+            // Also blocked while exporting (Run Script) — both read/write the
+            // same on-disk R sim cache for this model; see VpcRenderData.
             let lbl = if computing { "Computing…" } else { "Compute VPC" };
             if ui.add_enabled(
-                has_data && pkg_ok && !computing && valid_bins && valid_lloq,
+                has_data && pkg_ok && !computing && !exporting && valid_bins && valid_lloq,
                 egui::Button::new(egui::RichText::new(lbl).size(14.0).strong())
                     .fill(theme::ACCENT)
                     .min_size(egui::vec2(ui.available_width(), 34.0)),
@@ -127,9 +130,10 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
             if state.workspace.vpc_computing.contains(&stem) {
                 computing_spinner(ui, &state.ui.vpc_opts);
                 ui.ctx().request_repaint();
-            } else if let Some(vpc) = state.workspace.vpc_data.get(&stem).cloned() {
-                let opts = state.ui.vpc_opts.clone();
-                show_vpc_plot(ui, &vpc, &opts, dark);
+            } else if let Some(rd) = state.workspace.vpc_data.get(&stem).cloned() {
+                let mut opts = rd.opts;
+                opts.theme = state.ui.vpc_opts.theme.clone(); // Display-only — stays live
+                show_vpc_plot(ui, &rd.result, &opts, dark);
             } else {
                 hint(ui, "Set options on the left, then click Compute VPC.");
             }
@@ -146,6 +150,7 @@ fn show_script_popup(ui: &egui::Ui, state: &mut AppState, idx: usize, stem: &str
 
     let dark       = ui.visuals().dark_mode;
     let exporting  = state.ui.vpc_exporting;
+    let computing  = state.workspace.vpc_computing.contains(stem);
     let has_data   = state.ui.vpc_data_path.is_some();
     let pkg_ok     = matches!(state.ui.vpc_pkg_status, Some(Ok(_)));
     let has_result = state.workspace.vpc_data.contains_key(stem);
@@ -170,6 +175,10 @@ fn show_script_popup(ui: &egui::Ui, state: &mut AppState, idx: usize, stem: &str
             if dark { crate::app::theme::apply_dark(ctx); } else { crate::app::theme::apply_light(ctx); }
 
             if ctx.input(|i| i.viewport().close_requested()) {
+                do_close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                 do_close = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
@@ -214,7 +223,9 @@ fn show_script_popup(ui: &egui::Ui, state: &mut AppState, idx: usize, stem: &str
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let run_label = if exporting { "Running…" } else { "Run Script" };
-                        let can_run = has_data && pkg_ok && has_result && !exporting;
+                        // Also blocked while a Compute VPC is in flight for this
+                        // model — both read/write the same on-disk R sim cache.
+                        let can_run = has_data && pkg_ok && has_result && !exporting && !computing;
                         if ui.add_enabled(
                             can_run,
                             egui::Button::new(
@@ -584,15 +595,16 @@ fn pkg_banner(ui: &mut egui::Ui, state: &AppState, dark: bool) {
 // Compute / export / pkg-check triggers
 // ---------------------------------------------------------------------------
 
-fn build_config(state: &AppState, idx: usize) -> Option<VpcConfig> {
+fn build_config(state: &AppState, idx: usize) -> Result<VpcConfig, String> {
     let model_path = state.workspace.models[idx].model.path.clone();
     let fitrx_path = state.workspace.models[idx].fitrx_path.clone();
-    let data_path  = state.ui.vpc_data_path.clone()?;
+    let data_path  = state.ui.vpc_data_path.clone()
+        .ok_or_else(|| "no dataset selected".to_string())?;
     let o = &state.ui.vpc_opts;
 
     let cache_path = r_extract::vpc_cache_path(
         &model_path, &data_path, fitrx_path.as_deref(), o.n_sim, o.seed,
-    );
+    )?;
     let manual_bins = if o.bins_type == "manual" {
         let parsed: Vec<f64> = o.manual_bins.split(',')
             .filter_map(|s| s.trim().parse::<f64>().ok()).collect();
@@ -608,7 +620,7 @@ fn build_config(state: &AppState, idx: usize) -> Option<VpcConfig> {
     let stratify: Vec<String> = [o.stratify1.trim(), o.stratify2.trim()]
         .iter().filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
 
-    Some(VpcConfig {
+    Ok(VpcConfig {
         model_path: model_path.to_string_lossy().into_owned(),
         data_path:  data_path.to_string_lossy().into_owned(),
         fitrx_path: fitrx_path.map(|p| p.to_string_lossy().into_owned()),
@@ -635,8 +647,18 @@ fn build_config(state: &AppState, idx: usize) -> Option<VpcConfig> {
 }
 
 fn start_compute(ui: &egui::Ui, state: &mut AppState, idx: usize, stem: &str) {
-    let Some(cfg) = build_config(state, idx) else { return; };
+    let cfg = match build_config(state, idx) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            state.ui.status_message = format!("Could not start VPC compute: {e}");
+            return;
+        }
+    };
     state.workspace.vpc_computing.insert(stem.to_string());
+    // Snapshot the options that are actually being sent to R, so the plot
+    // renders from what was computed rather than whatever the panel has
+    // been changed to by the time the result arrives (see VpcRenderData).
+    state.workspace.vpc_pending_opts.insert(stem.to_string(), state.ui.vpc_opts.clone());
     let tx = state.worker_tx.clone();
     let ctx = ui.ctx().clone();
     let stem_cl = stem.to_string();
@@ -651,7 +673,13 @@ fn start_compute(ui: &egui::Ui, state: &mut AppState, idx: usize, stem: &str) {
 
 /// Called from the OS-native script viewport (has `egui::Context`, not `egui::Ui`).
 fn start_export_from_ctx(ctx: &egui::Context, state: &mut AppState, idx: usize, stem: &str) {
-    let Some(cfg) = build_config(state, idx) else { return; };
+    let cfg = match build_config(state, idx) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            state.ui.status_message = format!("Could not start VPC export: {e}");
+            return;
+        }
+    };
     let model_path = state.workspace.models[idx].model.path.clone();
     let unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

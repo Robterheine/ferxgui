@@ -336,7 +336,7 @@ fn show_empty_state_no_directory(ui: &mut egui::Ui, state: &mut AppState) {
     let top = (ui.available_height() - 130.0) * 0.38;
     ui.add_space(top.max(0.0));
     ui.vertical_centered(|ui| {
-        ui.label(egui::RichText::new("No working directory").size(18.0).strong());
+        ui.label(egui::RichText::new("No working directory").size(18.0).strong().color(theme::fg(ui.visuals().dark_mode)));
         ui.add_space(8.0);
         ui.label(
             egui::RichText::new("Choose a folder that contains .ferx model files.")
@@ -375,7 +375,7 @@ fn show_empty_state_no_models(ui: &mut egui::Ui, state: &AppState) {
     let top = (ui.available_height() - 100.0) * 0.38;
     ui.add_space(top.max(0.0));
     ui.vertical_centered(|ui| {
-        ui.label(egui::RichText::new("No models found").size(18.0).strong());
+        ui.label(egui::RichText::new("No models found").size(18.0).strong().color(theme::fg(ui.visuals().dark_mode)));
         ui.add_space(8.0);
         ui.label(
             egui::RichText::new(format!("No .ferx files found in '{}'.", dir_name))
@@ -3143,12 +3143,14 @@ fn apply_ctx_action(
 // ── Bookmark-name dialog ──────────────────────────────────────────────────────
 
 fn show_bookmark_dialog(ctx: &egui::Context, state: &mut AppState) {
+    let already_focused = state.ui.bookmark_dialog_focused;
     let Some((ref dir, ref mut label)) = state.ui.pending_bookmark else { return };
     let dir     = dir.clone();              // avoid borrow conflicts below
     let dir_str = dir.display().to_string(); // computed once, not per-frame inside closure
 
-    let mut confirm = false;
-    let mut cancel  = false;
+    let mut confirm      = false;
+    let mut cancel       = false;
+    let mut just_focused = false;
 
     egui::Window::new("Bookmark Project")
         .collapsible(false)
@@ -3172,7 +3174,10 @@ fn show_bookmark_dialog(ctx: &egui::Context, state: &mut AppState) {
                 egui::TextEdit::singleline(label)
                     .desired_width(f32::INFINITY),
             );
-            resp.request_focus();
+            if !already_focused {
+                resp.request_focus();
+                just_focused = true;
+            }
 
             let can_confirm = !label.trim().is_empty();
             if resp.lost_focus()
@@ -3199,6 +3204,9 @@ fn show_bookmark_dialog(ctx: &egui::Context, state: &mut AppState) {
             });
         });
 
+    if just_focused {
+        state.ui.bookmark_dialog_focused = true;
+    }
     if confirm {
         let label = label.trim().to_string();
         state.workspace.bookmarks.push(
@@ -3210,14 +3218,17 @@ fn show_bookmark_dialog(ctx: &egui::Context, state: &mut AppState) {
             }
         }
         state.ui.pending_bookmark = None;
+        state.ui.bookmark_dialog_focused = false;
     } else if cancel {
         state.ui.pending_bookmark = None;
+        state.ui.bookmark_dialog_focused = false;
     }
 }
 
 // ── Duplicate dialog ──────────────────────────────────────────────────────────
 
 fn show_duplicate_dialog(ctx: &egui::Context, state: &mut AppState) {
+    let already_focused = state.ui.duplicate_dialog_focused;
     let Some(src_idx) = state.ui.pending_duplicate else { return };
 
     let src_stem = state.workspace.models
@@ -3225,8 +3236,9 @@ fn show_duplicate_dialog(ctx: &egui::Context, state: &mut AppState) {
         .map(|m| m.model.stem.clone())
         .unwrap_or_default();
 
-    let mut close   = false;
-    let mut execute = false;
+    let mut close        = false;
+    let mut execute       = false;
+    let mut just_focused = false;
 
     egui::Window::new("Duplicate Model")
         .collapsible(false)
@@ -3250,11 +3262,13 @@ fn show_duplicate_dialog(ctx: &egui::Context, state: &mut AppState) {
                 egui::TextEdit::singleline(&mut state.ui.duplicate_stem_buf)
                     .desired_width(f32::INFINITY),
             );
-            // Auto-focus the text field when the dialog first opens.
-            if resp.gained_focus() || resp.has_focus() {
-                // already focused
-            } else {
+            // Auto-focus the text field once when the dialog first opens —
+            // guarded by a one-shot flag rather than has_focus(), which
+            // would re-fire (and steal focus back) every frame after the
+            // user Tabs away to the buttons below.
+            if !already_focused {
                 resp.request_focus();
+                just_focused = true;
             }
 
             // Validate — name must be non-empty and not already taken.
@@ -3310,10 +3324,17 @@ fn show_duplicate_dialog(ctx: &egui::Context, state: &mut AppState) {
             }
         });
 
-    if close   { state.ui.pending_duplicate = None; }
+    if just_focused {
+        state.ui.duplicate_dialog_focused = true;
+    }
+    if close {
+        state.ui.pending_duplicate = None;
+        state.ui.duplicate_dialog_focused = false;
+    }
     if execute {
         do_duplicate(state, src_idx);
         state.ui.pending_duplicate = None;
+        state.ui.duplicate_dialog_focused = false;
     }
 }
 
@@ -3425,7 +3446,8 @@ fn show_delete_dialog(ctx: &egui::Context, state: &mut AppState) {
             ui.label(
                 egui::RichText::new(format!("Delete  \"{}\"?", stem))
                     .strong()
-                    .size(14.0),
+                    .size(14.0)
+                    .color(theme::fg(dark)),
             );
             ui.add_space(8.0);
             ui.label(
@@ -3494,7 +3516,7 @@ fn show_new_model_dialog(ctx: &egui::Context, state: &mut AppState) {
             let dark = ui.visuals().dark_mode;
             let dim  = if dark { theme::FG2 } else { egui::Color32::from_gray(90) };
 
-            ui.label(egui::RichText::new("Create a new model from a template").strong().size(13.0));
+            ui.label(egui::RichText::new("Create a new model from a template").strong().size(13.0).color(theme::fg(dark)));
             ui.add_space(12.0);
 
             // Template picker.
@@ -3844,7 +3866,7 @@ fn show_compare_dialog(ctx: &egui::Context, state: &mut AppState) {
             // STATISTICS" section after SIGMA.
 
             // ── Parameter comparison table ────────────────────────────────────
-            egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+            egui::ScrollArea::both().auto_shrink([false; 2]).show(ui, |ui| {
                 egui::Grid::new("compare_grid")
                     .num_columns(7)
                     .spacing([10.0, 4.0])

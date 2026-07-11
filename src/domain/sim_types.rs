@@ -124,6 +124,11 @@ pub struct SimTabState {
     pub y_label: String,
 
     // Computation state
+    /// Bumped every time a new file is loaded — lets a `SimComplete`/`SimError`
+    /// message that was in flight for a since-superseded file be recognised
+    /// as stale and discarded instead of silently overwriting the new file's
+    /// display state.
+    pub generation: u64,
     pub running: bool,
     pub result:  Option<SimPlotResult>,
     pub status:  String,
@@ -170,6 +175,7 @@ impl Default for SimTabState {
             x_label:   String::new(),
             y_label:   String::new(),
 
+            generation: 0,
             running: false,
             result:  None,
             status:  String::new(),

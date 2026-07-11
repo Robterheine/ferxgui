@@ -59,6 +59,8 @@ const CAT_COLORS: [egui::Color32; 8] = [
 // ── Public entry point ────────────────────────────────────────────────────────
 
 pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
+    show_unsaved_nav_dialog(ui.ctx(), state);
+
     // Bootstrap: sync cwd to working directory on first entry or when not set.
     if state.ui.files_cwd.is_none() {
         state.ui.files_cwd = state.workspace.directory.clone();
@@ -275,7 +277,13 @@ fn show_file_list(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
         state.ui.files_view_mode = FilesViewMode::Empty;
     }
     if let Some(path) = open_file  { os_open(&path); }
-    if let Some(path) = select     { load_file(state, path); }
+    if let Some(path) = select {
+        if state.ui.files_text_dirty || state.ui.files_csv_dirty {
+            state.ui.files_pending_nav = Some(path);
+        } else {
+            load_file(state, path);
+        }
+    }
     if let Some(path) = ctx_reveal { reveal_in_finder(&path); }
     if let Some(path) = ctx_copy   {
         ui.ctx().copy_text(path.to_string_lossy().into());
@@ -730,6 +738,63 @@ fn show_empty_hint(ui: &mut egui::Ui, dark: bool) {
 
 // ── File loading ──────────────────────────────────────────────────────────────
 
+/// Confirmation dialog shown when the user clicks a different file while the
+/// current one has unsaved edits — otherwise `load_file` would silently
+/// discard them.
+fn show_unsaved_nav_dialog(ctx: &egui::Context, state: &mut AppState) {
+    let Some(target) = state.ui.files_pending_nav.clone() else { return };
+
+    let mut cancel  = false;
+    let mut discard = false;
+    let mut save    = false;
+
+    egui::Window::new("Unsaved changes")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            let dark = ui.visuals().dark_mode;
+            ui.set_min_width(320.0);
+            ui.label(egui::RichText::new("Unsaved changes").strong().size(14.0).color(theme::fg(dark)));
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("This file has unsaved edits. Save before switching?")
+                    .color(theme::fg2(dark)).size(12.0),
+            );
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked()  { cancel  = true; }
+                if ui.button("Discard").clicked() { discard = true; }
+                ui.add_space(8.0);
+                if ui.add(
+                    egui::Button::new(egui::RichText::new("Save").color(egui::Color32::WHITE))
+                        .fill(theme::ACCENT),
+                ).clicked() { save = true; }
+            });
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) { cancel = true; }
+        });
+
+    if cancel {
+        state.ui.files_pending_nav = None;
+    } else if discard {
+        state.ui.files_pending_nav = None;
+        load_file(state, target);
+    } else if save {
+        if state.ui.files_text_dirty { save_text_file(state); }
+        if state.ui.files_csv_dirty  { save_csv_file(state); }
+        // Both flags are mutually exclusive in practice (load_file routes a
+        // path to exactly one view mode by extension), so this really just
+        // asks "did the save that mattered succeed?" — if either save
+        // failed, its flag stays set (see save_text_file/save_csv_file,
+        // which only clear on Ok) and we leave the edit in place rather
+        // than discarding it via load_file.
+        if !state.ui.files_text_dirty && !state.ui.files_csv_dirty {
+            state.ui.files_pending_nav = None;
+            load_file(state, target);
+        }
+    }
+}
+
 fn load_file(state: &mut AppState, path: PathBuf) {
     if state.ui.files_selected.as_ref() == Some(&path) { return; }
 
@@ -933,26 +998,7 @@ fn fmt_size(n: u64) -> String {
 fn fmt_mtime(t: std::time::SystemTime) -> String {
     use std::time::UNIX_EPOCH;
     let secs = t.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let (y, mo, d) = epoch_days_to_ymd(secs / 86_400);
-    let h = (secs % 86_400) / 3_600;
-    let m = (secs % 3_600) / 60;
-    format!("{y}-{mo:02}-{d:02}  {h:02}:{m:02}")
-}
-
-/// Days since Unix epoch (1970-01-01) → (year, month, day).
-/// Algorithm: https://howardhinnant.github.io/date_algorithms.html
-fn epoch_days_to_ymd(days: u64) -> (u64, u64, u64) {
-    let z   = days + 719_468;
-    let era = z / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y   = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp  = (5 * doy + 2) / 153;
-    let d   = doy - (153 * mp + 2) / 5 + 1;
-    let mo  = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y   = if mo <= 2 { y + 1 } else { y };
-    (y, mo, d)
+    crate::workers::run::unix_to_datetime(secs)
 }
 
 fn breadcrumb_text(cwd: Option<&std::path::Path>, root: Option<&std::path::Path>) -> String {

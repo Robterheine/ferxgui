@@ -98,9 +98,9 @@ pub enum WorkerMsg {
     },
 
     /// Sim plot quantile computation completed.
-    SimComplete(Box<crate::domain::SimPlotResult>),
+    SimComplete { generation: u64, result: Box<crate::domain::SimPlotResult> },
     /// Sim plot computation failed.
-    SimError(String),
+    SimError { generation: u64, message: String },
 
     /// Simulate-tab `ferx_simulate()` run completed — the CSV is already
     /// written to disk; this only carries the status summary.

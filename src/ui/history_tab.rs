@@ -343,8 +343,7 @@ fn build_row(hist_idx: usize, state: &AppState) -> RowData {
 
     let method = rec.method.clone().unwrap_or_else(|| "—".to_string());
 
-    // Parse ISO-8601 started string into something readable: strip the T, trim seconds.
-    let started_str = format_timestamp(&rec.started);
+    let started_str = crate::workers::run::format_iso_timestamp(&rec.started);
 
     RowData {
         stem:         rec.model_stem.clone(),
@@ -356,22 +355,6 @@ fn build_row(hist_idx: usize, state: &AppState) -> RowData {
         started_str,
         dot_color,
         _status_ord: status_ord,
-    }
-}
-
-fn format_timestamp(iso: &str) -> String {
-    // "2024-01-15T14:32:07.123456789+00:00" → "2024-01-15  14:32"
-    let s = iso.replace('T', "  ");
-    let s = s.trim_end_matches(|c: char| c == 'Z' || c == '+' || c.is_numeric() || c == ':');
-    // Drop seconds if present (keep HH:MM).
-    let parts: Vec<&str> = s.splitn(2, "  ").collect();
-    if parts.len() == 2 {
-        let time = parts[1].trim();
-        // Take at most HH:MM.
-        let hhmm: String = time.chars().take(5).collect();
-        format!("{}  {}", parts[0].trim(), hhmm)
-    } else {
-        s.to_string()
     }
 }
 

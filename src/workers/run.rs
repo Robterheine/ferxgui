@@ -343,7 +343,7 @@ fn ctrl_break(pid: u32) {
     unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid); }
 }
 
-fn kill_hard(pid: u32) {
+pub(crate) fn kill_hard(pid: u32) {
     #[cfg(unix)]
     { extern "C" { fn kill(pid: i32, sig: i32) -> i32; }
       unsafe { kill(pid as i32, 9); } } // SIGKILL = 9
@@ -413,6 +413,19 @@ pub fn unix_to_datetime(secs: u64) -> String {
     format!("{year:04}-{month:02}-{day:02} {hour:02}:{min:02}")
 }
 
+/// Reformats a `now_iso()`-produced timestamp ("YYYY-MM-DDTHH:MM:SSZ") to
+/// the same "YYYY-MM-DD HH:MM" convention `unix_to_datetime` uses, for the
+/// run-record timestamps stored as strings rather than raw unix seconds.
+/// Falls back to returning the input unchanged if it doesn't contain a
+/// `T` — reachable for `RunRecord` timestamps loaded from a hand-edited or
+/// schema-drifted `runs.json`, not just malformed in-memory data.
+pub fn format_iso_timestamp(iso: &str) -> String {
+    match iso.split_once('T') {
+        Some((date, rest)) => format!("{date} {}", rest.get(0..5).unwrap_or(rest)),
+        None => iso.to_string(),
+    }
+}
+
 fn unix_to_parts(total_secs: u64) -> (u32, u32, u32, u32, u32, u32) {
     let sec  = (total_secs % 60) as u32;
     let min  = ((total_secs / 60) % 60) as u32;
@@ -452,4 +465,21 @@ pub fn now_iso() -> String {
 
 fn is_leap(y: u32) -> bool {
     (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
+}
+
+#[cfg(test)]
+mod format_iso_timestamp_tests {
+    use super::*;
+
+    #[test]
+    fn formats_a_real_now_iso_output_with_single_space() {
+        let out = format_iso_timestamp(&now_iso());
+        assert!(out.contains(' ') && !out.contains("  "), "expected single-space separator, got: {out}");
+        assert!(!out.contains('T'), "T should have been replaced, got: {out}");
+    }
+
+    #[test]
+    fn falls_back_to_input_unchanged_when_no_t_present() {
+        assert_eq!(format_iso_timestamp("not-a-timestamp"), "not-a-timestamp");
+    }
 }

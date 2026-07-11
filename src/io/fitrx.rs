@@ -163,6 +163,25 @@ fn safe_entry_name(name: &str) -> Option<&str> {
     Some(name)
 }
 
+/// Wrap a zip entry so it can never yield more than `MAX_ENTRY_BYTES` bytes,
+/// regardless of what the entry's declared size (an attacker-controlled
+/// field in the zip central directory) claims. Also fails fast with a clear
+/// error when the declared size already exceeds the limit, so a hostile
+/// bundle is rejected before any decompression happens rather than silently
+/// truncated.
+fn bound_entry<'a>(
+    name: &str,
+    entry: zip::read::ZipFile<'a>,
+) -> Result<std::io::Take<zip::read::ZipFile<'a>>, FitrxError> {
+    if entry.size() > MAX_ENTRY_BYTES {
+        return Err(FitrxError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{name} entry exceeds {MAX_ENTRY_BYTES} byte limit"),
+        )));
+    }
+    Ok(entry.take(MAX_ENTRY_BYTES))
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -222,6 +241,7 @@ pub fn read_predictions(fitrx_path: &Path) -> Result<Option<EvalData>, FitrxErro
         Ok(e) => e,
         Err(_) => return Ok(None), // not present in this bundle
     };
+    let entry = bound_entry("predictions.csv", entry)?;
 
     let mut rdr = csv::ReaderBuilder::new()
         .trim(csv::Trim::All)
@@ -276,6 +296,7 @@ pub fn read_ebes(fitrx_path: &Path) -> Result<Option<crate::domain::EbesData>, F
         Ok(e)  => e,
         Err(_) => return Ok(None),
     };
+    let entry = bound_entry("ebes.csv", entry)?;
 
     let mut rdr = csv::ReaderBuilder::new()
         .trim(csv::Trim::All)
@@ -343,6 +364,7 @@ pub fn read_conddist(fitrx_path: &Path) -> Result<Option<crate::domain::CondDist
         Ok(e)  => e,
         Err(_) => return Ok(None),
     };
+    let entry = bound_entry("conddist.csv", entry)?;
 
     let mut rdr = csv::ReaderBuilder::new()
         .trim(csv::Trim::All)
@@ -413,16 +435,11 @@ pub fn extract_output_tables(fitrx_path: &Path) -> Result<Vec<PathBuf>, FitrxErr
 
     let mut written = Vec::new();
     for (entry_name, out_name) in &entries {
-        let mut entry = match zip.by_name(entry_name) {
+        let entry = match zip.by_name(entry_name) {
             Ok(e)  => e,
             Err(_) => continue, // not in this bundle
         };
-        if entry.size() > MAX_ENTRY_BYTES {
-            return Err(FitrxError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("{entry_name} exceeds {MAX_ENTRY_BYTES} bytes"),
-            )));
-        }
+        let mut entry = bound_entry(entry_name, entry)?;
         let mut buf = String::new();
         entry.read_to_string(&mut buf)?;
         let out_path = dir.join(out_name);
@@ -454,6 +471,7 @@ pub fn read_trace_csv_from_bundle(fitrx_path: &Path) -> Result<Option<Vec<TraceR
         Ok(e)  => e,
         Err(_) => return Ok(None),
     };
+    let entry = bound_entry("trace.csv", entry)?;
     Ok(Some(parse_trace_csv(entry)?))
 }
 
@@ -512,15 +530,10 @@ fn parse_trace_csv<R: Read>(reader: R) -> std::io::Result<Vec<TraceRow>> {
 // ---------------------------------------------------------------------------
 
 fn read_fit_json(zip: &mut zip::ZipArchive<std::fs::File>) -> Result<FitWire, FitrxError> {
-    let mut entry = zip.by_name("fit.json").map_err(|_| {
+    let entry = zip.by_name("fit.json").map_err(|_| {
         FitrxError::MissingEntry("fit.json".to_string())
     })?;
-    if entry.size() > MAX_ENTRY_BYTES {
-        return Err(FitrxError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "fit.json entry exceeds size limit",
-        )));
-    }
+    let mut entry = bound_entry("fit.json", entry)?;
     let mut buf = String::new();
     entry.read_to_string(&mut buf)?;
     serde_json::from_str(&buf).map_err(|e| FitrxError::Json {
@@ -530,8 +543,8 @@ fn read_fit_json(zip: &mut zip::ZipArchive<std::fs::File>) -> Result<FitWire, Fi
 }
 
 fn read_warnings(zip: &mut zip::ZipArchive<std::fs::File>) -> Option<Vec<String>> {
-    let mut entry = zip.by_name("warnings.txt").ok()?;
-    if entry.size() > MAX_ENTRY_BYTES { return None; }
+    let entry = zip.by_name("warnings.txt").ok()?;
+    let mut entry = bound_entry("warnings.txt", entry).ok()?;
     let mut buf = String::new();
     entry.read_to_string(&mut buf).ok()?;
     Some(buf.lines().filter(|l| !l.is_empty()).map(str::to_owned).collect())
@@ -547,15 +560,10 @@ fn read_text_entry(
         std::io::ErrorKind::InvalidInput,
         format!("unsafe ZIP entry name: {name}"),
     )))?;
-    let mut entry = zip
+    let entry = zip
         .by_name(name)
         .map_err(|_| FitrxError::MissingEntry(name.to_string()))?;
-    if entry.size() > MAX_ENTRY_BYTES {
-        return Err(FitrxError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("{name} entry exceeds size limit"),
-        )));
-    }
+    let mut entry = bound_entry(name, entry)?;
     let mut buf = String::new();
     entry.read_to_string(&mut buf)?;
     Ok(buf)
@@ -818,6 +826,43 @@ fn wire_to_summary(w: FitWire, mut warnings: Vec<String>) -> FitSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `.fitrx` whose `predictions.csv` entry declares a size over
+    /// `MAX_ENTRY_BYTES` must be rejected before the reader tries to hold
+    /// the whole thing in memory. Built in-memory/on-disk from highly
+    /// compressible filler (real DEFLATE data, not a forged header) so the
+    /// test is fast and has no external fixture dependency.
+    #[test]
+    fn read_predictions_rejects_oversized_entry() {
+        use std::io::Write;
+
+        let tmp_path = std::env::temp_dir().join("ferxgui_test_oversized_predictions.fitrx");
+        {
+            let file = std::fs::File::create(&tmp_path).expect("create temp zip");
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            zip.start_file("predictions.csv", options).expect("start entry");
+
+            let chunk = vec![0u8; 1024 * 1024]; // 1 MB of zeros — compresses to almost nothing.
+            let target_bytes = (MAX_ENTRY_BYTES + 1024) as usize;
+            let mut written = 0usize;
+            while written < target_bytes {
+                zip.write_all(&chunk).expect("write filler chunk");
+                written += chunk.len();
+            }
+            zip.finish().expect("finish zip");
+        }
+
+        let result = read_predictions(&tmp_path);
+        let _ = std::fs::remove_file(&tmp_path);
+
+        match result {
+            Err(FitrxError::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidData),
+            Ok(_)          => panic!("expected a size-limit rejection, got Ok"),
+            Err(other)     => panic!("expected FitrxError::Io, got: {other}"),
+        }
+    }
 
     #[test]
     fn wire_defaults_produce_valid_summary() {

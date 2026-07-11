@@ -748,8 +748,14 @@ pub(crate) fn load_sim_file(state: &mut AppState) {
             );
             state.sim.status = format!("Loaded {n} rows, {nc} columns");
             populate_columns(state, &data);
-            state.sim.data   = Some(Arc::new(data));
-            state.sim.result = None;
+            state.sim.data       = Some(Arc::new(data));
+            state.sim.result     = None;
+            // Any computation still in flight belongs to the file just
+            // replaced — bump the generation so its result is recognised as
+            // stale and discarded on arrival, and clear `running` since the
+            // UI is no longer waiting on it.
+            state.sim.generation += 1;
+            state.sim.running     = false;
         }
         Err(e) => { state.sim.status = format!("Load error: {e}"); }
     }
@@ -827,6 +833,7 @@ fn run_computation(state: &mut AppState) {
     state.sim.running = true;
     state.sim.status  = "Computing quantiles…".into();
 
+    let generation = state.sim.generation;
     let tx         = state.worker_tx.clone();
     let rep_col    = state.sim.rep_col.clone();
     let x_col      = state.sim.x_col.clone();
@@ -836,8 +843,8 @@ fn run_computation(state: &mut AppState) {
 
     std::thread::spawn(move || {
         match compute_quantiles(&data, &x_col, &y_col, &rep_col, &band_pcts, &filters, mdv_filter) {
-            Ok(r)  => { let _ = tx.send(WorkerMsg::SimComplete(Box::new(r))); }
-            Err(e) => { let _ = tx.send(WorkerMsg::SimError(e)); }
+            Ok(r)  => { let _ = tx.send(WorkerMsg::SimComplete { generation, result: Box::new(r) }); }
+            Err(e) => { let _ = tx.send(WorkerMsg::SimError { generation, message: e }); }
         }
     });
 }

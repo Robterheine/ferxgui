@@ -140,8 +140,14 @@ if (!is.null(cfg$cache_path) && file.exists(cfg$cache_path)) {
   obs <- fit$sdtab
   if (!is.null(cfg$cache_path)) {
     dir.create(dirname(cfg$cache_path), showWarnings = FALSE, recursive = TRUE)
-    tryCatch(saveRDS(list(obs = obs, sim = sim_dat), cfg$cache_path),
-             error = function(e) NULL)
+    # Write-then-rename so a concurrent reader (another compute/export call
+    # racing on the same cache path) only ever sees the old complete file or
+    # the new complete file, never a partial write.
+    tmp_cache <- paste0(cfg$cache_path, ".tmp.", Sys.getpid())
+    tryCatch({
+      saveRDS(list(obs = obs, sim = sim_dat), tmp_cache)
+      file.rename(tmp_cache, cfg$cache_path)
+    }, error = function(e) { unlink(tmp_cache); NULL })
   }
 }
 
@@ -742,12 +748,7 @@ pub fn compute_vpc(cfg: &VpcConfig) -> Result<VpcResult, String> {
         .map_err(|e| format!("could not serialize VPC config: {e}"))?;
 
     // The bridge reads its options from a JSON file (too many to pass positionally).
-    let cfg_path = {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static SEQ: AtomicU32 = AtomicU32::new(0);
-        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("ferxgui_vpccfg_{}_{seq}.json", std::process::id()))
-    };
+    let cfg_path = unique_temp_path("ferxgui_vpccfg", "json")?;
     std::fs::write(&cfg_path, cfg_json)
         .map_err(|e| format!("could not write VPC config: {e}"))?;
 
@@ -770,12 +771,7 @@ pub fn compute_simulation(cfg: &SimRunConfig) -> Result<SimRunResult, String> {
     let cfg_json = serde_json::to_string(cfg)
         .map_err(|e| format!("could not serialize simulation config: {e}"))?;
 
-    let cfg_path = {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static SEQ: AtomicU32 = AtomicU32::new(0);
-        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("ferxgui_simcfg_{}_{seq}.json", std::process::id()))
-    };
+    let cfg_path = unique_temp_path("ferxgui_simcfg", "json")?;
     std::fs::write(&cfg_path, cfg_json)
         .map_err(|e| format!("could not write simulation config: {e}"))?;
 
@@ -832,7 +828,14 @@ if (!is.null(cfg$cache_path) && file.exists(cfg$cache_path)) {
   obs <- fit$sdtab
   if (!is.null(cfg$cache_path)) {
     dir.create(dirname(cfg$cache_path), showWarnings = FALSE, recursive = TRUE)
-    tryCatch(saveRDS(list(obs = obs, sim = sim_dat), cfg$cache_path), error = function(e) NULL)
+    # Write-then-rename so a concurrent reader (another compute/export call
+    # racing on the same cache path) only ever sees the old complete file or
+    # the new complete file, never a partial write.
+    tmp_cache <- paste0(cfg$cache_path, ".tmp.", Sys.getpid())
+    tryCatch({
+      saveRDS(list(obs = obs, sim = sim_dat), tmp_cache)
+      file.rename(tmp_cache, cfg$cache_path)
+    }, error = function(e) { unlink(tmp_cache); NULL })
   }
 }
 
@@ -942,12 +945,7 @@ cat(png_path)
 pub fn export_vpc_plot(cfg: &VpcConfig, png_path: &Path, script: &str) -> Result<(), String> {
     let cfg_json = serde_json::to_string(cfg)
         .map_err(|e| format!("could not serialize VPC config: {e}"))?;
-    let cfg_path = {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static SEQ: AtomicU32 = AtomicU32::new(0);
-        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("ferxgui_vpcplotcfg_{}_{seq}.json", std::process::id()))
-    };
+    let cfg_path = unique_temp_path("ferxgui_vpcplotcfg", "json")?;
     std::fs::write(&cfg_path, cfg_json)
         .map_err(|e| format!("could not write VPC config: {e}"))?;
 
@@ -980,7 +978,7 @@ if (requireNamespace("vpc", quietly = TRUE)) {
 /// that actually affect the simulation (model, data, fit, n_sim, seed).
 /// Display options (PI/CI/bins) are deliberately excluded so tweaking them
 /// reuses the cache.
-pub fn vpc_cache_path(model_path: &Path, data_path: &Path, fitrx_path: Option<&Path>, n_sim: u32, seed: u32) -> std::path::PathBuf {
+pub fn vpc_cache_path(model_path: &Path, data_path: &Path, fitrx_path: Option<&Path>, n_sim: u32, seed: u32) -> Result<std::path::PathBuf, String> {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     model_path.hash(&mut h);
@@ -998,9 +996,9 @@ pub fn vpc_cache_path(model_path: &Path, data_path: &Path, fitrx_path: Option<&P
             }
         }
     }
-    std::env::temp_dir()
+    Ok(helper_temp_dir()?
         .join("ferxgui_vpc_cache")
-        .join(format!("{:016x}.rds", h.finish()))
+        .join(format!("{:016x}.rds", h.finish())))
 }
 
 /// Run `ferx_sir()` via R against a saved `.fitrx` bundle.
@@ -1134,48 +1132,262 @@ fn path_as_str(p: &std::path::Path) -> Result<&str, String> {
     ))
 }
 
+/// Returns a private, per-user subdirectory of the OS temp directory for
+/// R-helper temp files, creating and permission-hardening it as needed.
+///
+/// Unlike writing directly into the shared OS temp root, this can't be
+/// pre-planted or raced by another local user on a shared multi-user
+/// machine (e.g. a central FeRx GUI server accessed over SSH/X11 — a
+/// documented supported deployment, see README's "Linux SSH note"). This
+/// is a hard failure, not a fallback: if the directory can't be verified
+/// as safely ours, every R-helper operation that needs it fails loudly
+/// with a clear message, rather than silently writing through whatever is
+/// actually at this path. A silent fallback to the shared temp root would
+/// make the whole control trivially defeatable — any local user could
+/// pre-create this exact path themselves, once, and every subsequent
+/// victim would silently get the unprotected behavior back.
+///
+/// Residual limitation: closing the check-then-act window between
+/// verifying an existing entry and using it entirely would need
+/// filesystem primitives `std::fs` doesn't expose portably (e.g.
+/// `O_NOFOLLOW`-based atomic open). What's here minimizes that window
+/// (one stat call, not three, spread across the smallest possible span)
+/// rather than eliminating it outright; the easy, un-timed attack this
+/// function exists to close (pre-creating the directory once, requiring
+/// no race at all) is fully closed by the ownership check below.
+///
+/// No hardening needed on Windows: `%TEMP%` is already per-user by OS
+/// default, so `create_dir_all` alone is sufficient there.
+fn private_temp_dir() -> Result<std::path::PathBuf, String> {
+    let dir = std::env::temp_dir().join("ferxgui-helper");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+        match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Something is already at this path — verify (one stat
+                // call) that it's a real directory before trusting it,
+                // then re-assert 0700. Both checks are load-bearing and
+                // any failure here is fatal to the caller: if another
+                // local user pre-created this exact path — a symlink, or
+                // a directory they own — we must refuse to use it, not
+                // silently proceed into it.
+                let meta = std::fs::symlink_metadata(&dir)
+                    .map_err(|e| format!("could not stat {}: {e}", dir.display()))?;
+                if meta.file_type().is_symlink() {
+                    return Err(format!(
+                        "{} is a symlink, possibly planted by another user on a shared machine",
+                        dir.display(),
+                    ));
+                }
+                if !meta.is_dir() {
+                    return Err(format!("{} exists and is not a directory", dir.display()));
+                }
+                // chmod requires ownership (or root) — this is the actual
+                // gate that rejects a directory another user pre-created.
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+                    .map_err(|e| format!(
+                        "could not restrict permissions on {} (likely owned by another user): {e}",
+                        dir.display(),
+                    ))?;
+            }
+            Err(e) => return Err(format!("could not create {}: {e}", dir.display())),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    }
+
+    Ok(dir)
+}
+
+/// Cached wrapper around `private_temp_dir()` — established exactly once
+/// per process and reused for the session. Only success is cached: a
+/// failure (e.g. a transient filesystem hiccup, not necessarily an
+/// attacker) is retried on the next call rather than permanently poisoning
+/// every R-helper feature for the rest of the session. Re-checking on
+/// every failed call can never reintroduce the vulnerable fallback this
+/// function replaces — the check is either satisfied (safe to use) or it
+/// errors, every time.
+fn helper_temp_dir() -> Result<std::path::PathBuf, String> {
+    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    if let Some(dir) = DIR.get() {
+        return Ok(dir.clone());
+    }
+    let dir = private_temp_dir()?;
+    Ok(DIR.get_or_init(|| dir).clone())
+}
+
+/// Returns a path in the private helper temp directory (see
+/// `helper_temp_dir`) that is unique to this process and this call, via a
+/// PID + monotonic-counter suffix — so concurrent calls (including from
+/// other ferxgui instances) never collide on the same filename.
+pub(crate) fn unique_temp_path(prefix: &str, ext: &str) -> Result<std::path::PathBuf, String> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static SEQ: AtomicU32 = AtomicU32::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = helper_temp_dir()?;
+    Ok(dir.join(format!("{prefix}_{}_{seq}.{ext}", std::process::id())))
+}
+
+/// Maximum time to wait for an R helper call before killing it and
+/// returning a timeout error. Generous by design — VPC/SIR computations are
+/// documented as potentially taking "a few minutes" for large n_sim/resample
+/// counts (user-configurable), so this is a safety net against a genuinely
+/// hung process, not a tight budget. Every `run_script` call funnels through
+/// here, including fast ones (version checks, template creation) — for
+/// those this never has any effect since they always finish in well under
+/// this window.
+const R_HELPER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Removes its tracked temp files when dropped, regardless of how
+/// `run_script` exits (success or any early error return) — so the temp
+/// files it creates (script, stdout capture, stderr capture) are cleaned up
+/// on every code path without repeating `remove_file` calls at each site.
+struct TempFileGuard(Vec<std::path::PathBuf>);
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        for p in &self.0 {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
 /// Write `script` to a temp file, run `Rscript --vanilla <tmp> [args…]`,
 /// and return stdout on success or the stderr text as an Err.
+///
+/// stdout/stderr are captured via temp files rather than piped, and the
+/// child is polled with `try_wait()` instead of the blocking `.output()` —
+/// this is required to enforce `R_HELPER_TIMEOUT`, and file capture (rather
+/// than pipes) avoids the classic pipe-buffer deadlock a poll loop would
+/// otherwise risk: a piped child that produces more output than the OS pipe
+/// buffer holds while nothing is draining it between polls would block on
+/// its own `write()` forever, defeating the very timeout being added. A
+/// file write never blocks on a reader, so polling alongside it is safe.
 fn run_script(script: &str, args: &[&str]) -> Result<String, String> {
     let rscript = find_rscript()
         .ok_or_else(|| "Rscript not found. Install R or add it to PATH.".to_string())?;
 
-    // Write script to a uniquely named temp file.
-    // PID + monotonic counter avoids collisions between concurrent R helpers.
-    let tmp_path = {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static SEQ: AtomicU32 = AtomicU32::new(0);
-        let pid = std::process::id();
-        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("ferxgui_{pid}_{seq}.R"))
-    };
+    // Uniquely named temp files — PID + monotonic counter avoids collisions
+    // between concurrent R helpers.
+    let tmp_path    = unique_temp_path("ferxgui", "R")?;
+    let stdout_path = unique_temp_path("ferxgui_stdout", "log")?;
+    let stderr_path = unique_temp_path("ferxgui_stderr", "log")?;
+    let _cleanup = TempFileGuard(vec![tmp_path.clone(), stdout_path.clone(), stderr_path.clone()]);
 
     std::fs::write(&tmp_path, script)
         .map_err(|e| format!("could not write temp R script: {e}"))?;
+    let stdout_file = std::fs::File::create(&stdout_path)
+        .map_err(|e| format!("could not create stdout capture file: {e}"))?;
+    let stderr_file = std::fs::File::create(&stderr_path)
+        .map_err(|e| format!("could not create stderr capture file: {e}"))?;
 
     let mut cmd = r_command(&rscript);
     cmd.arg("--vanilla").arg(&tmp_path);
     for a in args { cmd.arg(a); }
+    cmd.stdin(std::process::Stdio::null())
+       .stdout(stdout_file)
+       .stderr(stderr_file);
 
-    let output = cmd.output()
+    let mut child = cmd.spawn()
         .map_err(|e| format!("failed to start {}: {e}", rscript.display()))?;
+    let pid = child.id();
+    register_helper_pid(pid);
 
-    let _ = std::fs::remove_file(&tmp_path);  // best-effort cleanup
+    let start = std::time::Instant::now();
+    let mut exit_status: Option<std::process::ExitStatus> = None;
+    let mut timed_out = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => { exit_status = Some(status); break; }
+            Ok(None) => {
+                if start.elapsed() > R_HELPER_TIMEOUT {
+                    timed_out = true;
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => {
+                unregister_helper_pid(pid);
+                return Err(format!("wait error: {e}"));
+            }
+        }
+    }
+    unregister_helper_pid(pid);
 
-    // Guard against pathological R output that could exhaust memory.
-    const MAX_OUTPUT_BYTES: usize = 10 * 1024 * 1024; // 10 MB
-    if output.stdout.len() > MAX_OUTPUT_BYTES {
+    if timed_out {
         return Err(format!(
-            "R output too large ({} bytes > {MAX_OUTPUT_BYTES} byte limit)",
-            output.stdout.len(),
+            "Rscript did not finish within {R_HELPER_TIMEOUT:?} and was terminated.",
         ));
     }
 
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    // Guard against pathological R output that could exhaust memory — check
+    // the on-disk size before reading, so a huge file is never materialized
+    // in memory just to be rejected.
+    const MAX_OUTPUT_BYTES: u64 = 10 * 1024 * 1024; // 10 MB
+    let stdout_len = std::fs::metadata(&stdout_path).map(|m| m.len()).unwrap_or(0);
+    if stdout_len > MAX_OUTPUT_BYTES {
+        return Err(format!(
+            "R output too large ({stdout_len} bytes > {MAX_OUTPUT_BYTES} byte limit)",
+        ));
+    }
+
+    let stdout_bytes = std::fs::read(&stdout_path)
+        .map_err(|e| format!("could not read R stdout capture: {e}"))?;
+
+    if exit_status.map(|s| s.success()).unwrap_or(false) {
+        Ok(String::from_utf8_lossy(&stdout_bytes).trim().to_string())
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        Err(stderr)
+        let stderr_text = std::fs::read(&stderr_path)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_else(|e| format!("(could not read R stderr capture: {e})"));
+        Err(stderr_text)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// In-flight helper PID tracking (for cleanup on app quit — see kill_all_helper_pids)
+// ---------------------------------------------------------------------------
+
+static HELPER_PIDS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u32>>> =
+    std::sync::OnceLock::new();
+
+fn helper_pids() -> &'static std::sync::Mutex<std::collections::HashSet<u32>> {
+    HELPER_PIDS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+fn register_helper_pid(pid: u32) {
+    if let Ok(mut set) = helper_pids().lock() { set.insert(pid); }
+}
+
+fn unregister_helper_pid(pid: u32) {
+    if let Ok(mut set) = helper_pids().lock() { set.remove(&pid); }
+}
+
+/// Kill every currently-tracked R helper subprocess (VPC/SIR/Simulate/etc.
+/// — anything spawned via `run_script`). Called once from the app's
+/// `on_exit` hook so a helper still mid-flight when the GUI quits doesn't
+/// linger as an orphaned process — unlike fit runs (`workers::run`), these
+/// are not meant to survive the GUI closing.
+pub fn kill_all_helper_pids() {
+    let pids: Vec<u32> = match helper_pids().lock() {
+        Ok(mut set) => {
+            let pids: Vec<u32> = set.iter().copied().collect();
+            set.clear();
+            pids
+        }
+        Err(_) => return,
+    };
+    for pid in pids {
+        crate::workers::run::kill_hard(pid);
     }
 }
 

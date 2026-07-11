@@ -567,9 +567,8 @@ fn show_info_panel(
             .find(|r| r.model_stem == entry.model.stem && r.completed.is_some())
             .and_then(|r| r.completed.as_deref());
         if let Some(ts) = last_run {
-            // Show only date+time (first 16 chars of ISO 8601).
-            let short = &ts[..ts.len().min(16)];
-            info_row(ui, "Last run", short, dim, dark);
+            let short = crate::workers::run::format_iso_timestamp(ts);
+            info_row(ui, "Last run", &short, dim, dark);
         }
 
         // Lineage.
@@ -613,6 +612,27 @@ fn info_row(ui: &mut egui::Ui, key: &str, val: &str, val_color: egui::Color32, d
 
 fn truncate_to_width(s: &str, max_logical_w: f32, char_w: f32) -> String {
     let max_chars = (max_logical_w / char_w).max(4.0) as usize;
-    if s.len() <= max_chars { s.to_string() }
-    else { format!("{}…", &s[..max_chars.saturating_sub(1)]) }
+    if s.chars().count() <= max_chars { return s.to_string(); }
+    let keep = max_chars.saturating_sub(1);
+    let byte_idx = s.char_indices().nth(keep).map(|(i, _)| i).unwrap_or(s.len());
+    format!("{}…", &s[..byte_idx])
+}
+
+#[cfg(test)]
+mod truncate_to_width_tests {
+    use super::truncate_to_width;
+
+    #[test]
+    fn does_not_panic_on_multi_byte_stem_and_ends_with_ellipsis() {
+        let s = "héllo_wörld_日本語_model";
+        // Chosen so the naive byte-count slice used before this fix would
+        // have landed mid-character and panicked.
+        let out = truncate_to_width(s, 40.0, 6.0);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn short_ascii_string_is_untouched() {
+        assert_eq!(truncate_to_width("short", 200.0, 6.0), "short");
+    }
 }

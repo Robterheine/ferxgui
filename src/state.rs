@@ -306,6 +306,20 @@ pub struct VpcOpts {
     pub theme: VpcTheme,
 }
 
+/// A computed VPC result paired with the (non-theme) options that produced
+/// it. `VpcOpts`'s own contract is that every field but `.theme` requires a
+/// fresh "Compute VPC" click to take effect (an R round-trip) — so the
+/// native plot must always render from the options actually sent to R, not
+/// whatever the panel has been changed to since, or axis labels/legend text
+/// can describe data that was never computed. `.theme` is excluded from
+/// this snapshot by design (documented `Display-only`) and is always
+/// re-read live from the current options at render time.
+#[derive(Debug, Clone)]
+pub struct VpcRenderData {
+    pub result: crate::domain::VpcResult,
+    pub opts:   VpcOpts,
+}
+
 impl Default for VpcOpts {
     fn default() -> Self {
         Self {
@@ -358,6 +372,13 @@ pub struct UiState {
     pub sidebar_collapsed: bool,
     /// Toast / status bar message (cleared after a timeout).
     pub status_message: String,
+
+    // ---- Quit guard ----
+    /// True while the "Unsaved changes" quit-confirmation dialog is showing.
+    pub quit_unsaved_dialog: bool,
+    /// Set once the user has confirmed quitting despite unsaved changes, so
+    /// the re-sent close command isn't intercepted a second time.
+    pub quit_confirmed: bool,
 
     // ---- Editor pill ----
     /// Text currently in the editor.  Reloaded whenever selected_model changes.
@@ -428,6 +449,9 @@ pub struct UiState {
     pub eval_cwres_x_col_2: String,
     // ---- GOF export ----
     pub eval_export_dialog: bool,
+    /// True while a background GOF-export Rscript call is in flight; guards
+    /// against a second export racing the first on the shared temp CSV.
+    pub eval_exporting: bool,
     /// "pdf" | "png300" | "png600" | "svg"
     pub eval_export_format: String,
     /// Figure width in mm (84 = single column, 174 = double column).
@@ -480,8 +504,15 @@ pub struct UiState {
     // ---- Context-menu dialogs ----
     /// Directory awaiting a name-and-confirm bookmark dialog (path + draft label).
     pub pending_bookmark: Option<(std::path::PathBuf, String)>,
+    /// True once the bookmark dialog's text field has been auto-focused for
+    /// the current time it's open — prevents re-claiming focus every frame
+    /// (which would otherwise block Tab-ing to the dialog's buttons).
+    pub bookmark_dialog_focused: bool,
     /// Model awaiting a duplicate-rename dialog (index into workspace.models).
     pub pending_duplicate: Option<usize>,
+    /// Same one-shot-focus purpose as `bookmark_dialog_focused`, for the
+    /// duplicate dialog's text field.
+    pub duplicate_dialog_focused: bool,
     /// Text buffer for the new stem name in the duplicate dialog.
     pub duplicate_stem_buf: String,
     /// Whether "Set as child" checkbox is checked in the duplicate dialog.
@@ -564,6 +595,9 @@ pub struct UiState {
     pub files_ext_input:      String,
     /// Currently selected (previewed) file path.
     pub files_selected:       Option<PathBuf>,
+    /// A file the user clicked while the current file has unsaved edits —
+    /// deferred until they resolve the "Unsaved changes" dialog.
+    pub files_pending_nav:    Option<PathBuf>,
     /// Which preview pane is visible.
     pub files_view_mode:      FilesViewMode,
     // Text view
@@ -609,6 +643,8 @@ impl Default for UiState {
             model_status_filter: ModelStatusFilter::All,
             sidebar_collapsed: false,
             status_message: String::new(),
+            quit_unsaved_dialog: false,
+            quit_confirmed: false,
             editor_buffer: String::new(),
             editor_dirty: false,
             editor_loaded_stem: None,
@@ -642,6 +678,7 @@ impl Default for UiState {
             eval_cwres_x_col:    "TIME".to_string(),
             eval_cwres_x_col_2:  "PRED".to_string(),
             eval_export_dialog:  false,
+            eval_exporting:      false,
             eval_export_format:  "pdf".to_string(),
             eval_export_width_mm: 174,
             eval_export_loess:   true,
@@ -662,7 +699,9 @@ impl Default for UiState {
             tree_export_awaiting: false,
             tree_canvas_rect:     egui::Rect::NOTHING,
             pending_bookmark: None,
+            bookmark_dialog_focused: false,
             pending_duplicate: None,
+            duplicate_dialog_focused: false,
             duplicate_stem_buf: String::new(),
             duplicate_set_as_child: true,
             pending_delete: None,
@@ -700,6 +739,7 @@ impl Default for UiState {
             files_active_exts:    std::collections::HashSet::new(),
             files_ext_input:      String::new(),
             files_selected:       None,
+            files_pending_nav:    None,
             files_view_mode:      FilesViewMode::Empty,
             files_text:           String::new(),
             files_text_dirty:     false,
@@ -747,10 +787,15 @@ pub struct WorkspaceState {
     pub r_inspecting: HashSet<String>,
     /// Stems whose inspect failed — not auto-retried (avoids respawn storms).
     pub r_inspect_failed: HashSet<String>,
-    /// VPC simulation results keyed by model stem.
-    pub vpc_data: HashMap<String, crate::domain::VpcResult>,
+    /// VPC simulation results keyed by model stem, paired with the options
+    /// that actually produced them (see `VpcRenderData`).
+    pub vpc_data: HashMap<String, VpcRenderData>,
     /// Stems for which a VPC computation is currently in flight.
     pub vpc_computing: HashSet<String>,
+    /// Options snapshot taken when a VPC compute was launched, held here
+    /// until the matching `RVpcComplete`/`RTaskError` arrives and pairs it
+    /// with the result (or discards it on failure).
+    pub vpc_pending_opts: HashMap<String, VpcOpts>,
     /// Simulate-tab results (status summary only — the CSV lives on disk) keyed by model stem.
     pub simrun_results: HashMap<String, crate::domain::SimRunResult>,
     /// Stems for which a Simulate-tab run is currently in flight.
@@ -790,7 +835,7 @@ impl WorkspaceState {
         let app_dir = app_dir();
 
         if app_dir.is_none() {
-            eprintln!("ferxgui: could not resolve home directory — persistent data will not be saved");
+            eprintln!("ferxgui: home directory unavailable or its .ferxgui app dir was refused (e.g. a symlink) — persistent data will not be saved");
         }
 
         let (settings, settings_warn) = app_dir
@@ -805,7 +850,7 @@ impl WorkspaceState {
         let mut startup_warnings = Vec::new();
         if app_dir.is_none() {
             startup_warnings.push(
-                "Warning: home directory unavailable — settings and run history will not be saved.".to_string(),
+                "Warning: home directory unavailable or inaccessible — settings and run history will not be saved.".to_string(),
             );
         }
         if let Some(w) = settings_warn {
@@ -834,6 +879,7 @@ impl WorkspaceState {
             r_inspect_failed: HashSet::new(),
             vpc_data:           HashMap::new(),
             vpc_computing:      HashSet::new(),
+            vpc_pending_opts:   HashMap::new(),
             simrun_results:     HashMap::new(),
             simrun_computing:   HashSet::new(),
             check_init_results: HashMap::new(),
@@ -1144,6 +1190,7 @@ impl AppState {
             }
             RVpcComplete { stem, data } => {
                 self.workspace.vpc_computing.remove(&stem);
+                let opts = self.workspace.vpc_pending_opts.remove(&stem).unwrap_or_default();
                 if data.warnings.is_empty() {
                     self.ui.status_message = format!("VPC ready: {stem}");
                 } else {
@@ -1152,7 +1199,7 @@ impl AppState {
                         data.warnings.join("; ")
                     );
                 }
-                self.workspace.vpc_data.insert(stem, *data);
+                self.workspace.vpc_data.insert(stem, VpcRenderData { result: *data, opts });
             }
             VpcPkgStatus(status) => {
                 self.ui.vpc_pkg_checking = false;
@@ -1167,20 +1214,27 @@ impl AppState {
                 }
             }
             GofExportComplete { path } => {
+                self.ui.eval_exporting = false;
                 self.ui.status_message = format!("Exported → {path}");
             }
             GofExportError { message } => {
+                self.ui.eval_exporting = false;
                 self.ui.status_message = format!("Export failed: {message}");
             }
-            SimComplete(result) => {
-                self.sim.running = false;
-                let n = result.times.len();
-                self.sim.status = format!("Plot ready — {n} unique X values");
-                self.sim.result = Some(*result);
+            SimComplete { generation, result } => {
+                if generation == self.sim.generation {
+                    self.sim.running = false;
+                    let n = result.times.len();
+                    self.sim.status = format!("Plot ready — {n} unique X values");
+                    self.sim.result = Some(*result);
+                }
+                // else: stale result from a since-superseded file — discard.
             }
-            SimError(msg) => {
-                self.sim.running = false;
-                self.sim.status = format!("Error: {msg}");
+            SimError { generation, message } => {
+                if generation == self.sim.generation {
+                    self.sim.running = false;
+                    self.sim.status = format!("Error: {message}");
+                }
             }
             SimRunComplete { stem, result } => {
                 self.workspace.simrun_computing.remove(&stem);
@@ -1243,6 +1297,7 @@ impl AppState {
                 }
                 if let Some(stem) = context.strip_prefix("vpc ") {
                     self.workspace.vpc_computing.remove(stem);
+                    self.workspace.vpc_pending_opts.remove(stem);
                 }
                 if context.starts_with("vpc_export ") {
                     self.ui.vpc_exporting = false;

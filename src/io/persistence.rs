@@ -16,7 +16,24 @@ use crate::domain::{ModelMeta, RunRecord};
 /// Returns `~/.ferxgui/`, creating it if absent.
 pub fn app_dir() -> Option<PathBuf> {
     let dir = dirs::home_dir()?.join(".ferxgui");
+
+    #[cfg(unix)]
+    {
+        if let Ok(meta) = std::fs::symlink_metadata(&dir) {
+            if meta.file_type().is_symlink() {
+                return None; // refuse to use a symlinked app dir
+            }
+        }
+    }
+
     std::fs::create_dir_all(&dir).ok()?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+
     Some(dir)
 }
 

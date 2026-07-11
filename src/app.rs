@@ -246,6 +246,18 @@ impl eframe::App for FerxApp {
             }
         }
 
+        // Intercept the main window's close request while the Files tab has
+        // unsaved edits, so quitting can't silently discard them the same
+        // way switching files could (see files_tab's own guard).
+        if ctx.input(|i| i.viewport().close_requested()) && !self.state.ui.quit_confirmed {
+            let dirty = self.state.ui.files_text_dirty || self.state.ui.files_csv_dirty;
+            if dirty {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.state.ui.quit_unsaved_dialog = true;
+            }
+        }
+        show_quit_unsaved_dialog(ctx, &mut self.state);
+
         // Drain worker messages first.
         self.state.process_worker_messages();
         // Auto-advance the sequential run queue if no run is active.
@@ -327,6 +339,15 @@ impl eframe::App for FerxApp {
             self.state.ui.tree_export_pending  = false;
             self.state.ui.tree_export_awaiting = true;
         }
+    }
+
+    /// Called once, only when the app is actually about to terminate (never
+    /// while a quit is still cancellable via `show_quit_unsaved_dialog`).
+    /// R helper subprocesses (VPC/SIR/Simulate/etc.) are not meant to
+    /// survive the GUI closing, unlike detached fit runs — kill any still
+    /// in flight so they don't linger as orphans.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        crate::io::r_extract::kill_all_helper_pids();
     }
 }
 
@@ -607,6 +628,52 @@ fn render_body(ctx: &egui::Context, state: &mut AppState) {
             Tab::History => crate::ui::history_tab::show(ui, state),
         }
     });
+}
+
+// ---------------------------------------------------------------------------
+// Quit-confirmation dialog — shown when the main window is asked to close
+// while the Files tab has unsaved edits (mirrors files_tab's own
+// switch-file guard, so quitting can't discard work any more silently than
+// switching files can).
+// ---------------------------------------------------------------------------
+
+fn show_quit_unsaved_dialog(ctx: &egui::Context, state: &mut AppState) {
+    if !state.ui.quit_unsaved_dialog { return; }
+
+    let mut cancel  = false;
+    let mut discard = false;
+
+    egui::Window::new("Quit FeRx GUI?")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            let dark = ui.visuals().dark_mode;
+            ui.set_min_width(340.0);
+            ui.label(egui::RichText::new("Unsaved changes").strong().size(14.0).color(theme::fg(dark)));
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("You have unsaved edits in the Files tab. Quit anyway?")
+                    .color(theme::fg2(dark)).size(12.0),
+            );
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() { cancel = true; }
+                if ui.add(
+                    egui::Button::new(egui::RichText::new("Discard && Quit").color(egui::Color32::WHITE))
+                        .fill(theme::RED),
+                ).clicked() { discard = true; }
+            });
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) { cancel = true; }
+        });
+
+    if cancel {
+        state.ui.quit_unsaved_dialog = false;
+    } else if discard {
+        state.ui.quit_unsaved_dialog = false;
+        state.ui.quit_confirmed = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -901,6 +968,10 @@ fn render_run_popup(ctx: &egui::Context, state: &mut AppState) {
                 do_close = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                do_close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
 
             egui::CentralPanel::default().show(ctx, |ui| {
                 // ── Status row ─────────────────────────────────────────
@@ -1078,6 +1149,10 @@ fn render_sir_popup(ctx: &egui::Context, state: &mut AppState) {
                 do_close = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                do_close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
 
             let dim = if is_dark { theme::FG2 } else { egui::Color32::from_gray(100) };
 
@@ -1183,6 +1258,10 @@ fn render_about_popup(ctx: &egui::Context, state: &mut AppState) {
             if is_dark { theme::apply_dark(ctx); } else { theme::apply_light(ctx); }
 
             if ctx.input(|i| i.viewport().close_requested()) {
+                do_close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                 do_close = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }

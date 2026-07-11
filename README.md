@@ -205,6 +205,32 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.9.1 (2026-07-11) — security, reliability, and accessibility audit fixes
+
+A full pass triggered by a comprehensive security/reliability/accessibility audit, addressing every High- and Medium-severity finding plus the outstanding Low-severity items.
+
+**Security: zip-bomb protection, hardened R-helper temp files**
+- `.fitrx` bundle reader: all 8 zip-entry readers (previously only 4) now hard-cap actual decompressed bytes via `Read::take()`, not just a declared-size check — closes a gap where a maliciously crafted bundle could forge its declared entry size to bypass the existing limit and exhaust memory.
+- R-helper temp files (VPC/Simulate/SIR config JSON, the `.R` script itself, stdout/stderr capture, the VPC sim cache) now live in a private, permission-hardened, per-user subdirectory instead of the shared OS temp root, with an explicit symlink refusal and an ownership check before trusting any existing directory. Relevant for FeRx GUI's documented SSH/X11 central-deployment use case: on a shared multi-user machine, another local user could previously pre-plant a symlink or race the write-then-execute window for the `.R` script. Every R-helper call now hard-fails with a visible error if this directory can't be established safely, rather than silently falling back to the unprotected shared temp root (a fallback would have made the whole protection trivially defeatable by any local user).
+- `~/.ferxgui/` gets the same symlink refusal and permission hardening.
+
+**Reliability: R subprocess timeout/cleanup, stale-result races, data loss**
+- R-helper calls (VPC, SIR, Simulate, ETA-cov, cov-screen, check-init, GOF export, model inspect) no longer block forever on a hung Rscript — a 30-minute timeout now kills the process and reports a clear error. stdout/stderr are captured via temp files rather than pipes, specifically to avoid a pipe-buffer deadlock a naive polling implementation would otherwise reintroduce.
+- Any R-helper subprocess still running when the GUI quits is now killed via a tracked-PID cleanup hook, instead of being orphaned to run indefinitely in the background (fit runs remain intentionally detached and unaffected — that's a documented, deliberate feature).
+- GOF figure export: concurrent exports no longer race on a shared temp CSV filename; each export gets a unique file, and an in-flight guard stops a second export from starting mid-export.
+- VPC tab: the native plot now always renders using the exact options that were actually sent to R for a given computation, not whatever the options panel has since been changed to — fixes a mismatch where, say, toggling prediction-correction after a compute completes could relabel the axis without the underlying data having actually been recomputed.
+- VPC "Compute" and "Run Script" can no longer run concurrently for the same model, since both read/write the same on-disk R simulation cache; the R-side cache write is now atomic (write-then-rename) as defense in depth against the remaining cross-process case.
+- Sim Plot: loading a new file while a previous file's quantile computation is still in flight no longer applies the stale result under the new file's labels once it lands — a generation counter now discards superseded results.
+- Files tab: switching to a different file, or quitting the app, while the current file has unsaved edits now prompts to save or discard instead of silently losing the edit.
+
+**Accessibility & UI consistency**
+- Escape now dismisses every native popup window (Run, SIR, About, VPC Script editor), matching the existing Settings popup convention.
+- The Bookmark and Duplicate-model dialogs no longer re-claim keyboard focus every frame — Tab can now reach their buttons.
+- Several empty-state and dialog titles — including the Delete Model confirmation — that rendered as invisible white-on-white text in light mode are now readable.
+- The Compare Models parameter table can now be scrolled horizontally, so long model names no longer push columns out of reach.
+- A non-ASCII model name (accented characters, non-Latin scripts) no longer risks crashing the Ancestry Tree view when its label is truncated.
+- Four independently reimplemented date/time formatters (with inconsistent spacing and, in one case, a stray literal `T`) are consolidated to the app's one canonical format.
+
 ### v0.9.0 (2026-07-10) — new Simulate tab: `ferx_simulate()` with parameter-uncertainty modes
 
 **Added: a "Simulate" tab, paired with Sim Plot**

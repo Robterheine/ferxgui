@@ -137,7 +137,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
 
             // Export button (right-aligned).
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(
+                if ui.add_enabled(
+                    !state.ui.eval_exporting,
                     egui::Button::new(egui::RichText::new("⬇ Export figure…").size(11.0))
                         .fill(theme::card_fill(dark))
                         .min_size(egui::vec2(0.0, 22.0)),
@@ -632,7 +633,7 @@ fn show_iofv_waterfall(ui: &mut egui::Ui, state: &AppState, dark: bool) {
             let dim = theme::fg3(dark);
             ui.centered_and_justified(|ui| {
                 ui.vertical_centered(|ui| {
-                    ui.label(egui::RichText::new("No per-subject iOFV data").size(15.0).strong());
+                    ui.label(egui::RichText::new("No per-subject iOFV data").size(15.0).strong().color(theme::fg(dark)));
                     ui.add_space(6.0);
                     ui.label(egui::RichText::new(
                         "ebes.csv not found in this bundle.\n\
@@ -652,7 +653,7 @@ fn show_iofv_waterfall(ui: &mut egui::Ui, state: &AppState, dark: bool) {
     let dim = theme::fg2(dark);
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(format!("Individual OFV contributions  ({n} subjects)"))
-            .size(13.0).strong());
+            .size(13.0).strong().color(theme::fg(dark)));
         ui.add_space(12.0);
         ui.label(egui::RichText::new(
             format!("Total: {:.2}   Mean per subject: {:.2}", ebes.total_ofv, mean_iofv))
@@ -820,7 +821,13 @@ fn show_export_dialog(ctx: &egui::Context, state: &mut AppState, model_idx: usiz
                 Some(d) => d.rows.clone(),
                 None    => return,
             };
-            let tmp_csv = std::env::temp_dir().join("ferxgui_gof_export.csv");
+            let tmp_csv = match crate::io::r_extract::unique_temp_path("ferxgui_gof_export", "csv") {
+                Ok(p) => p,
+                Err(e) => {
+                    state.ui.status_message = format!("Export failed: {e}");
+                    return;
+                }
+            };
             if let Ok(mut wtr) = csv::Writer::from_path(&tmp_csv) {
                 let _ = wtr.write_record(["ID","TIME","DV","PRED","IPRED","CWRES","IWRES"]);
                 for r in &pred_rows {
@@ -844,12 +851,14 @@ fn show_export_dialog(ctx: &egui::Context, state: &mut AppState, model_idx: usiz
             let ci          = state.ui.eval_export_ci_lines;
 
             state.ui.status_message = "Exporting figure…".to_string();
+            state.ui.eval_exporting = true;
 
             std::thread::spawn(move || {
-                match crate::io::r_extract::export_gof(
+                let result = crate::io::r_extract::export_gof(
                     &tmp_csv, &out_path, &format, width,
-                    &col1, &col2, loess, ci)
-                {
+                    &col1, &col2, loess, ci);
+                let _ = std::fs::remove_file(&tmp_csv);
+                match result {
                     Ok(path) => {
                         let _ = tx.send(crate::workers::messages::WorkerMsg::GofExportComplete { path });
                     }
@@ -1444,7 +1453,7 @@ fn show_no_model(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
 
     ui.centered_and_justified(|ui| {
         ui.vertical_centered(|ui| {
-            ui.label(egui::RichText::new("No model selected").size(16.0).strong());
+            ui.label(egui::RichText::new("No model selected").size(16.0).strong().color(theme::fg(dark)));
             ui.add_space(6.0);
             ui.label(egui::RichText::new("Select a model in the Models tab to view diagnostics")
                 .color(dim2).size(13.0));
@@ -1525,7 +1534,7 @@ fn show_cond_dist(ui: &mut egui::Ui, state: &AppState, idx: usize, dark: bool) {
             });
             ui.centered_and_justified(|ui| {
                 ui.vertical_centered(|ui| {
-                    ui.label(egui::RichText::new("No conditional distribution data").size(15.0).strong());
+                    ui.label(egui::RichText::new("No conditional distribution data").size(15.0).strong().color(theme::fg(dark)));
                     ui.add_space(6.0);
                     if is_saem {
                         ui.label(egui::RichText::new(
@@ -1615,7 +1624,7 @@ fn show_conddist_distributions(
 
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(format!("Conditional mean distribution — {eta}"))
-            .size(13.0).strong());
+            .size(13.0).strong().color(theme::fg(dark)));
         if let Some(s) = shrink.filter(|v| v.is_finite()) {
             ui.add_space(12.0);
             let col = if s > 0.3 { theme::ORANGE } else { theme::GREEN };
@@ -1671,7 +1680,7 @@ fn show_conddist_caterpillar(
     rows.sort_by(|a, b| a.cond_mean.partial_cmp(&b.cond_mean).unwrap_or(std::cmp::Ordering::Equal));
 
     ui.label(egui::RichText::new(format!("Per-subject conditional mean +/- SD — {eta}"))
-        .size(13.0).strong());
+        .size(13.0).strong().color(theme::fg(dark)));
     ui.label(egui::RichText::new(
         "Sorted by conditional mean. Wide error bars indicate subjects with sparse \
          or uninformative data for this random effect.")
@@ -1726,7 +1735,7 @@ fn show_conddist_mode_vs_mean(
     }
 
     ui.label(egui::RichText::new(format!("Conditional mode (EBE) vs. conditional mean — {eta}"))
-        .size(13.0).strong());
+        .size(13.0).strong().color(theme::fg(dark)));
     ui.label(egui::RichText::new(
         "Points below the identity line show the EBE shrunk further toward zero \
          than the shrinkage-unbiased conditional mean.")
@@ -1760,7 +1769,7 @@ fn no_predictions(ui: &mut egui::Ui, dark: bool) {
     let dim = theme::fg3(dark);
     ui.centered_and_justified(|ui| {
         ui.vertical_centered(|ui| {
-            ui.label(egui::RichText::new("No predictions data").size(15.0).strong());
+            ui.label(egui::RichText::new("No predictions data").size(15.0).strong().color(theme::fg(dark)));
             ui.add_space(6.0);
             ui.label(egui::RichText::new(
                 "predictions.csv was not found in the .fitrx bundle.\n\
