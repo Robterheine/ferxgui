@@ -61,7 +61,7 @@ FeRx NLME runs entirely inside R. FeRx GUI calls `Rscript` for all modelling ope
 | Software | Minimum version | Notes |
 |---|---|---|
 | **R** | 4.2 | [r-project.org](https://www.r-project.org/) |
-| **ferx** R package | 0.2.0 | See installation below |
+| **ferx** R package | 0.2.0 | Compiles a Rust backend on install — see [Installing R packages](#installing-r-packages) |
 | **vpc** R package | 1.0 | Required for VPC tab |
 | **ggplot2** R package | 3.0 | Required for R ggplot export |
 | **jsonlite** R package | — | Usually installed with R |
@@ -76,14 +76,79 @@ FeRx NLME runs entirely inside R. FeRx GUI calls `Rscript` for all modelling ope
 
 ## Installing R packages
 
-```r
-# Install ferx from GitHub (requires devtools or remotes)
-install.packages("devtools")
-devtools::install_github("FeRx-NLME/ferx-r")
+`ferx` ships with a compiled Rust backend, so installing it from source builds that backend the first time. **A Rust toolchain must be installed *before* you install the `ferx` R package** — this is a separate requirement from the Rust toolchain used to build FeRx GUI itself below; you need it even if you only download a prebuilt FeRx GUI binary. Expect the first install to take 15–30 minutes on a fast modern machine, up to 1–2 hours on an older laptop, while it compiles.
 
-# Install vpc and ggplot2 from CRAN
+**Prerequisites:** R ≥ 4.2, a stable Rust toolchain, and `cmake`.
+
+### macOS
+
+```bash
+# 1. Install Homebrew if not present
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+# 2. Install cmake
+brew install cmake
+
+# 3. Install Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+Then in R — Apple Silicon:
+```r
+Sys.setenv(PATH = paste("/opt/homebrew/opt/cmake/bin", Sys.getenv("PATH"), sep = ":"))
+pak::pak("FeRx-NLME/ferx-r")
+```
+Intel Macs:
+```r
+Sys.setenv(PATH = paste("/usr/local/opt/cmake/bin", Sys.getenv("PATH"), sep = ":"))
+pak::pak("FeRx-NLME/ferx-r")
+```
+> RStudio on macOS launches with a restricted `PATH`, so the `Sys.setenv()` step above is needed even if `cmake`/`rustc` already work in a regular terminal.
+
+Alternative install method: `devtools::install_github("FeRx-NLME/ferx-r")`.
+
+### Windows
+
+1. Install **Rtools45** from CRAN's R Windows tools page — it ships `cmake` and the MinGW `gcc` the package links against.
+2. Install Rust from [rustup.rs](https://rustup.rs/), then:
+   ```powershell
+   rustup toolchain install stable-x86_64-pc-windows-gnu
+   ```
+   No need to `rustup default` it — the package build pins this toolchain automatically on Windows.
+3. In R:
+   ```r
+   pak::pak("FeRx-NLME/ferx-r")
+   ```
+
+### Linux (Ubuntu / Debian)
+
+```bash
+sudo apt-get install -y cmake build-essential curl git
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+```
+Then in R:
+```r
+pak::pak("FeRx-NLME/ferx-r")
+```
+
+### Remaining R packages (all platforms)
+
+```r
 install.packages(c("vpc", "ggplot2", "jsonlite"))
 ```
+
+### Verify the install
+
+```r
+library(ferx)
+ferx_example()
+ex  <- ferx_example("warfarin")
+fit <- ferx_fit(ex$model, ex$data)
+print(fit)   # should report STATUS: CONVERGED
+```
+
+Full reference, including a Docker option and troubleshooting: [ferx-r book — Installation](https://ferx-nlme.github.io/ferx-book/chapters/01-installation.html).
 
 ---
 
