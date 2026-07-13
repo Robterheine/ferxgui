@@ -420,7 +420,7 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
     let mut switch_to_output: Option<usize> = None;
     let mut ctx_action: Option<(usize, CtxAction)> = None;
 
-    egui::ScrollArea::horizontal().show(ui, |ui| {
+    egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
         TableBuilder::new(ui)
             .striped(true)
             .resizable(true)

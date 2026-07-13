@@ -270,6 +270,14 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.9.4 (2026-07-13) — model-list scrollbar fix, Run/SIR popups now come to front on a new run
+
+**Fixed: model list's horizontal scrollbar appeared to overlap the last row when only a few models were loaded**
+- The model table's `ScrollArea` defaulted to shrinking to fit its content on both axes. With few rows, that meant the scroll area (and its scrollbar) ended right after the last row instead of filling the panel, making the scrollbar look like it was cutting into the final row rather than sitting at the bottom of the list. Now pinned to fill the available space regardless of row count.
+
+**Fixed: starting a new run/SIR job while the previous run's popup was still open in the background didn't bring it to the front**
+- Both popups are backed by a single persistent OS window (keyed by a stable viewport ID) that gets its content updated on every new run, but nothing previously told the window manager to raise it — so if you switched away from an already-open popup and then started another run, the window silently updated behind whatever else was focused, making it look like nothing had happened. Both the Run popup and the SIR popup now explicitly request focus whenever a genuinely new run/SIR job starts.
+
 ### v0.9.3 (2026-07-13) — dead-code cleanup
 
 **Cleanup: removed two write-only fields that never carried any information back out**

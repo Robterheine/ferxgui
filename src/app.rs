@@ -914,6 +914,15 @@ fn render_run_popup(ctx: &egui::Context, state: &mut AppState) {
         if state.ui.run_popup_last_run_id.as_deref() != Some(run_id.as_str()) {
             state.ui.run_popup_open = true;
             state.ui.run_popup_last_run_id = Some(run_id);
+            // If a popup from a previous run was already open (just not in the
+            // foreground), setting `run_popup_open` above is a no-op — the OS
+            // window is already alive, so its content updates but nothing
+            // raises it, leaving the user unsure whether the new run actually
+            // started. Explicitly bring it to front for every new run.
+            ctx.send_viewport_cmd_to(
+                egui::ViewportId::from_hash_of("run_popup"),
+                egui::ViewportCommand::Focus,
+            );
         }
     }
 
@@ -1098,6 +1107,12 @@ fn render_sir_popup(ctx: &egui::Context, state: &mut AppState) {
         if state.ui.sir_popup_last_stem.as_deref() != Some(stem.as_str()) {
             state.ui.sir_popup_open      = true;
             state.ui.sir_popup_last_stem = Some(stem.clone());
+            // Same reasoning as the Run popup: bring an already-open window
+            // to front for every new SIR run, not just the first one.
+            ctx.send_viewport_cmd_to(
+                egui::ViewportId::from_hash_of("sir_popup"),
+                egui::ViewportCommand::Focus,
+            );
         }
     }
 
