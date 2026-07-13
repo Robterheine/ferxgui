@@ -27,9 +27,7 @@ use super::run_manifest::RunManifest;
 
 /// Result returned to the UI thread after a successful launch.
 pub struct SpawnedRun {
-    pub pid: u32,
     pub log_path: PathBuf,
-    pub manifest_path: PathBuf,
 }
 
 /// Spawn `ferx` as a detached subprocess, redirect its output to a log file,
@@ -119,7 +117,7 @@ pub fn spawn_detached_run(
         fresh_run_worker(child, pid, rec2, lp2, mp2, tx, cancel_rx);
     });
 
-    Ok(SpawnedRun { pid, log_path, manifest_path })
+    Ok(SpawnedRun { log_path })
 }
 
 /// Reconnect to an orphaned run (PID still alive after GUI restart).

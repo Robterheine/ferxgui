@@ -75,12 +75,8 @@ pub struct ActiveRun {
     pub record:        RunRecord,
     /// Wall-clock instant the run was launched (for elapsed-time display).
     pub started_at:    std::time::Instant,
-    /// OS process ID — stored for potential future use (signals, reconnect).
-    pub pid:           u32,
     /// Absolute path to the combined stdout/stderr log file on disk.
     pub log_path:      std::path::PathBuf,
-    /// Path to the run manifest (`{app_dir}/running/{run_id}.runmfst`).
-    pub manifest_path: std::path::PathBuf,
     /// Send a `CancelMode` to request graceful stop or hard kill.
     pub cancel_tx:     std::sync::mpsc::Sender<crate::workers::messages::CancelMode>,
     /// Whether to extract sdtab / patab CSV files after the run completes.

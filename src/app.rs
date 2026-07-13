@@ -1496,9 +1496,7 @@ fn reconnect_orphaned_runs(state: &mut AppState) {
     state.run.active_run = Some(ActiveRun {
         record,
         started_at:    std::time::Instant::now(), // approximate
-        pid:           manifest.pid,
         log_path:      manifest.log_path,
-        manifest_path: mfst_path,
         cancel_tx,
         export_tables:  false, // not known for reconnected runs; user can re-run if needed
         run_sir_after:  false,

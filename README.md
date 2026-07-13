@@ -205,6 +205,11 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.9.3 (2026-07-13) — dead-code cleanup
+
+**Cleanup: removed two write-only fields that never carried any information back out**
+- `ActiveRun.pid`/`.manifest_path` (and the equivalent fields on the internal `SpawnedRun` type they were copied from) were set on every run launch but never read anywhere — `pid`'s own doc comment admitted it was "stored for potential future use." Removed both; no behavior change, just eliminates a standing `dead_code` compiler warning on every build.
+
 ### v0.9.2 (2026-07-11) — model annotations (starred/comment/tags/status/lineage) are now per-user
 
 **Changed: `model_meta.json` moved from the shared workspace folder to a per-user location**

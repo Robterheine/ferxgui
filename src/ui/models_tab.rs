@@ -2058,9 +2058,7 @@ pub fn do_launch_queued(state: &mut AppState, queued: crate::domain::QueuedRun) 
             state.run.active_run = Some(crate::domain::ActiveRun {
                 record,
                 started_at: std::time::Instant::now(),
-                pid: spawned.pid,
                 log_path: spawned.log_path,
-                manifest_path: spawned.manifest_path,
                 cancel_tx,
                 export_tables: queued.export_tables,
                 run_sir_after: queued.run_sir_after,

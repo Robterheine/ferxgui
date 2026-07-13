@@ -1,6 +1,8 @@
 # ── Rust build output ─────────────────────────────────────────────────────────
 /target
 Cargo.lock
+# Local-only override (machine-specific target-dir path) — see comment inside.
+/.cargo/
 
 # ── IDE / editor files ────────────────────────────────────────────────────────
 .idea/
