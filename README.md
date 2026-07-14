@@ -270,6 +270,11 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.9.7 (2026-07-14) — Run tab now falls back to a model's own declared data file
+
+**Fixed: a model that had never been run showed "Data file: — not set —" even though the model file already declares one**
+- The Run tab's data-file field, and the right-click menu's "Run now", only ever auto-populated from a previous run's history for that exact model. A freshly created or duplicated model has no run history yet, so it showed as if no dataset were available at all — forcing a manual re-browse for a file the model's own `[data]` block already names. Both now fall back to the model's declared path (resolved relative to the model file's own directory, only used if that file actually exists) when there's no run history to inherit from.
+
 ### v0.9.6 (2026-07-14) — failed background computations (SIR, VPC, ETA-Cov, Simulate, run launch) are no longer silent
 
 A full pass triggered by a review of every async R computation in the app, prompted by a SIR run that failed with no visible error. Found and fixed the same silent-failure gap in several other places, plus one that was worse than silent.

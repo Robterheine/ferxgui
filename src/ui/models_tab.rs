@@ -1622,7 +1622,11 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
     let stem = state.workspace.models[idx].model.stem.clone();
 
     // Auto-populate the data path from the most recent run for this model
-    // so the Run button is ready immediately after restart.
+    // so the Run button is ready immediately after restart. Falls back to
+    // the model's own declared `[data]` path when there's no run history
+    // yet (e.g. a freshly duplicated child model) — the model already
+    // names its dataset, so requiring a manual re-selection of the same
+    // file would be redundant.
     if state.ui.run_data_path.is_none() {
         state.ui.run_data_path = state.run.run_history
             .iter()
@@ -1631,7 +1635,8 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
                 r.model_stem == stem
                     && r.data_path.as_ref().is_some_and(|p| p.exists())
             })
-            .and_then(|r| r.data_path.clone());
+            .and_then(|r| r.data_path.clone())
+            .or_else(|| declared_data_path(state, &stem));
     }
 
     // Estimation method is not user-editable here — the model's own
@@ -2228,13 +2233,30 @@ mod can_launch_run_tests {
 /// `run_data_path` as unset and show as disabled even though that row has
 /// run (and has a data path) before.
 fn resolve_data_path_for_run(state: &AppState, stem: &str) -> Option<std::path::PathBuf> {
-    state.ui.run_data_path.clone().or_else(|| {
-        state.run.run_history
-            .iter()
-            .rev()
-            .find(|r| r.model_stem == stem && r.data_path.as_ref().is_some_and(|p| p.exists()))
-            .and_then(|r| r.data_path.clone())
-    })
+    state.ui.run_data_path.clone()
+        .or_else(|| {
+            state.run.run_history
+                .iter()
+                .rev()
+                .find(|r| r.model_stem == stem && r.data_path.as_ref().is_some_and(|p| p.exists()))
+                .and_then(|r| r.data_path.clone())
+        })
+        .or_else(|| declared_data_path(state, stem))
+}
+
+/// Resolves a model's own declared `[data]` path — verbatim, relative to the
+/// model file's own directory — to an absolute path, if the model declares
+/// one and the resulting file actually exists. Without this, a model that
+/// had never been run yet (so no run history to inherit a data path from)
+/// showed "Data file: — not set —" even though the model file itself
+/// already names its dataset, forcing a redundant manual re-selection of a
+/// file the model already declares.
+fn declared_data_path(state: &AppState, stem: &str) -> Option<std::path::PathBuf> {
+    let model = state.workspace.models.iter().find(|m| m.model.stem == stem)?;
+    let declared = model.model.data_path.as_ref()?;
+    let dir = model.model.path.parent()?;
+    let path = dir.join(declared);
+    path.exists().then_some(path)
 }
 
 #[cfg(test)]
@@ -2292,6 +2314,41 @@ mod resolve_data_path_for_run_tests {
     fn none_when_neither_global_nor_history_has_a_path() {
         let state = AppState::new();
         assert_eq!(resolve_data_path_for_run(&state, "model_a"), None);
+    }
+
+    #[test]
+    fn falls_back_to_the_models_own_declared_data_path_when_never_run() {
+        // A freshly duplicated child model has no run history yet, so it
+        // must fall back to its own `[data]` declaration rather than
+        // showing "not set" for a file the model already names.
+        let dir = std::env::temp_dir().join(format!(
+            "ferxgui_declared_data_path_test_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let data_file = dir.join("warfarin.csv");
+        std::fs::write(&data_file, "ID,TIME,DV\n").unwrap();
+
+        let mut state = AppState::new();
+        state.workspace.models.push(crate::domain::ModelEntry {
+            model: crate::domain::FerxModel {
+                path: dir.join("model_a.ferx"),
+                stem: "model_a".to_string(),
+                source: String::new(),
+                params: Default::default(),
+                created_at: None,
+                data_path: Some("warfarin.csv".to_string()),
+            },
+            fitrx_path: None,
+            fit: None,
+            fit_parse_error: None,
+            meta: Default::default(),
+            is_stale: false,
+        });
+
+        assert_eq!(resolve_data_path_for_run(&state, "model_a"), Some(data_file));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
