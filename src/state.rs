@@ -822,6 +822,12 @@ pub struct WorkspaceState {
     pub sir_started_at: HashMap<String, std::time::Instant>,
     /// Cancellation senders for in-flight SIR threads. Send `()` to request cancellation.
     pub sir_cancel_tx: HashMap<String, std::sync::mpsc::SyncSender<()>>,
+    /// Error message from the last failed SIR run per model stem — without
+    /// this, a failed SIR run was only visible as a tiny, easy-to-miss
+    /// status-bar line (reported: "seems doing it, but no results or error
+    /// messages appear"). Rendered as a proper error card in the SIR tab
+    /// instead, mirroring `check_init_error`.
+    pub sir_error: HashMap<String, String>,
     /// Cached ETA-covariate correlation results keyed by model stem.
     pub eta_cov_results: HashMap<String, crate::domain::EtaCovResult>,
     /// Stems for which an ETA-cov computation is currently in flight.
@@ -893,6 +899,7 @@ impl WorkspaceState {
             sir_running:        HashSet::new(),
             sir_started_at:     HashMap::new(),
             sir_cancel_tx:      HashMap::new(),
+            sir_error:          HashMap::new(),
             eta_cov_results:    HashMap::new(),
             eta_cov_running:    HashSet::new(),
             cov_screen_results: HashMap::new(),
@@ -1159,6 +1166,7 @@ impl AppState {
                     self.workspace.sir_running.insert(stem.clone());
                     self.workspace.sir_started_at.insert(stem.clone(), std::time::Instant::now());
                     self.workspace.sir_cancel_tx.insert(stem.clone(), cancel_tx);
+                    self.workspace.sir_error.remove(&stem);
                     self.ui.sir_popup_open      = true;
                     self.ui.sir_popup_last_stem = Some(stem.clone());
                     std::thread::spawn(move || {
@@ -1259,6 +1267,7 @@ impl AppState {
                 self.workspace.sir_running.remove(&stem);
                 self.workspace.sir_started_at.remove(&stem);
                 self.workspace.sir_cancel_tx.remove(&stem);
+                self.workspace.sir_error.remove(&stem);
                 // Auto-select first parameter for distribution histogram.
                 if self.ui.sir_selected_param.is_empty() {
                     if let Some(first) = result.corr_names.first() {
@@ -1318,11 +1327,13 @@ impl AppState {
                     self.workspace.sir_running.remove(stem.trim());
                     self.workspace.sir_started_at.remove(stem.trim());
                     self.workspace.sir_cancel_tx.remove(stem.trim());
+                    self.workspace.sir_error.insert(stem.trim().to_string(), message.clone());
                 }
                 if let Some(stem) = context.strip_prefix("sir:auto:") {
                     self.workspace.sir_running.remove(stem.trim());
                     self.workspace.sir_started_at.remove(stem.trim());
                     self.workspace.sir_cancel_tx.remove(stem.trim());
+                    self.workspace.sir_error.insert(stem.trim().to_string(), message.clone());
                 }
                 if let Some(stem) = context.strip_prefix("eta_cov ") {
                     self.workspace.eta_cov_running.remove(stem);

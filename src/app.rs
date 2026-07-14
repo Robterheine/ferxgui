@@ -1127,6 +1127,7 @@ fn render_sir_popup(ctx: &egui::Context, state: &mut AppState) {
     let is_dark     = state.workspace.settings.theme == crate::io::persistence::Theme::Dark;
     let is_running  = state.workspace.sir_running.contains(&stem);
     let result      = state.workspace.sir_results.get(&stem).cloned();
+    let error       = state.workspace.sir_error.get(&stem).cloned();
     let elapsed_sec = state.workspace.sir_started_at.get(&stem)
         .map(|t| t.elapsed().as_secs());
 
@@ -1144,6 +1145,8 @@ fn render_sir_popup(ctx: &egui::Context, state: &mut AppState) {
 
     let title = if is_running {
         format!("SIR running — {stem}")
+    } else if error.is_some() {
+        format!("SIR failed — {stem}")
     } else {
         format!("SIR complete — {stem}")
     };
@@ -1187,6 +1190,12 @@ fn render_sir_popup(ctx: &egui::Context, state: &mut AppState) {
                             ui.label(egui::RichText::new(elapsed).size(12.0).color(dim).monospace());
                         }
                     });
+                } else if let Some(ref err) = error {
+                    ui.label(
+                        egui::RichText::new("✖  SIR failed").color(theme::RED).size(13.0).strong(),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new(err).color(theme::RED).size(11.0));
                 } else {
                     let (icon, col) = if low_ess {
                         ("⚠  SIR complete — low ESS", theme::ORANGE)

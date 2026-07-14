@@ -87,6 +87,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                             .min_size(egui::vec2(110.0, 30.0)),
                     ).clicked() {
                         state.workspace.sir_results.remove(&stem);
+                        state.workspace.sir_error.remove(&stem);
                         state.workspace.sir_running.insert(stem.clone());
                         state.ui.sir_selected_param.clear();
 
@@ -133,6 +134,26 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                     }
                 });
             });
+
+        // Error card — a failed SIR run previously only surfaced via the
+        // tiny status-bar line (reported: "seems doing it, but no results
+        // or error messages appear"). Shown with the same visual weight as
+        // the rest of the tab so it can't be missed.
+        if let Some(err) = state.workspace.sir_error.get(&stem).cloned() {
+            ui.add_space(6.0);
+            egui::Frame::new()
+                .fill(egui::Color32::from_rgba_unmultiplied(0xe8, 0x55, 0x55, 20))
+                .inner_margin(egui::Margin::same(8))
+                .corner_radius(egui::CornerRadius::same(5))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(
+                        egui::RichText::new("SIR failed").color(theme::RED).size(13.0).strong(),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new(&err).color(theme::RED).size(11.0));
+                });
+        }
 
         // Nothing more to show until results arrive.
         let sir = match state.workspace.sir_results.get(&stem).cloned() {
