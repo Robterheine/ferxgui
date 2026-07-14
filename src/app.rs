@@ -943,6 +943,13 @@ fn render_run_popup(ctx: &egui::Context, state: &mut AppState) {
     let active_stem = state.run.active_run.as_ref()
         .map(|r| r.record.model_stem.clone())
         .unwrap_or_default();
+    // Only shown once the run itself has finished (export runs as a
+    // follow-up step after completion) and only for the model it happened
+    // for — without this, a failure here had zero indicator, not even a
+    // false "success", since there's no in-flight state for this step at all.
+    let export_tables_error = state.ui.export_tables_error.as_ref()
+        .filter(|(s, _)| *s == stem)
+        .map(|(_, msg)| msg.clone());
 
     let title = if has_active {
         format!("Running: {stem}")
@@ -1019,6 +1026,14 @@ fn render_run_popup(ctx: &egui::Context, state: &mut AppState) {
                         });
                     }
                 });
+
+                if let Some(err) = &export_tables_error {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("⚠ Save output tables failed").color(theme::RED).size(11.0).strong(),
+                    );
+                    ui.label(egui::RichText::new(err).color(theme::RED).size(10.0));
+                }
 
                 // ── Log path + Detach (active run only) ───────────────
                 if has_active && !log_path.is_empty() {

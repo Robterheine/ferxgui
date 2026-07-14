@@ -399,6 +399,22 @@ pub struct UiState {
     pub run_data_path: Option<std::path::PathBuf>,
     /// Gradient method for ferx_fit(): "auto", "ad", or "fd".
     pub run_gradient: String,
+    /// (stem, message) from the most recent failed run *launch* (before any
+    /// R process even started — e.g. the embedded run script couldn't be
+    /// written, or the OS refused to spawn the process). Without this, such
+    /// a failure was invisible: `active_run` never gets set, so the Run
+    /// popup's "auto-open on new run" never fires, leaving no visible sign
+    /// the click did anything at all beyond the tiny status bar. Keyed by
+    /// stem (rather than shown unconditionally) so it only appears on the
+    /// Run pill of the model it actually happened for.
+    pub run_launch_error: Option<(String, String)>,
+    /// (stem, message) from the last failed "Save output tables" export
+    /// (runs as an opt-in background step after a run completes). Has zero
+    /// in-flight indicator even on success, so a failure was completely
+    /// invisible beyond the tiny status bar — shown as a line in the Run
+    /// popup instead, since that's what the user is watching right after
+    /// the run that triggered it finishes.
+    pub export_tables_error: Option<(String, String)>,
     // ---- Tree tab ----
     /// Pan offset in logical (pre-zoom) canvas pixels.
     pub tree_pan: egui::Vec2,
@@ -658,6 +674,8 @@ impl Default for UiState {
             run_extra_args: String::new(),
             run_data_path: None,
             run_gradient: "auto".to_string(),
+            run_launch_error: None,
+            export_tables_error: None,
             run_optimizer_trace: true,
             tree_pan:     egui::Vec2::ZERO,
             tree_zoom:    1.0,
@@ -800,10 +818,24 @@ pub struct WorkspaceState {
     /// until the matching `RVpcComplete`/`RTaskError` arrives and pairs it
     /// with the result (or discards it on failure).
     pub vpc_pending_opts: HashMap<String, VpcOpts>,
+    /// Error message from the last failed VPC compute per model stem —
+    /// without this, a failure looked identical to having never clicked
+    /// "Compute VPC" at all: the right panel just falls back to the
+    /// pre-compute hint, with no sign anything was attempted.
+    pub vpc_error: HashMap<String, String>,
+    /// Error message from the last failed VPC "Edit and execute R script"
+    /// export per model stem — same silent-revert gap as `vpc_error`. Kept
+    /// per-stem (even though only one export runs at a time, mirroring the
+    /// global `vpc_exporting` flag) so a failure for one model doesn't get
+    /// misattributed to a different model's script popup later.
+    pub vpc_export_error: HashMap<String, String>,
     /// Simulate-tab results (status summary only — the CSV lives on disk) keyed by model stem.
     pub simrun_results: HashMap<String, crate::domain::SimRunResult>,
     /// Stems for which a Simulate-tab run is currently in flight.
     pub simrun_computing: HashSet<String>,
+    /// Error message from the last failed Simulate-tab run per model stem —
+    /// same silent-revert-to-pristine-hint gap as `vpc_error`.
+    pub simrun_error: HashMap<String, String>,
     /// Cached `ferx_check_init()` results keyed by model stem.
     pub check_init_results: HashMap<String, crate::domain::CheckInitResult>,
     /// Stems for which a check_init is currently in flight.
@@ -832,12 +864,22 @@ pub struct WorkspaceState {
     pub eta_cov_results: HashMap<String, crate::domain::EtaCovResult>,
     /// Stems for which an ETA-cov computation is currently in flight.
     pub eta_cov_running: HashSet<String>,
+    /// Error message from the last failed ETA-cov computation per model
+    /// stem. Without this, the view (which auto-triggers computation on
+    /// open, with no button in between) would see "not running" and "no
+    /// result" both stay true forever after a failure, and re-launch the
+    /// computation again on the very next frame — an unbounded retry loop
+    /// that silently re-spawns R every frame instead of just failing once.
+    pub eta_cov_failed: HashMap<String, String>,
     /// Cached declared-covariate screen results (`ferx_cov_screen`) keyed by
     /// model stem. Separate from `eta_cov_*` so the two views in the ETA-Cov
     /// section can be computed independently and lazily.
     pub cov_screen_results: HashMap<String, crate::domain::CovScreenResult>,
     /// Stems for which a covariate-screen computation is currently in flight.
     pub cov_screen_running: HashSet<String>,
+    /// Error message from the last failed covariate-screen computation per
+    /// model stem — same unbounded-retry-loop guard as `eta_cov_failed`.
+    pub cov_screen_failed: HashMap<String, String>,
 }
 
 impl WorkspaceState {
@@ -890,8 +932,11 @@ impl WorkspaceState {
             vpc_data:           HashMap::new(),
             vpc_computing:      HashSet::new(),
             vpc_pending_opts:   HashMap::new(),
+            vpc_error:          HashMap::new(),
+            vpc_export_error:   HashMap::new(),
             simrun_results:     HashMap::new(),
             simrun_computing:   HashSet::new(),
+            simrun_error:       HashMap::new(),
             check_init_results: HashMap::new(),
             check_init_running: HashSet::new(),
             check_init_error:   HashMap::new(),
@@ -902,8 +947,10 @@ impl WorkspaceState {
             sir_error:          HashMap::new(),
             eta_cov_results:    HashMap::new(),
             eta_cov_running:    HashSet::new(),
+            eta_cov_failed:     HashMap::new(),
             cov_screen_results: HashMap::new(),
             cov_screen_running: HashSet::new(),
+            cov_screen_failed:  HashMap::new(),
         }
     }
 
@@ -1106,6 +1153,13 @@ impl AppState {
                 let run_sir_after = self.run.active_run.as_ref()
                     .map(|r| r.run_sir_after)
                     .unwrap_or(false);
+                // Clear unconditionally (not just when this run also exports
+                // tables) — a stale error from an earlier run for this same
+                // model would otherwise keep showing in the Run popup even
+                // after a run that didn't touch export at all.
+                if self.ui.export_tables_error.as_ref().is_some_and(|(s, _)| *s == stem) {
+                    self.ui.export_tables_error = None;
+                }
                 self.ui.status_message = if success {
                     format!("Run completed: {stem}")
                 } else {
@@ -1203,6 +1257,7 @@ impl AppState {
             }
             RVpcComplete { stem, data } => {
                 self.workspace.vpc_computing.remove(&stem);
+                self.workspace.vpc_error.remove(&stem);
                 let opts = self.workspace.vpc_pending_opts.remove(&stem).unwrap_or_default();
                 if data.warnings.is_empty() {
                     self.ui.status_message = format!("VPC ready: {stem}");
@@ -1220,6 +1275,11 @@ impl AppState {
             }
             VpcPlotExported { path } => {
                 self.ui.vpc_exporting = false;
+                // Only one export runs at a time app-wide, so on success
+                // there's exactly one entry that could possibly be stale;
+                // clearing the whole map is simpler than threading a stem
+                // through this message just to remove one key.
+                self.workspace.vpc_export_error.clear();
                 if let Err(e) = open::that(&path) {
                     self.ui.status_message = format!("Exported R ggplot → {path} (could not open: {e})");
                 } else {
@@ -1251,6 +1311,7 @@ impl AppState {
             }
             SimRunComplete { stem, result } => {
                 self.workspace.simrun_computing.remove(&stem);
+                self.workspace.simrun_error.remove(&stem);
                 self.ui.status_message = format!("Simulation ready: {stem} ({} rows)", result.n_rows);
                 self.workspace.simrun_results.insert(stem, *result);
             }
@@ -1284,6 +1345,7 @@ impl AppState {
                 self.workspace.sir_results.insert(stem, *result);
             }
             TablesExported { stem, paths } => {
+                self.ui.export_tables_error = None;
                 let names: Vec<String> = paths.iter()
                     .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_owned))
                     .collect();
@@ -1294,11 +1356,13 @@ impl AppState {
             }
             EtaCovComplete { stem, result } => {
                 self.workspace.eta_cov_running.remove(&stem);
+                self.workspace.eta_cov_failed.remove(&stem);
                 self.ui.status_message = format!("ETA-cov ready: {stem}");
                 self.workspace.eta_cov_results.insert(stem, *result);
             }
             CovScreenComplete { stem, result } => {
                 self.workspace.cov_screen_running.remove(&stem);
+                self.workspace.cov_screen_failed.remove(&stem);
                 self.ui.status_message = format!("Covariate screen ready: {stem}");
                 self.workspace.cov_screen_results.insert(stem, *result);
             }
@@ -1312,12 +1376,15 @@ impl AppState {
                 if let Some(stem) = context.strip_prefix("vpc ") {
                     self.workspace.vpc_computing.remove(stem);
                     self.workspace.vpc_pending_opts.remove(stem);
+                    self.workspace.vpc_error.insert(stem.to_string(), message.clone());
                 }
-                if context.starts_with("vpc_export ") {
+                if let Some(stem) = context.strip_prefix("vpc_export ") {
                     self.ui.vpc_exporting = false;
+                    self.workspace.vpc_export_error.insert(stem.to_string(), message.clone());
                 }
                 if let Some(stem) = context.strip_prefix("simulate ") {
                     self.workspace.simrun_computing.remove(stem);
+                    self.workspace.simrun_error.insert(stem.to_string(), message.clone());
                 }
                 if let Some(stem) = context.strip_prefix("check_init ") {
                     self.workspace.check_init_running.remove(stem);
@@ -1337,9 +1404,14 @@ impl AppState {
                 }
                 if let Some(stem) = context.strip_prefix("eta_cov ") {
                     self.workspace.eta_cov_running.remove(stem);
+                    self.workspace.eta_cov_failed.insert(stem.to_string(), message.clone());
                 }
                 if let Some(stem) = context.strip_prefix("cov_screen ") {
                     self.workspace.cov_screen_running.remove(stem);
+                    self.workspace.cov_screen_failed.insert(stem.to_string(), message.clone());
+                }
+                if let Some(stem) = context.strip_prefix("export_tables ") {
+                    self.ui.export_tables_error = Some((stem.to_string(), message.clone()));
                 }
                 self.ui.status_message = format!("R error ({context}): {message}");
             }

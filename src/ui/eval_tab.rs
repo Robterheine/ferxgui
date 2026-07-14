@@ -1045,6 +1045,11 @@ fn launch_eta_cov(state: &mut AppState, stem: &str, fitrx_path: &std::path::Path
     let stem_s = stem.to_string();
     let tx     = state.worker_tx.clone();
     state.workspace.eta_cov_running.insert(stem_s.clone());
+    state.workspace.eta_cov_failed.remove(&stem_s);
+    // Without this, a failed "Re-run" (from the Results branch, checked
+    // before the Failed branch) left the previous successful table on
+    // screen with no sign the retry had failed.
+    state.workspace.eta_cov_results.remove(&stem_s);
     std::thread::spawn(move || {
         match crate::io::r_extract::compute_eta_cov(&fitrx) {
             Ok(result) => {
@@ -1071,6 +1076,10 @@ fn launch_cov_screen(state: &mut AppState, stem: &str, fitrx_path: &std::path::P
     let stem_s = stem.to_string();
     let tx     = state.worker_tx.clone();
     state.workspace.cov_screen_running.insert(stem_s.clone());
+    state.workspace.cov_screen_failed.remove(&stem_s);
+    // Same reasoning as launch_eta_cov: don't let a failed "Re-run" hide
+    // behind the previous successful table.
+    state.workspace.cov_screen_results.remove(&stem_s);
     std::thread::spawn(move || {
         match crate::io::r_extract::compute_cov_screen(&fitrx) {
             Ok(result) => {
@@ -1137,8 +1146,13 @@ fn show_eta_cov_dataset_scan(
          a covariate test. Pairs with |r| ≥ 0.3 are flagged.");
 
     // Auto-trigger the moment a fit exists — no setup step needed any more.
+    // Gated on `eta_cov_failed` too: without it, a failed computation left
+    // both "not running" and "no result" true, so this would re-launch (and
+    // re-fail) on every single frame — an unbounded retry loop, not just a
+    // silent failure.
     if !state.workspace.eta_cov_running.contains(stem)
         && !state.workspace.eta_cov_results.contains_key(stem)
+        && !state.workspace.eta_cov_failed.contains_key(stem)
     {
         launch_eta_cov(state, stem, fitrx_path);
     }
@@ -1263,6 +1277,25 @@ fn show_eta_cov_dataset_scan(
         return;
     }
 
+    // ── Failed ──────────────────────────────────────────────────────────────
+    if let Some(err) = state.workspace.eta_cov_failed.get(stem).cloned() {
+        ui.centered_and_justified(|ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(40.0);
+                ui.label(
+                    egui::RichText::new("ETA-covariate scan failed").color(theme::RED).size(13.0).strong(),
+                );
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(&err).color(theme::RED).size(11.0));
+                ui.add_space(10.0);
+                if ui.button("Retry").clicked() {
+                    launch_eta_cov(state, stem, fitrx_path);
+                }
+            });
+        });
+        return;
+    }
+
     // No cached result and not (yet) running — launch_eta_cov() above just
     // triggered it; this frame renders once before the spinner takes over.
     ui.centered_and_justified(|ui| {
@@ -1288,8 +1321,11 @@ fn show_eta_cov_declared(
          ≥ 0.2 are returned; note this threshold differs from the Dataset Scan's |r| ≥ \
          0.3 — each view is calibrated independently by ferx-r.");
 
+    // Gated on `cov_screen_failed` too — see the identical comment on the
+    // Dataset Scan view's auto-trigger above for why this matters.
     if !state.workspace.cov_screen_running.contains(stem)
         && !state.workspace.cov_screen_results.contains_key(stem)
+        && !state.workspace.cov_screen_failed.contains_key(stem)
     {
         launch_cov_screen(state, stem, fitrx_path);
     }
@@ -1409,6 +1445,25 @@ fn show_eta_cov_declared(
                     launch_cov_screen(state, stem, fitrx_path);
                 }
             });
+        return;
+    }
+
+    // ── Failed ──────────────────────────────────────────────────────────────
+    if let Some(err) = state.workspace.cov_screen_failed.get(stem).cloned() {
+        ui.centered_and_justified(|ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(40.0);
+                ui.label(
+                    egui::RichText::new("Covariate screen failed").color(theme::RED).size(13.0).strong(),
+                );
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(&err).color(theme::RED).size(11.0));
+                ui.add_space(10.0);
+                if ui.button("Retry").clicked() {
+                    launch_cov_screen(state, stem, fitrx_path);
+                }
+            });
+        });
         return;
     }
 

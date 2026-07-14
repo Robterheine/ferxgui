@@ -270,6 +270,25 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.9.6 (2026-07-14) — failed background computations (SIR, VPC, ETA-Cov, Simulate, run launch) are no longer silent
+
+A full pass triggered by a review of every async R computation in the app, prompted by a SIR run that failed with no visible error. Found and fixed the same silent-failure gap in several other places, plus one that was worse than silent.
+
+**Fixed: a failed model run showed nothing at all — no popup, no error, nothing**
+- If launching a run failed before any R process even started (`ferx` not configured, the embedded run script couldn't be written, no app data directory, or the OS refused to spawn the process), the Run popup never opened, since it only auto-opens when a run actually starts. The only trace was a one-line message in the small status bar at the bottom of the window — indistinguishable from the click not having registered. Now shown as a persistent card next to the Run button.
+
+**Fixed: a failed ETA-covariate scan or covariate screen retried itself forever**
+- Both views auto-launch their R computation the moment their section is opened, with no button in between. On failure, nothing recorded that a computation had already been tried and failed, so the exact same conditions that triggered the first attempt were still true on the very next frame — silently re-launching (and re-failing) the computation every single frame for as long as that section stayed open. Now a failure is tracked and stops the retries, with a clear error message and a "Retry" button.
+
+**Fixed: a failed VPC compute, VPC script export, or Simulate-tab run looked identical to never having clicked the button**
+- All three reverted to the exact same hint shown before anything was ever attempted, with the only sign of failure being that same easy-to-miss status-bar line. Now shown as a proper error card, matching the treatment SIR already got in v0.9.5's follow-up fix.
+
+**Fixed: SIR, VPC, and ETA-Cov/Covariate-screen results could hide behind a stale success from a previous attempt**
+- Recomputing (or "Re-run") after an earlier success, if the new attempt failed, left the old successful plot or table on screen with no indication the retry had failed — the new error card was only reachable once the previous result was cleared, which wasn't happening.
+
+**Fixed: "Save output tables" after a run had no failure indicator at all, and reused a stale one**
+- This opt-in post-run export had zero in-flight or failure indicator, even on success. Now a failure shows as a line in the Run popup — and correctly clears on the model's next run, rather than continuing to show an old failure from an unrelated run.
+
 ### v0.9.5 (2026-07-14) — editable description on duplicate, full-row right-click menu
 
 **Added: "Duplicate as child…" now lets you edit the description before creating the copy**

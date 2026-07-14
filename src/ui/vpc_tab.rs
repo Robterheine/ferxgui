@@ -134,6 +134,18 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                 let mut opts = rd.opts;
                 opts.theme = state.ui.vpc_opts.theme.clone(); // Display-only — stays live
                 show_vpc_plot(ui, &rd.result, &opts, dark);
+            } else if let Some(err) = state.workspace.vpc_error.get(&stem).cloned() {
+                // Without this branch, a failed compute fell straight through
+                // to the exact same hint shown before Compute VPC was ever
+                // clicked — indistinguishable from "nothing attempted".
+                ui.vertical_centered(|ui| {
+                    ui.add_space(40.0);
+                    ui.label(
+                        egui::RichText::new("VPC compute failed").color(theme::RED).size(13.0).strong(),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new(&err).color(theme::RED).size(11.0));
+                });
             } else {
                 hint(ui, "Set options on the left, then click Compute VPC.");
             }
@@ -245,6 +257,18 @@ fn show_script_popup(ui: &egui::Ui, state: &mut AppState, idx: usize, stem: &str
                         }
                     });
                 });
+
+                // Without this, a failed script run reverted to looking
+                // exactly like the button had never been clicked, beyond
+                // the tiny status bar. Keyed by stem so a failure for a
+                // different model never shows up here by mistake.
+                if let Some(err) = state.workspace.vpc_export_error.get(stem).cloned() {
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new("Script run failed").color(theme::RED).size(12.0).strong(),
+                    );
+                    ui.label(egui::RichText::new(&err).color(theme::RED).size(11.0));
+                }
             });
         },
     );
@@ -647,14 +671,21 @@ fn build_config(state: &AppState, idx: usize) -> Result<VpcConfig, String> {
 }
 
 fn start_compute(ui: &egui::Ui, state: &mut AppState, idx: usize, stem: &str) {
+    state.workspace.vpc_error.remove(stem);
     let cfg = match build_config(state, idx) {
         Ok(cfg) => cfg,
         Err(e) => {
-            state.ui.status_message = format!("Could not start VPC compute: {e}");
+            let msg = format!("Could not start VPC compute: {e}");
+            state.ui.status_message = msg.clone();
+            state.workspace.vpc_error.insert(stem.to_string(), msg);
             return;
         }
     };
     state.workspace.vpc_computing.insert(stem.to_string());
+    // Without this, a failed recompute left the previous successful plot on
+    // screen with no indication anything had changed — the new vpc_error
+    // card is only reachable once vpc_data has no entry for this stem.
+    state.workspace.vpc_data.remove(stem);
     // Snapshot the options that are actually being sent to R, so the plot
     // renders from what was computed rather than whatever the panel has
     // been changed to by the time the result arrives (see VpcRenderData).
@@ -673,10 +704,13 @@ fn start_compute(ui: &egui::Ui, state: &mut AppState, idx: usize, stem: &str) {
 
 /// Called from the OS-native script viewport (has `egui::Context`, not `egui::Ui`).
 fn start_export_from_ctx(ctx: &egui::Context, state: &mut AppState, idx: usize, stem: &str) {
+    state.workspace.vpc_export_error.remove(stem);
     let cfg = match build_config(state, idx) {
         Ok(cfg) => cfg,
         Err(e) => {
-            state.ui.status_message = format!("Could not start VPC export: {e}");
+            let msg = format!("Could not start VPC export: {e}");
+            state.ui.status_message = msg.clone();
+            state.workspace.vpc_export_error.insert(stem.to_string(), msg);
             return;
         }
     };

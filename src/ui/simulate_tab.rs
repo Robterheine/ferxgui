@@ -95,6 +95,18 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                 ui.ctx().request_repaint();
             } else if let Some(result) = state.workspace.simrun_results.get(&stem).cloned() {
                 show_result(ui, state, &result, dark);
+            } else if let Some(err) = state.workspace.simrun_error.get(&stem).cloned() {
+                // Without this branch, a failed run fell straight through to
+                // the exact same hint shown before Run simulation was ever
+                // clicked — indistinguishable from "nothing attempted".
+                ui.vertical_centered(|ui| {
+                    ui.add_space(40.0);
+                    ui.label(
+                        egui::RichText::new("Simulation failed").color(theme::RED).size(13.0).strong(),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new(&err).color(theme::RED).size(11.0));
+                });
             } else {
                 hint(ui, "Set options on the left, then click Run simulation.");
             }
@@ -310,7 +322,13 @@ fn build_config(state: &AppState, idx: usize) -> Option<SimRunConfig> {
 }
 
 fn start_compute(ui: &egui::Ui, state: &mut AppState, idx: usize, stem: &str) {
-    let Some(cfg) = build_config(state, idx) else { return; };
+    state.workspace.simrun_error.remove(stem);
+    let Some(cfg) = build_config(state, idx) else {
+        let msg = "Could not start simulation — check the data file and output path".to_string();
+        state.ui.status_message = msg.clone();
+        state.workspace.simrun_error.insert(stem.to_string(), msg);
+        return;
+    };
     state.workspace.simrun_computing.insert(stem.to_string());
     state.workspace.simrun_results.remove(stem);
     let tx = state.worker_tx.clone();

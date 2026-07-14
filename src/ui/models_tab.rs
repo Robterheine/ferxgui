@@ -1912,6 +1912,32 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             });
 
+            // Launch-failure card — without this, a failure here (e.g. the
+            // run script couldn't be written, or the OS refused to spawn
+            // the process) was completely invisible: `active_run` never
+            // gets set, so the Run popup never opens, leaving no sign the
+            // click did anything beyond the tiny status bar.
+            if let Some((err_stem, err_msg)) = &state.ui.run_launch_error {
+                if *err_stem == stem {
+                    ui.add_space(6.0);
+                    egui::Frame::new()
+                        .fill(egui::Color32::from_rgba_unmultiplied(0xe8, 0x55, 0x55, 20))
+                        .inner_margin(egui::Margin::same(8))
+                        .corner_radius(egui::CornerRadius::same(5))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(
+                                egui::RichText::new("Run failed to start")
+                                    .color(theme::RED)
+                                    .size(13.0)
+                                    .strong(),
+                            );
+                            ui.add_space(4.0);
+                            ui.label(egui::RichText::new(err_msg).color(theme::RED).size(11.0));
+                        });
+                }
+            }
+
             // ── Init check ──
             {
                 let checking = state.workspace.check_init_running.contains(&stem);
@@ -2274,7 +2300,9 @@ fn launch_run(state: &mut AppState, idx: usize, stem: &str) {
     let data = match state.ui.run_data_path.clone() {
         Some(p) => p,
         None => {
-            state.ui.status_message = "Select a data file before running".to_string();
+            let msg = "Select a data file before running".to_string();
+            state.ui.status_message = msg.clone();
+            state.ui.run_launch_error = Some((stem.to_string(), msg));
             return;
         }
     };
@@ -2302,14 +2330,20 @@ pub fn advance_queue(state: &mut AppState) {
 }
 
 /// Core launch logic: start a run described by `queued`.  Sets `active_run` on success;
-/// writes an error to `status_message` on failure.
+/// on failure, writes to both `status_message` (easy to miss — see
+/// `run_launch_error`'s doc comment) and `run_launch_error`, which is
+/// rendered as a persistent card next to the Run button, since a launch
+/// failure means `active_run` never gets set and the Run popup never opens.
 pub fn do_launch_queued(state: &mut AppState, queued: crate::domain::QueuedRun) {
+    state.ui.run_launch_error = None;
+
     // ferx runs through R: the stored "binary" is actually the Rscript path.
     let rscript = match state.workspace.settings.ferx_binary.clone() {
         Some(p) => p,
         None => {
-            state.ui.status_message =
-                "ferx is not available — check R + the ferx package in Settings".to_string();
+            let msg = "ferx is not available — check R + the ferx package in Settings".to_string();
+            state.ui.status_message = msg.clone();
+            state.ui.run_launch_error = Some((queued.stem.clone(), msg));
             return;
         }
     };
@@ -2324,12 +2358,16 @@ pub fn do_launch_queued(state: &mut AppState, queued: crate::domain::QueuedRun) 
         Some(d) => match crate::io::r_extract::ensure_run_script(d) {
             Ok(p) => p,
             Err(e) => {
-                state.ui.status_message = format!("Could not write run script: {e}");
+                let msg = format!("Could not write run script: {e}");
+                state.ui.status_message = msg.clone();
+                state.ui.run_launch_error = Some((queued.stem.clone(), msg));
                 return;
             }
         },
         None => {
-            state.ui.status_message = "No app data directory available".to_string();
+            let msg = "No app data directory available".to_string();
+            state.ui.status_message = msg.clone();
+            state.ui.run_launch_error = Some((queued.stem.clone(), msg));
             return;
         }
     };
@@ -2418,7 +2456,9 @@ pub fn do_launch_queued(state: &mut AppState, queued: crate::domain::QueuedRun) 
             state.ui.status_message = format!("Running {}", queued.stem);
         }
         Err(e) => {
-            state.ui.status_message = format!("Failed to start run: {e}");
+            let msg = format!("Failed to start run: {e}");
+            state.ui.status_message = msg.clone();
+            state.ui.run_launch_error = Some((queued.stem.clone(), msg));
         }
     }
 }
