@@ -275,8 +275,8 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 **Added: "Duplicate as child…" now lets you edit the description before creating the copy**
 - The dialog shows a multi-line description field pre-filled with the source model's current description (per-user comment if set, otherwise the model file's own comment line). Leave it as-is to inherit it unchanged, or edit it to note what's different about the child — saved to the new model's own per-user annotation, independent of the parent's.
 
-**Fixed: right-clicking a model row only opened the context menu when aimed at the model's name text**
-- The menu was attached solely to the NAME column's label. Right-clicking anywhere else in the row — description, OFV, method, any other column — did nothing, which was easy to run into since the name text itself is a fairly narrow target. The same menu is now also attached to the row as a whole, so right-clicking anywhere in a model's row opens it.
+**Fixed: right-clicking a model row only opened the context menu when aimed at the model's name text, and row-hover highlighting was inconsistent everywhere else**
+- The menu was attached solely to the NAME column's label, so right-clicking anywhere else in the row — description, OFV, method, any other column — did nothing. The row list's own hover highlighting had the same gap, for the same underlying reason: the table library's per-cell tracking only works for a column whose content is itself a clickable widget, which previously was true only for the star and name columns. Every column now has its own explicit click/hover tracking, so right-clicking or hovering anywhere in a model's row works consistently.
 
 ### v0.9.4 (2026-07-13) — model-list scrollbar fix, Run/SIR popups now come to front on a new run
 
