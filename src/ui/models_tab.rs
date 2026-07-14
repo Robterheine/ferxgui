@@ -3547,6 +3547,17 @@ fn apply_ctx_action(
             } else {
                 Some(idx)
             };
+            // Persist to model_meta.json, not just in-memory `state.ui` —
+            // without this, the reference model was forgotten on every
+            // restart. Exclusive by construction: clear every other
+            // model's flag before (maybe) setting this one's.
+            for m in &mut state.workspace.models {
+                m.meta.is_reference = false;
+            }
+            if state.ui.reference_model == Some(idx) {
+                state.workspace.models[idx].meta.is_reference = true;
+            }
+            save_meta_for(state, idx);
         }
         CtxAction::ViewRunLog => {
             if let Some(m) = state.workspace.models.get(idx) {

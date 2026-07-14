@@ -52,6 +52,11 @@ pub struct ModelMeta {
     /// Stem of the model this was derived from.
     #[serde(default)]
     pub based_on: Option<String>,
+    /// Whether this model is the current comparison reference (used for
+    /// ΔOFV in the model list). At most one model should have this set at
+    /// a time — enforced by the toggle logic, not by this type itself.
+    #[serde(default)]
+    pub is_reference: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

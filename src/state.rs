@@ -1027,6 +1027,50 @@ impl RunState {
 }
 
 #[cfg(test)]
+mod reference_model_persistence_tests {
+    use super::AppState;
+    use crate::domain::{FerxModel, ModelEntry, ModelMeta};
+    use crate::workers::messages::WorkerMsg;
+
+    fn model_entry(stem: &str, is_reference: bool) -> ModelEntry {
+        ModelEntry {
+            model: FerxModel {
+                path: std::path::PathBuf::from(format!("{stem}.ferx")),
+                stem: stem.to_string(),
+                source: String::new(),
+                params: Default::default(),
+                created_at: None,
+                data_path: None,
+            },
+            fitrx_path: None,
+            fit: None,
+            fit_parse_error: None,
+            meta: ModelMeta { is_reference, ..Default::default() },
+            is_stale: false,
+        }
+    }
+
+    /// Regression test for "the reference model is forgotten on restart":
+    /// on a fresh `AppState` (as after launching the app), `reference_model`
+    /// starts `None`, so there's nothing to re-anchor by stem — the only
+    /// way to restore it is from the persisted `meta.is_reference` flag
+    /// that scanning just loaded off disk.
+    #[test]
+    fn restores_reference_model_from_persisted_meta_on_first_scan() {
+        let mut state = AppState::new();
+        assert_eq!(state.ui.reference_model, None);
+
+        state.apply(WorkerMsg::ScanComplete(vec![
+            model_entry("model_a", false),
+            model_entry("model_b", true),
+            model_entry("model_c", false),
+        ]));
+
+        assert_eq!(state.ui.reference_model, Some(1));
+    }
+}
+
+#[cfg(test)]
 mod run_state_log_tests {
     use super::RunState;
 
@@ -1136,9 +1180,14 @@ impl AppState {
                 self.ui.selected_model = selected_stem.and_then(|s| {
                     self.workspace.models.iter().position(|m| m.model.stem == s)
                 });
-                self.ui.reference_model = reference_stem.and_then(|s| {
-                    self.workspace.models.iter().position(|m| m.model.stem == s)
-                });
+                // Falls back to the persisted `meta.is_reference` flag when
+                // there's no in-session reference to re-anchor (e.g. right
+                // after startup) — without this, the reference model was
+                // forgotten on every restart despite being saved to
+                // model_meta.json.
+                self.ui.reference_model = reference_stem
+                    .and_then(|s| self.workspace.models.iter().position(|m| m.model.stem == s))
+                    .or_else(|| self.workspace.models.iter().position(|m| m.meta.is_reference));
             }
             RunLine(line) => {
                 self.run.push_log(line);

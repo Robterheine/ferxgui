@@ -270,6 +270,11 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.9.8 (2026-07-14) — the reference model is now remembered across restarts
+
+**Fixed: "Set as Reference" was forgotten every time ferxgui restarted**
+- The reference model (used for ΔOFV in the model list) only ever lived in memory for the current session, unlike every other per-model annotation (starred, tags, comment, status) which is already saved to `model_meta.json`. Setting a model as reference now persists it the same way — clearing the flag on any other model first, since only one model can be the reference at a time — and it's restored on the next launch or rescan.
+
 ### v0.9.7 (2026-07-14) — Run tab now falls back to a model's own declared data file
 
 **Fixed: a model that had never been run showed "Data file: — not set —" even though the model file already declares one**
