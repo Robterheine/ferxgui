@@ -515,6 +515,9 @@ pub struct UiState {
     pub duplicate_dialog_focused: bool,
     /// Text buffer for the new stem name in the duplicate dialog.
     pub duplicate_stem_buf: String,
+    /// Text buffer for the new model's description in the duplicate dialog —
+    /// pre-filled with the source model's current description, editable.
+    pub duplicate_description_buf: String,
     /// Whether "Set as child" checkbox is checked in the duplicate dialog.
     pub duplicate_set_as_child: bool,
     /// Model awaiting a delete-confirmation dialog.
@@ -703,6 +706,7 @@ impl Default for UiState {
             pending_duplicate: None,
             duplicate_dialog_focused: false,
             duplicate_stem_buf: String::new(),
+            duplicate_description_buf: String::new(),
             duplicate_set_as_child: true,
             pending_delete: None,
             compare_a: None,

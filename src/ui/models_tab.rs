@@ -458,29 +458,30 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
 
                         // ★
                         tr.col(|ui| {
-                            if row.starred {
-                                if ui
-                                    .add(
-                                        egui::Label::new(
-                                            egui::RichText::new("★").color(theme::STAR).size(14.0),
-                                        )
-                                        .sense(egui::Sense::click()),
+                            let star_resp = if row.starred {
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new("★").color(theme::STAR).size(14.0),
                                     )
-                                    .clicked()
-                                {
-                                    toggle_star = Some(row.idx);
-                                }
-                            } else if ui
-                                .add(
+                                    .sense(egui::Sense::click()),
+                                )
+                            } else {
+                                ui.add(
                                     egui::Label::new(
                                         egui::RichText::new("☆").color(theme::fg3(dark)).size(14.0),
                                     )
                                     .sense(egui::Sense::click()),
                                 )
-                                .clicked()
-                            {
+                            };
+                            if star_resp.clicked() {
                                 toggle_star = Some(row.idx);
                             }
+                            // Same row-wide menu as everywhere else in the row —
+                            // this glyph's own Response would otherwise win the
+                            // hit-test over it and leave it uncovered.
+                            star_resp.context_menu(|ui| {
+                                show_model_row_context_menu(ui, state, row, dark, &mut ctx_action);
+                            });
                         });
 
                         // NAME (coloured by run status, "(ref)" badge, context menu)
@@ -524,165 +525,11 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
                                 switch_to_output = Some(row.idx);
                             }
                             // ── Right-click context menu ─────────────────────
-                            let row_idx = row.idx;
-                            let is_ref  = row.is_reference;
+                            // Also attached to the row's own response below, so
+                            // right-clicking anywhere in the row (not just this
+                            // label) opens the same menu.
                             resp.context_menu(|ui| {
-                                ui.set_min_width(190.0);
-
-                                // ── Run ────────────────────────────────────
-                                // A submenu, not a single click — lets
-                                // per-run options (covariance, trace) be
-                                // checked/flipped right here instead of
-                                // silently firing off whatever the Run pill
-                                // last had configured. These mutate the same
-                                // global `state.ui.run_*` fields the Run
-                                // pill itself edits, so changes here show up
-                                // there too.
-                                //
-                                // Estimation method is deliberately NOT
-                                // editable here: the model file's own
-                                // `[fit_options]` is authoritative for this
-                                // row (unlike covariance/trace, which aren't
-                                // tied to a specific model the way method
-                                // is). If the file doesn't declare one,
-                                // "Run now" is disabled — nothing to run
-                                // with otherwise.
-                                //
-                                // Plain "Run" — no manual "▶" — `menu_button`
-                                // already appends its own submenu arrow.
-                                ui.menu_button("Run", |ui| {
-                                    ui.set_min_width(170.0);
-                                    let declared_method = crate::io::ferx_file::parse_fit_options(
-                                        &state.workspace.models[row_idx].model.source
-                                    ).method;
-                                    match &declared_method {
-                                        Some(m) => {
-                                            ui.label(egui::RichText::new(format!("Method: {m}"))
-                                                .color(theme::fg2(dark)).size(11.0))
-                                                .on_hover_text("Declared in this model's [fit_options] block");
-                                        }
-                                        None => {
-                                            ui.label(egui::RichText::new(
-                                                "No estimation method declared in [fit_options]")
-                                                .color(theme::ORANGE).size(11.0));
-                                        }
-                                    }
-                                    ui.checkbox(&mut state.ui.run_covariance, "Covariance step");
-                                    ui.checkbox(&mut state.ui.run_optimizer_trace, "Optimizer trace");
-
-                                    ui.separator();
-
-                                    // `resolve_data_path_for_run`, not the raw
-                                    // `run_data_path` — this row may never
-                                    // have been the *selected* model this
-                                    // session, so that global field may never
-                                    // have been auto-populated for it even
-                                    // though it has run (and has a data path)
-                                    // before.
-                                    let can_run = can_launch_run(
-                                        state.run.active_run.is_some(),
-                                        state.workspace.settings.ferx_binary.is_some(),
-                                        resolve_data_path_for_run(state, &row.stem).is_some(),
-                                    ) && declared_method.is_some();
-                                    let run_resp = ui.add_enabled(can_run, egui::Button::new("Run now"));
-                                    let run_resp = if !can_run {
-                                        run_resp.on_disabled_hover_text(
-                                            "A run is already active, ferx isn't configured, no \
-                                             data file is selected, or this model has no \
-                                             [fit_options] method declared"
-                                        )
-                                    } else {
-                                        run_resp
-                                    };
-                                    if run_resp.clicked() {
-                                        // Use the row's own declared method, not whatever
-                                        // `state.ui.run_method` currently holds (which may
-                                        // reflect a different model's last-edited value via
-                                        // the Run pill).
-                                        if let Some(m) = declared_method.clone() {
-                                            state.ui.run_method = m;
-                                        }
-                                        ctx_action = Some((row_idx, CtxAction::Run));
-                                        ui.close_menu();
-                                    }
-                                });
-
-                                ui.separator();
-
-                                // ── Model actions ─────────────────────────
-                                if ui.button("Duplicate as child…").clicked() {
-                                    ctx_action = Some((row_idx, CtxAction::Duplicate));
-                                    ui.close_menu();
-                                }
-                                let ref_label = if is_ref { "Clear Reference" } else { "Set as Reference" };
-                                if ui.button(ref_label).clicked() {
-                                    ctx_action = Some((row_idx, CtxAction::ToggleReference));
-                                    ui.close_menu();
-                                }
-
-                                // ── Compare with… (submenu) ───────────────
-                                let other_models: Vec<(usize, String)> = state.workspace.models
-                                    .iter().enumerate()
-                                    .filter(|(i, m)| *i != row_idx && m.fit.is_some())
-                                    .map(|(i, m)| (i, m.model.stem.clone()))
-                                    .collect();
-                                if !other_models.is_empty() {
-                                    ui.menu_button("Compare with…  ▶", |ui| {
-                                        ui.set_min_width(160.0);
-                                        for (_i, stem) in &other_models {
-                                            if ui.button(stem).clicked() {
-                                                ctx_action = Some((row_idx, CtxAction::CompareWith(stem.clone())));
-                                                ui.close_menu();
-                                            }
-                                        }
-                                    });
-                                }
-
-                                ui.separator();
-
-                                // Neither of these apply to a model that has never been
-                                // run — greyed out rather than silently jumping to an
-                                // empty History tab or a nonexistent log file.
-                                let has_run = row.run_status != crate::domain::RunStatus::NotRun;
-
-                                // ── File / folder ─────────────────────────
-                                let log_resp = ui.add_enabled(has_run, egui::Button::new("View run log"));
-                                let log_resp = if !has_run {
-                                    log_resp.on_disabled_hover_text("This model has not run yet")
-                                } else {
-                                    log_resp
-                                };
-                                if log_resp.clicked() {
-                                    ctx_action = Some((row_idx, CtxAction::ViewRunLog));
-                                    ui.close_menu();
-                                }
-
-                                ui.separator();
-
-                                // ── History ───────────────────────────────
-                                let record_resp = ui.add_enabled(has_run, egui::Button::new("View run record…"));
-                                let record_resp = if !has_run {
-                                    record_resp.on_disabled_hover_text("This model has not run yet")
-                                } else {
-                                    record_resp
-                                };
-                                if record_resp.clicked() {
-                                    ctx_action = Some((row_idx, CtxAction::ViewRunRecord));
-                                    ui.close_menu();
-                                }
-
-                                ui.separator();
-
-                                // ── Destructive ───────────────────────────
-                                if ui.add(
-                                    egui::Button::new(
-                                        egui::RichText::new("Delete…").color(theme::RED),
-                                    )
-                                    .fill(egui::Color32::TRANSPARENT),
-                                ).clicked() {
-                                    ctx_action = Some((row_idx, CtxAction::Delete));
-                                    ui.close_menu();
-                                }
+                                show_model_row_context_menu(ui, state, row, dark, &mut ctx_action);
                             });
                         });
 
@@ -835,6 +682,12 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
                         if tr.response().clicked() {
                             new_selection = Some(row.idx);
                         }
+                        // Row-level right-click — same menu as the NAME label's,
+                        // so right-clicking anywhere in the row opens it, not
+                        // just when aimed at the name text.
+                        tr.response().context_menu(|ui| {
+                            show_model_row_context_menu(ui, state, row, dark, &mut ctx_action);
+                        });
                     });
                 }
             });
@@ -872,6 +725,177 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
         if enter && should_apply_list_shortcut(other_widget_focused) {
             state.ui.active_model_pill = ModelPill::Output;
         }
+    }
+}
+
+/// Right-click menu for a model row. Attached to both the NAME label's
+/// response and the row's own response, so it opens no matter where in
+/// the row the user right-clicks.
+fn show_model_row_context_menu(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    row: &ModelRow,
+    dark: bool,
+    ctx_action: &mut Option<(usize, CtxAction)>,
+) {
+    let row_idx = row.idx;
+    let is_ref = row.is_reference;
+
+    ui.set_min_width(190.0);
+
+    // ── Run ────────────────────────────────────
+    // A submenu, not a single click — lets
+    // per-run options (covariance, trace) be
+    // checked/flipped right here instead of
+    // silently firing off whatever the Run pill
+    // last had configured. These mutate the same
+    // global `state.ui.run_*` fields the Run
+    // pill itself edits, so changes here show up
+    // there too.
+    //
+    // Estimation method is deliberately NOT
+    // editable here: the model file's own
+    // `[fit_options]` is authoritative for this
+    // row (unlike covariance/trace, which aren't
+    // tied to a specific model the way method
+    // is). If the file doesn't declare one,
+    // "Run now" is disabled — nothing to run
+    // with otherwise.
+    //
+    // Plain "Run" — no manual "▶" — `menu_button`
+    // already appends its own submenu arrow.
+    ui.menu_button("Run", |ui| {
+        ui.set_min_width(170.0);
+        let declared_method = crate::io::ferx_file::parse_fit_options(
+            &state.workspace.models[row_idx].model.source
+        ).method;
+        match &declared_method {
+            Some(m) => {
+                ui.label(egui::RichText::new(format!("Method: {m}"))
+                    .color(theme::fg2(dark)).size(11.0))
+                    .on_hover_text("Declared in this model's [fit_options] block");
+            }
+            None => {
+                ui.label(egui::RichText::new(
+                    "No estimation method declared in [fit_options]")
+                    .color(theme::ORANGE).size(11.0));
+            }
+        }
+        ui.checkbox(&mut state.ui.run_covariance, "Covariance step");
+        ui.checkbox(&mut state.ui.run_optimizer_trace, "Optimizer trace");
+
+        ui.separator();
+
+        // `resolve_data_path_for_run`, not the raw
+        // `run_data_path` — this row may never
+        // have been the *selected* model this
+        // session, so that global field may never
+        // have been auto-populated for it even
+        // though it has run (and has a data path)
+        // before.
+        let can_run = can_launch_run(
+            state.run.active_run.is_some(),
+            state.workspace.settings.ferx_binary.is_some(),
+            resolve_data_path_for_run(state, &row.stem).is_some(),
+        ) && declared_method.is_some();
+        let run_resp = ui.add_enabled(can_run, egui::Button::new("Run now"));
+        let run_resp = if !can_run {
+            run_resp.on_disabled_hover_text(
+                "A run is already active, ferx isn't configured, no \
+                 data file is selected, or this model has no \
+                 [fit_options] method declared"
+            )
+        } else {
+            run_resp
+        };
+        if run_resp.clicked() {
+            // Use the row's own declared method, not whatever
+            // `state.ui.run_method` currently holds (which may
+            // reflect a different model's last-edited value via
+            // the Run pill).
+            if let Some(m) = declared_method.clone() {
+                state.ui.run_method = m;
+            }
+            *ctx_action = Some((row_idx, CtxAction::Run));
+            ui.close_menu();
+        }
+    });
+
+    ui.separator();
+
+    // ── Model actions ─────────────────────────
+    if ui.button("Duplicate as child…").clicked() {
+        *ctx_action = Some((row_idx, CtxAction::Duplicate));
+        ui.close_menu();
+    }
+    let ref_label = if is_ref { "Clear Reference" } else { "Set as Reference" };
+    if ui.button(ref_label).clicked() {
+        *ctx_action = Some((row_idx, CtxAction::ToggleReference));
+        ui.close_menu();
+    }
+
+    // ── Compare with… (submenu) ───────────────
+    let other_models: Vec<(usize, String)> = state.workspace.models
+        .iter().enumerate()
+        .filter(|(i, m)| *i != row_idx && m.fit.is_some())
+        .map(|(i, m)| (i, m.model.stem.clone()))
+        .collect();
+    if !other_models.is_empty() {
+        ui.menu_button("Compare with…  ▶", |ui| {
+            ui.set_min_width(160.0);
+            for (_i, stem) in &other_models {
+                if ui.button(stem).clicked() {
+                    *ctx_action = Some((row_idx, CtxAction::CompareWith(stem.clone())));
+                    ui.close_menu();
+                }
+            }
+        });
+    }
+
+    ui.separator();
+
+    // Neither of these apply to a model that has never been
+    // run — greyed out rather than silently jumping to an
+    // empty History tab or a nonexistent log file.
+    let has_run = row.run_status != crate::domain::RunStatus::NotRun;
+
+    // ── File / folder ─────────────────────────
+    let log_resp = ui.add_enabled(has_run, egui::Button::new("View run log"));
+    let log_resp = if !has_run {
+        log_resp.on_disabled_hover_text("This model has not run yet")
+    } else {
+        log_resp
+    };
+    if log_resp.clicked() {
+        *ctx_action = Some((row_idx, CtxAction::ViewRunLog));
+        ui.close_menu();
+    }
+
+    ui.separator();
+
+    // ── History ───────────────────────────────
+    let record_resp = ui.add_enabled(has_run, egui::Button::new("View run record…"));
+    let record_resp = if !has_run {
+        record_resp.on_disabled_hover_text("This model has not run yet")
+    } else {
+        record_resp
+    };
+    if record_resp.clicked() {
+        *ctx_action = Some((row_idx, CtxAction::ViewRunRecord));
+        ui.close_menu();
+    }
+
+    ui.separator();
+
+    // ── Destructive ───────────────────────────
+    if ui.add(
+        egui::Button::new(
+            egui::RichText::new("Delete…").color(theme::RED),
+        )
+        .fill(egui::Color32::TRANSPARENT),
+    ).clicked() {
+        *ctx_action = Some((row_idx, CtxAction::Delete));
+        ui.close_menu();
     }
 }
 
@@ -3096,6 +3120,7 @@ fn apply_ctx_action(
                 let stem = m.model.stem.clone();
                 state.ui.duplicate_stem_buf =
                     suggest_duplicate_stem(&stem, &state.workspace.models);
+                state.ui.duplicate_description_buf = m.description().to_string();
                 state.ui.pending_duplicate = Some(idx);
             }
         }
@@ -3270,6 +3295,15 @@ fn show_duplicate_dialog(ctx: &egui::Context, state: &mut AppState) {
                 just_focused = true;
             }
 
+            ui.add_space(8.0);
+            ui.label("Description:");
+            ui.add_space(4.0);
+            ui.add(
+                egui::TextEdit::multiline(&mut state.ui.duplicate_description_buf)
+                    .desired_rows(3)
+                    .desired_width(f32::INFINITY),
+            );
+
             // Validate — name must be non-empty and not already taken.
             let new_stem = state.ui.duplicate_stem_buf.trim().to_string();
             let conflict = state.workspace.models.iter().any(|m| m.model.stem == new_stem);
@@ -3339,29 +3373,37 @@ fn show_duplicate_dialog(ctx: &egui::Context, state: &mut AppState) {
 
 fn do_duplicate(state: &mut AppState, src_idx: usize) {
     let Some(model) = state.workspace.models.get(src_idx) else { return };
-    let src_path  = model.model.path.clone();
-    let src_stem  = model.model.stem.clone();
-    let new_stem  = state.ui.duplicate_stem_buf.trim().to_string();
-    let set_child = state.ui.duplicate_set_as_child;
+    let src_path    = model.model.path.clone();
+    let src_stem    = model.model.stem.clone();
+    let new_stem    = state.ui.duplicate_stem_buf.trim().to_string();
+    let set_child   = state.ui.duplicate_set_as_child;
+    let description = state.ui.duplicate_description_buf.trim().to_string();
     let Some(dir) = src_path.parent() else { return };
     let dst_path  = dir.join(format!("{}.ferx", new_stem));
 
     match std::fs::copy(&src_path, &dst_path) {
         Ok(_) => {
-            // Establish tree lineage: persist based_on for the new model
-            // by merging into the existing meta map before the scan.
-            if set_child {
+            // Persist lineage (based_on) and/or the edited description by
+            // merging into the existing meta map before the scan. Lineage
+            // stays conditional on the checkbox specifically, independent
+            // of whether a description was also given.
+            if set_child || !description.is_empty() {
                 if let (Some(app_dir), Some(dir)) = (&state.workspace.app_dir, &state.workspace.directory) {
                     let mut meta_map = crate::io::persistence::load_model_meta(app_dir, dir);
                     let new_meta = crate::domain::ModelMeta {
-                        based_on: Some(src_stem.clone()),
+                        based_on: set_child.then(|| src_stem.clone()),
+                        comment:  description,
                         ..Default::default()
                     };
                     meta_map.insert(new_stem.clone(), new_meta);
                     let _ = save_model_meta(app_dir, dir, &meta_map);
                 }
             }
-            state.ui.status_message = format!("Created {new_stem}.ferx (child of {src_stem})");
+            state.ui.status_message = if set_child {
+                format!("Created {new_stem}.ferx (child of {src_stem})")
+            } else {
+                format!("Created {new_stem}.ferx")
+            };
             state.trigger_scan();
         }
         Err(e) => {
