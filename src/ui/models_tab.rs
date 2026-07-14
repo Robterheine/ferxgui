@@ -385,6 +385,51 @@ fn show_empty_state_no_models(ui: &mut egui::Ui, state: &AppState) {
     });
 }
 
+/// Folds `r` into `acc` via `Response::union`, so the combined response's
+/// `hovered()`/`clicked()`/`secondary_clicked()` are true if any contributing
+/// cell's were this frame.
+fn fold_response(acc: &mut Option<egui::Response>, r: egui::Response) {
+    *acc = Some(match acc.take() {
+        Some(a) => a.union(r),
+        None => r,
+    });
+}
+
+/// Draws a model-list cell's contents, then adds an explicit interactive
+/// rect spanning the whole cell and folds it into the row's aggregate
+/// response.
+///
+/// `egui_extras::TableRow`'s own per-cell `Response` — and the row-level
+/// union `TableRow::response()` built from it — only reliably reports
+/// hover/click for a cell whose content is itself an explicitly-sensing
+/// widget (confirmed by testing: a plain `ui.label(...)` in a table cell
+/// never registers a hover or click on the cell's own response, even with
+/// the table configured via `.sense(Sense::click())`). Since that's also
+/// what egui_extras' built-in hovered-row background highlight reads from,
+/// plain columns never highlighted or caught right-clicks either — only
+/// the ★ and NAME columns did, since those already carry their own
+/// `Sense::click()` label widgets. The interact rect is added *after* the
+/// cell's own content is drawn (confirmed by test to still let a widget
+/// within it, e.g. the ⚠ flag's `on_hover_text`, keep its own tooltip
+/// rather than losing hover to this wrapper — and, separately, is the
+/// order that actually registers clicks: adding the interact rect first
+/// was tried and silently failed to detect clicks/right-clicks at all).
+fn interactive_col(
+    tr: &mut egui_extras::TableRow<'_, '_>,
+    row_resp: &mut Option<egui::Response>,
+    row_left_clicked: &mut bool,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    tr.col(|ui| {
+        add_contents(ui);
+        let hit = ui.interact(ui.max_rect(), ui.id().with("row_hit"), egui::Sense::click());
+        if hit.clicked() {
+            *row_left_clicked = true;
+        }
+        fold_response(row_resp, hit);
+    });
+}
+
 fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
     let dark = ui.visuals().dark_mode;
     // ── Zero states ───────────────────────────────────────────────────────────
@@ -419,6 +464,22 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
     let mut toggle_star: Option<usize> = None;
     let mut switch_to_output: Option<usize> = None;
     let mut ctx_action: Option<(usize, CtxAction)> = None;
+
+    // `egui_extras::TableRow`'s own per-cell `Response` (and the row-level
+    // union `TableRow::response()` built from it) only reliably reports
+    // hover/click for cells whose content is itself an explicitly-sensing
+    // widget (confirmed empirically: a plain `ui.label(...)` in a table
+    // cell never registers a hover or click on the cell's own response,
+    // even with the table configured via `.sense(Sense::click())`) — this
+    // is also what egui_extras' own hovered-row background highlight reads
+    // from internally, so plain columns silently never highlight or catch
+    // right-clicks either. Every column below that isn't already its own
+    // sensing widget (★, NAME) gets an explicit whole-cell interact via
+    // `interactive_col`, and drives row-wide hover/selection/context-menu
+    // from that instead of the table's built-in (unreliable) tracking.
+    let hovered_row_id = egui::Id::new("models_tab_hovered_row");
+    let prev_hovered_row: Option<usize> = ui.data(|d| d.get_temp(hovered_row_id));
+    let mut next_hovered_row: Option<usize> = None;
 
     egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
         TableBuilder::new(ui)
@@ -455,6 +516,14 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
                     let selected = new_selection == Some(row.idx);
                     body.row(24.0, |mut tr| {
                         tr.set_selected(selected);
+                        tr.set_hovered(prev_hovered_row == Some(row.idx));
+
+                        // Aggregate of every cell's own interactive Response
+                        // this frame — used at the end of the row to drive
+                        // hover highlighting, selection, and the right-click
+                        // menu uniformly across the whole row.
+                        let mut row_resp: Option<egui::Response> = None;
+                        let mut row_left_clicked = false;
 
                         // ★
                         tr.col(|ui| {
@@ -476,12 +545,15 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
                             if star_resp.clicked() {
                                 toggle_star = Some(row.idx);
                             }
-                            // Same row-wide menu as everywhere else in the row —
-                            // this glyph's own Response would otherwise win the
-                            // hit-test over it and leave it uncovered.
-                            star_resp.context_menu(|ui| {
-                                show_model_row_context_menu(ui, state, row, dark, &mut ctx_action);
-                            });
+                            // Right-click is handled once, via the row-wide
+                            // aggregate's single `.context_menu()` attachment
+                            // at the end of the row — this response is only
+                            // folded in below, not separately attached, since
+                            // `Response::union` retains this response's own
+                            // `id`, and a *second* `.context_menu()` call
+                            // sharing that same id would re-render the menu
+                            // a second time in the same frame.
+                            fold_response(&mut row_resp, star_resp);
                         });
 
                         // NAME (coloured by run status, "(ref)" badge, context menu)
@@ -524,17 +596,16 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
                                 new_selection = Some(row.idx);
                                 switch_to_output = Some(row.idx);
                             }
-                            // ── Right-click context menu ─────────────────────
-                            // Also attached to the row's own response below, so
-                            // right-clicking anywhere in the row (not just this
-                            // label) opens the same menu.
-                            resp.context_menu(|ui| {
-                                show_model_row_context_menu(ui, state, row, dark, &mut ctx_action);
-                            });
+                            // Right-click is handled once, via the row-wide
+                            // aggregate's single `.context_menu()` attachment
+                            // at the end of the row (see the ★ column above
+                            // for why this response is only folded in, not
+                            // separately attached here too).
+                            fold_response(&mut row_resp, resp);
                         });
 
                         // DESCRIPTION
-                        tr.col(|ui| {
+                        interactive_col(&mut tr, &mut row_resp, &mut row_left_clicked, |ui| {
                             ui.add(
                                 egui::Label::new(
                                     egui::RichText::new(&row.description)
@@ -546,7 +617,7 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
                         });
 
                         // DATA — the model's own declared [data] path, blank if none.
-                        tr.col(|ui| {
+                        interactive_col(&mut tr, &mut row_resp, &mut row_left_clicked, |ui| {
                             if let Some(data_file) = &row.data_file {
                                 ui.add(
                                     egui::Label::new(
@@ -560,12 +631,12 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
                         });
 
                         // OFV
-                        tr.col(|ui| {
+                        interactive_col(&mut tr, &mut row_resp, &mut row_left_clicked, |ui| {
                             ui.label(fmt_f64_4dp(row.ofv));
                         });
 
                         // ΔOFV
-                        tr.col(|ui| {
+                        interactive_col(&mut tr, &mut row_resp, &mut row_left_clicked, |ui| {
                             let txt = fmt_f64_2dp(row.delta_ofv);
                             let color = if row.delta_ofv.is_nan() {
                                 theme::fg3(dark)
@@ -580,7 +651,7 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
                         });
 
                         // COV
-                        tr.col(|ui| {
+                        interactive_col(&mut tr, &mut row_resp, &mut row_left_clicked, |ui| {
                             match row.cov_ok {
                                 Some(true) => {
                                     ui.label(
@@ -599,12 +670,12 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
                         });
 
                         // AIC
-                        tr.col(|ui| {
+                        interactive_col(&mut tr, &mut row_resp, &mut row_left_clicked, |ui| {
                             ui.label(fmt_f64_1dp(row.aic));
                         });
 
                         // CN (orange when > 1000)
-                        tr.col(|ui| {
+                        interactive_col(&mut tr, &mut row_resp, &mut row_left_clicked, |ui| {
                             if row.cn.is_finite() && row.cn > 1000.0 {
                                 ui.label(
                                     egui::RichText::new(format!("! {:.0}", row.cn))
@@ -617,14 +688,14 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
                         });
 
                         // METHOD
-                        tr.col(|ui| {
+                        interactive_col(&mut tr, &mut row_resp, &mut row_left_clicked, |ui| {
                             ui.label(
                                 egui::RichText::new(&row.method).color(theme::fg2(dark)).size(12.0),
                             );
                         });
 
                         // IND/OBS
-                        tr.col(|ui| {
+                        interactive_col(&mut tr, &mut row_resp, &mut row_left_clicked, |ui| {
                             if row.n_subjects > 0 {
                                 ui.label(
                                     egui::RichText::new(format!(
@@ -637,17 +708,17 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
                         });
 
                         // ETA shrinkage
-                        tr.col(|ui| {
+                        interactive_col(&mut tr, &mut row_resp, &mut row_left_clicked, |ui| {
                             shrink_label(ui, row.max_eta_shrink);
                         });
 
                         // EPS shrinkage
-                        tr.col(|ui| {
+                        interactive_col(&mut tr, &mut row_resp, &mut row_left_clicked, |ui| {
                             shrink_label(ui, row.eps_shrink);
                         });
 
                         // nPAR
-                        tr.col(|ui| {
+                        interactive_col(&mut tr, &mut row_resp, &mut row_left_clicked, |ui| {
                             if row.n_parameters > 0 {
                                 ui.label(
                                     egui::RichText::new(row.n_parameters.to_string()).size(12.0),
@@ -656,7 +727,7 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
                         });
 
                         // TIME
-                        tr.col(|ui| {
+                        interactive_col(&mut tr, &mut row_resp, &mut row_left_clicked, |ui| {
                             if row.wall_time_secs > 0.0 {
                                 ui.label(
                                     egui::RichText::new(fmt_duration(row.wall_time_secs))
@@ -667,7 +738,7 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
                         });
 
                         // ⚠ boundary flag
-                        tr.col(|ui| {
+                        interactive_col(&mut tr, &mut row_resp, &mut row_left_clicked, |ui| {
                             if row.has_boundary {
                                 ui.label(
                                     egui::RichText::new("⚠").color(theme::ORANGE).size(13.0),
@@ -678,19 +749,32 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
 
                         // Row-level click — selects the model when the user clicks
                         // anywhere in the row that isn't captured by a child widget
-                        // (i.e. every column except NAME and ★).
-                        if tr.response().clicked() {
+                        // (i.e. every column except NAME and ★, which set selection
+                        // directly above).
+                        if row_left_clicked {
                             new_selection = Some(row.idx);
                         }
-                        // Row-level right-click — same menu as the NAME label's,
-                        // so right-clicking anywhere in the row opens it, not
-                        // just when aimed at the name text.
-                        tr.response().context_menu(|ui| {
-                            show_model_row_context_menu(ui, state, row, dark, &mut ctx_action);
-                        });
+                        if let Some(agg) = &row_resp {
+                            if agg.hovered() {
+                                next_hovered_row = Some(row.idx);
+                            }
+                            // Row-level right-click — same menu as the NAME
+                            // label's, so right-clicking anywhere in the row
+                            // opens it, not just when aimed at the name text.
+                            agg.context_menu(|ui| {
+                                show_model_row_context_menu(ui, state, row, dark, &mut ctx_action);
+                            });
+                        }
                     });
                 }
             });
+    });
+
+    ui.data_mut(|d| {
+        match next_hovered_row {
+            Some(idx) => d.insert_temp(hovered_row_id, idx),
+            None => { d.remove_temp::<usize>(hovered_row_id); }
+        }
     });
 
     // Apply deferred mutations.
@@ -936,6 +1020,242 @@ mod list_shortcut_tests {
         let focused = harness.ctx.memory(|m| m.focused().is_some());
         assert!(focused, "TextEdit should hold keyboard focus after request_focus()");
         assert!(!should_apply_list_shortcut(focused));
+    }
+}
+
+/// Regression coverage for the model-list row-wide interaction fix.
+///
+/// Root cause (confirmed empirically, not just by reading docs):
+/// `egui_extras::TableRow`'s own per-cell `Response` — and the row-level
+/// union `TableRow::response()` built from it — never reports hover or
+/// click for a cell whose content has no `Sense::click()` widget of its
+/// own, even with the table configured via `.sense(Sense::click())`. That
+/// meant right-click and hover-highlight only ever worked on the ★/NAME
+/// columns (which carry their own sensing Label widgets), never on any of
+/// the other fourteen plain-content columns — matching the user report
+/// "right-clicking does not result in the menu, it only works when
+/// clicking the name". These tests exercise the actual `interactive_col`/
+/// `fold_response` helpers the fix relies on, not a reimplementation.
+#[cfg(test)]
+mod interactive_col_tests {
+    use super::{egui, fold_response, interactive_col};
+    use egui_extras::{Column, TableBuilder};
+    use egui_kittest::kittest::Queryable;
+    use egui_kittest::Harness;
+
+    fn node_center(harness: &Harness<'_>, label: &str) -> egui::Pos2 {
+        let node = harness.get_by_label(label);
+        let b = node.raw_bounds().expect("node has bounds");
+        egui::pos2(((b.x0 + b.x1) / 2.0) as f32, ((b.y0 + b.y1) / 2.0) as f32)
+    }
+
+    fn secondary_click_at(harness: &mut Harness<'_>, pos: egui::Pos2) {
+        harness.input_mut().events.push(egui::Event::PointerMoved(pos));
+        harness.run();
+        harness.input_mut().events.push(egui::Event::PointerButton {
+            pos, button: egui::PointerButton::Secondary, pressed: true, modifiers: egui::Modifiers::NONE,
+        });
+        harness.run();
+        harness.input_mut().events.push(egui::Event::PointerButton {
+            pos, button: egui::PointerButton::Secondary, pressed: false, modifiers: egui::Modifiers::NONE,
+        });
+        harness.run();
+        harness.run();
+    }
+
+    fn primary_click_at(harness: &mut Harness<'_>, pos: egui::Pos2) {
+        harness.input_mut().events.push(egui::Event::PointerMoved(pos));
+        harness.run();
+        harness.input_mut().events.push(egui::Event::PointerButton {
+            pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE,
+        });
+        harness.run();
+        harness.input_mut().events.push(egui::Event::PointerButton {
+            pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE,
+        });
+        harness.run();
+    }
+
+    /// Builds a 2-column, 1-row table: col 0 is a NAME-style label with its
+    /// own `Sense::click()` (the pre-existing, already-working pattern);
+    /// col 1 is a plain, non-interactive label wrapped in `interactive_col`
+    /// (what every non-NAME/★ column becomes under the fix).
+    /// `name_attached_directly`: mirrors production's ★/NAME columns, whose
+    /// own `Response` is folded into the row aggregate via `fold_response`
+    /// — never *also* given a separate `.context_menu()` of its own (see
+    /// the comment on the ★ column in `show_model_list`: `Response::union`
+    /// retains the first-folded response's `id`, so a second, separate
+    /// `.context_menu()` sharing that id would re-render the menu body a
+    /// second time in the same frame). Passing `true` here reproduces that
+    /// now-fixed double-attachment bug, for the regression test below.
+    fn build(
+        menu_open_count: std::rc::Rc<std::cell::Cell<u32>>,
+        left_clicked: std::rc::Rc<std::cell::Cell<bool>>,
+        tooltip_cell_hovered: std::rc::Rc<std::cell::Cell<bool>>,
+        name_attached_directly: bool,
+    ) -> Harness<'static> {
+        let mut harness = Harness::new_ui(move |ui| {
+            TableBuilder::new(ui)
+                .sense(egui::Sense::click())
+                .column(Column::exact(80.0))
+                .column(Column::exact(80.0))
+                .body(|mut body| {
+                    body.row(24.0, |mut tr| {
+                        let mut row_resp: Option<egui::Response> = None;
+                        let mut row_left_clicked = false;
+
+                        let mut name_resp = None;
+                        tr.col(|ui| {
+                            name_resp = Some(ui.add(
+                                egui::Label::new("modelname").sense(egui::Sense::click()),
+                            ));
+                        });
+                        let name_resp = name_resp.expect("col closure always runs");
+                        if name_attached_directly {
+                            let mc = menu_open_count.clone();
+                            name_resp.context_menu(move |ui| {
+                                mc.set(mc.get() + 1);
+                                ui.label("menu-body");
+                            });
+                        }
+                        fold_response(&mut row_resp, name_resp);
+
+                        interactive_col(&mut tr, &mut row_resp, &mut row_left_clicked, |ui| {
+                            let r = ui.label("12.34");
+                            tooltip_cell_hovered.set(r.hovered());
+                        });
+
+                        if row_left_clicked {
+                            left_clicked.set(true);
+                        }
+                        if let Some(agg) = &row_resp {
+                            agg.context_menu(|ui| {
+                                menu_open_count.set(menu_open_count.get() + 1);
+                                ui.label("menu-body");
+                            });
+                        }
+                    });
+                });
+        });
+        harness.run();
+        harness
+    }
+
+    #[test]
+    fn right_click_on_plain_cell_opens_row_menu() {
+        let menu_open_count = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let left_clicked = std::rc::Rc::new(std::cell::Cell::new(false));
+        let tooltip_hover = std::rc::Rc::new(std::cell::Cell::new(false));
+        let mut harness = build(menu_open_count.clone(), left_clicked, tooltip_hover, false);
+
+        let pos = node_center(&harness, "12.34");
+        secondary_click_at(&mut harness, pos);
+
+        assert!(
+            menu_open_count.get() > 0,
+            "right-click on a plain (non-NAME) cell must open the row's context menu"
+        );
+    }
+
+    #[test]
+    fn left_click_on_plain_cell_registers_as_a_click() {
+        let menu_open_count = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let left_clicked = std::rc::Rc::new(std::cell::Cell::new(false));
+        let tooltip_hover = std::rc::Rc::new(std::cell::Cell::new(false));
+        let mut harness = build(menu_open_count, left_clicked.clone(), tooltip_hover, false);
+
+        let pos = node_center(&harness, "12.34");
+        primary_click_at(&mut harness, pos);
+
+        assert!(
+            left_clicked.get(),
+            "left-click on a plain (non-NAME) cell must register via interactive_col's response"
+        );
+    }
+
+    #[test]
+    fn hover_still_reaches_content_added_after_the_interact_rect() {
+        // Guards against the interact rect stealing hover from content
+        // drawn earlier in the same cell — the real-world case being the
+        // ⚠ column's `on_hover_text`, which must still see
+        // `hovered() == true` on its own Label response even though
+        // `interactive_col` adds its whole-cell interact rect afterwards.
+        let menu_open_count = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let left_clicked = std::rc::Rc::new(std::cell::Cell::new(false));
+        let tooltip_hover = std::rc::Rc::new(std::cell::Cell::new(false));
+        let mut harness = build(menu_open_count, left_clicked, tooltip_hover.clone(), false);
+
+        let pos = node_center(&harness, "12.34");
+        harness.input_mut().events.push(egui::Event::PointerMoved(pos));
+        harness.run();
+        harness.run();
+
+        assert!(
+            tooltip_hover.get(),
+            "content drawn before the wrapper's interact rect must still see hovered() == true"
+        );
+    }
+
+    /// Right-clicks the given position and returns how many times the menu
+    /// body ran on the frame right after the click settles, with the menu
+    /// still open and no further input — i.e. the per-frame invocation
+    /// count while the popup is simply staying open and redrawing.
+    fn menu_invocations_per_frame_while_open(
+        harness: &mut Harness<'_>,
+        menu_open_count: &std::rc::Rc<std::cell::Cell<u32>>,
+        pos: egui::Pos2,
+    ) -> u32 {
+        secondary_click_at(harness, pos);
+        let before = menu_open_count.get();
+        harness.run();
+        menu_open_count.get() - before
+    }
+
+    #[test]
+    fn right_click_on_name_equivalent_cell_opens_menu_exactly_once_per_frame() {
+        // The real, current production pattern: NAME's response is only
+        // folded into the row aggregate (`name_attached_directly: false`),
+        // never *also* given its own separate `.context_menu()`. This is
+        // the actual regression guard — it must stay at exactly 1.
+        let menu_open_count = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let left_clicked = std::rc::Rc::new(std::cell::Cell::new(false));
+        let tooltip_hover = std::rc::Rc::new(std::cell::Cell::new(false));
+        let mut harness = build(menu_open_count.clone(), left_clicked, tooltip_hover, false);
+
+        let pos = node_center(&harness, "modelname");
+        let delta = menu_invocations_per_frame_while_open(&mut harness, &menu_open_count, pos);
+
+        assert_eq!(
+            delta, 1,
+            "menu body must run exactly once per frame while open, not twice \
+             (this is the double-attachment bug caught in review: folding a \
+             response into the row aggregate via `fold_response` AND giving \
+             it its own separate `.context_menu()` re-renders the menu twice, \
+             because `Response::union` keeps the first-folded response's \
+             `id`, so both attachments share an id and both pass `MenuRoot`'s \
+             'is this my menu?' identity check)"
+        );
+    }
+
+    #[test]
+    fn direct_attachment_alongside_the_aggregate_would_have_caught_the_bug() {
+        // Sanity-checks the assertion methodology above: deliberately
+        // reproduce the now-fixed double-attachment (`name_attached_directly:
+        // true`, matching what ★/NAME briefly did before this was caught in
+        // review) and confirm it actually manifests as a doubled per-frame
+        // count, rather than the test above passing by coincidence.
+        let menu_open_count = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let left_clicked = std::rc::Rc::new(std::cell::Cell::new(false));
+        let tooltip_hover = std::rc::Rc::new(std::cell::Cell::new(false));
+        let mut harness = build(menu_open_count.clone(), left_clicked, tooltip_hover, true);
+
+        let pos = node_center(&harness, "modelname");
+        let delta = menu_invocations_per_frame_while_open(&mut harness, &menu_open_count, pos);
+
+        assert_eq!(
+            delta, 2,
+            "expected the reintroduced double-attachment to double the per-frame menu count"
+        );
     }
 }
 
@@ -4082,4 +4402,3 @@ fn compare_param_rows(
         ui.end_row();
     }
 }
-
