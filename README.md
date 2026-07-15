@@ -4,6 +4,8 @@ A desktop application for building and evaluating population pharmacokinetic / p
 
 Built with Rust + [egui](https://github.com/emilk/egui). Runs on macOS, Windows, and Linux.
 
+![FeRx GUI — VPC tab](screenshot/ferxguiscreenshot.png)
+
 ---
 
 ## Features
