@@ -144,10 +144,15 @@ if (!is.null(cfg$cache_path) && file.exists(cfg$cache_path)) {
     # racing on the same cache path) only ever sees the old complete file or
     # the new complete file, never a partial write.
     tmp_cache <- paste0(cfg$cache_path, ".tmp.", Sys.getpid())
-    tryCatch({
+    # invisible() matters here: file.rename() returns a visible logical, and
+    # this whole if/else is itself a bare top-level statement, so its result
+    # would otherwise auto-print (e.g. "[1] TRUE") to stdout ahead of this
+    # script's intended output — breaking a strict JSON parse on the Rust
+    # side the moment a fresh (uncached) simulation is computed.
+    invisible(tryCatch({
       saveRDS(list(obs = obs, sim = sim_dat), tmp_cache)
       file.rename(tmp_cache, cfg$cache_path)
-    }, error = function(e) { unlink(tmp_cache); NULL })
+    }, error = function(e) { unlink(tmp_cache); NULL }))
   }
 }
 
@@ -593,7 +598,12 @@ if (use_gg) {
   mk_gof(x1,      "CWRES",  x1,      "CWRES", refline = "zero")
   mk_gof(x2,      "CWRES",  x2,      "CWRES", refline = "zero")
   par(op)
-  dev.off()
+  # invisible() matters here: dev.off() visibly returns the newly-current
+  # device's number/name (e.g. "null device \n 1"), which would otherwise
+  # auto-print ahead of cat(output_path) below — and export_gof() on the
+  # Rust side treats the *entire* captured stdout as the output path, so
+  # that stray text would corrupt the path it hands back.
+  invisible(dev.off())
 }
 cat(output_path)
 "#;
@@ -832,10 +842,15 @@ if (!is.null(cfg$cache_path) && file.exists(cfg$cache_path)) {
     # racing on the same cache path) only ever sees the old complete file or
     # the new complete file, never a partial write.
     tmp_cache <- paste0(cfg$cache_path, ".tmp.", Sys.getpid())
-    tryCatch({
+    # invisible() matters here: file.rename() returns a visible logical, and
+    # this whole if/else is itself a bare top-level statement, so its result
+    # would otherwise auto-print (e.g. "[1] TRUE") to stdout ahead of this
+    # script's intended output — breaking a strict JSON parse on the Rust
+    # side the moment a fresh (uncached) simulation is computed.
+    invisible(tryCatch({
       saveRDS(list(obs = obs, sim = sim_dat), tmp_cache)
       file.rename(tmp_cache, cfg$cache_path)
-    }, error = function(e) { unlink(tmp_cache); NULL })
+    }, error = function(e) { unlink(tmp_cache); NULL }))
   }
 }
 

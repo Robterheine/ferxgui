@@ -270,6 +270,15 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.9.9 (2026-07-15) — fixed VPC/GOF export bugs where stray R console output corrupted the result
+
+**Fixed: VPC compute failed with a JSON parse error on any model computed for the first time**
+- R's `file.rename()` returns a value visibly, and the bridge script's cache-write step never captured it — so on the very first VPC compute for a given model (before a cache existed), R auto-printed that stray value ahead of the actual result, corrupting what's supposed to be a clean JSON payload. Already-cached recomputes never hit this path, which is why it could look intermittent. Verified against a real model and dataset, before and after the fix.
+- The same duplicated code in the "Edit and execute R script" popup's default script had the identical bug — fixed there too, even though it wasn't yet causing a visible failure.
+
+**Fixed: a latent bug in the base-R GOF export fallback (used only when `ggplot2`/`patchwork` aren't installed)**
+- `dev.off()` also returns a value visibly, which would have corrupted the exported figure's returned path the same way. Verified end-to-end with real prediction data.
+
 ### v0.9.8 (2026-07-14) — the reference model is now remembered across restarts
 
 **Fixed: "Set as Reference" was forgotten every time ferxgui restarted**
