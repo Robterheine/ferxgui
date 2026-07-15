@@ -1622,11 +1622,10 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
     let stem = state.workspace.models[idx].model.stem.clone();
 
     // Auto-populate the data path from the most recent run for this model
-    // so the Run button is ready immediately after restart. Falls back to
-    // the model's own declared `[data]` path when there's no run history
-    // yet (e.g. a freshly duplicated child model) — the model already
-    // names its dataset, so requiring a manual re-selection of the same
-    // file would be redundant.
+    // so the Run button is ready immediately after restart. Only used as a
+    // fallback when the model itself declares no `[data]` path (see
+    // `model_declared_path` below, which takes priority and is kept in sync
+    // with `run_data_path` every frame when present).
     if state.ui.run_data_path.is_none() {
         state.ui.run_data_path = state.run.run_history
             .iter()
@@ -1635,8 +1634,19 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
                 r.model_stem == stem
                     && r.data_path.as_ref().is_some_and(|p| p.exists())
             })
-            .and_then(|r| r.data_path.clone())
-            .or_else(|| declared_data_path(state, &stem));
+            .and_then(|r| r.data_path.clone());
+    }
+
+    // The model's own declared `[data]` path, resolved to an absolute path
+    // if it exists. When present, this is the *only* source of truth for
+    // this model's data file — `run_data_path` is a single field shared
+    // across every model, so leaving it user-editable here as well let a
+    // manual choice (or an auto-populated one) for a *different* model
+    // silently carry over when switching to this one, and fit it against
+    // the wrong dataset with no visible sign anything was wrong.
+    let model_declared_path = declared_data_path(state, &stem);
+    if let Some(declared) = &model_declared_path {
+        state.ui.run_data_path = Some(declared.clone());
     }
 
     // Estimation method is not user-editable here — the model's own
@@ -1669,34 +1679,51 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
                     );
                     ui.add_space(6.0);
 
-                    // Data file.
+                    // Data file. Read-only (no Browse override) when the model
+                    // declares its own [data] path — matches how Method below
+                    // is read-only when [fit_options] declares one — so this
+                    // model always runs against the dataset it actually names,
+                    // never a stale choice left over from a different model.
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("Data file:").color(theme::fg2(dark)).size(12.0));
-                        let data_str = state
-                            .ui
-                            .run_data_path
-                            .as_ref()
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_default();
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(if data_str.is_empty() {
-                                    "— not set —"
-                                } else {
-                                    &data_str
-                                })
-                                .color(if data_str.is_empty() { theme::fg3(dark) } else { theme::fg(dark) })
-                                .size(12.0)
-                                .monospace(),
+                        if let Some(declared) = &model_declared_path {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(declared.display().to_string())
+                                        .color(theme::fg(dark))
+                                        .size(12.0)
+                                        .monospace(),
+                                )
+                                .truncate(),
                             )
-                            .truncate(),
-                        );
-                        if ui.small_button("Browse…").clicked() {
-                            if let Some(p) = rfd::FileDialog::new()
-                                .add_filter("CSV / NONMEM", &["csv", "txt"])
-                                .pick_file()
-                            {
-                                state.ui.run_data_path = Some(p);
+                            .on_hover_text("Declared in this model's [data] block");
+                        } else {
+                            let data_str = state
+                                .ui
+                                .run_data_path
+                                .as_ref()
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_default();
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(if data_str.is_empty() {
+                                        "— not set —"
+                                    } else {
+                                        &data_str
+                                    })
+                                    .color(if data_str.is_empty() { theme::fg3(dark) } else { theme::fg(dark) })
+                                    .size(12.0)
+                                    .monospace(),
+                                )
+                                .truncate(),
+                            );
+                            if ui.small_button("Browse…").clicked() {
+                                if let Some(p) = rfd::FileDialog::new()
+                                    .add_filter("CSV / NONMEM", &["csv", "txt"])
+                                    .pick_file()
+                                {
+                                    state.ui.run_data_path = Some(p);
+                                }
                             }
                         }
                     });
@@ -2233,7 +2260,14 @@ mod can_launch_run_tests {
 /// `run_data_path` as unset and show as disabled even though that row has
 /// run (and has a data path) before.
 fn resolve_data_path_for_run(state: &AppState, stem: &str) -> Option<std::path::PathBuf> {
-    state.ui.run_data_path.clone()
+    // `stem`'s own declared `[data]` path (if it resolves) comes first and
+    // always wins — `run_data_path` is a single field shared across every
+    // model (reflecting whichever model is currently *viewed* in the Run
+    // tab, not necessarily `stem`, since this also serves the right-click
+    // "Run now" action on a row that may not be the selected one), so
+    // checking it before `stem`'s own declaration risked launching `stem`
+    // against a different model's dataset.
+    declared_data_path(state, stem)
         .or_else(|| {
             state.run.run_history
                 .iter()
@@ -2241,7 +2275,7 @@ fn resolve_data_path_for_run(state: &AppState, stem: &str) -> Option<std::path::
                 .find(|r| r.model_stem == stem && r.data_path.as_ref().is_some_and(|p| p.exists()))
                 .and_then(|r| r.data_path.clone())
         })
-        .or_else(|| declared_data_path(state, stem))
+        .or_else(|| state.ui.run_data_path.clone())
 }
 
 /// Resolves a model's own declared `[data]` path — verbatim, relative to the
@@ -2347,6 +2381,49 @@ mod resolve_data_path_for_run_tests {
         });
 
         assert_eq!(resolve_data_path_for_run(&state, "model_a"), Some(data_file));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn own_declared_data_path_wins_over_a_stale_global_path_from_a_different_model() {
+        // Regression test for a real bug report: `run_data_path` reflects
+        // whichever model is currently *viewed* in the Run tab, which is not
+        // necessarily `stem` (this function also serves the right-click "Run
+        // now" action on a different row). Right-clicking a model that
+        // declares its own dataset must use *that* dataset, not silently
+        // fit against whatever a different model's data file happened to be.
+        let dir = std::env::temp_dir().join(format!(
+            "ferxgui_declared_data_path_precedence_test_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let correct_file = dir.join("tacroped05.csv");
+        std::fs::write(&correct_file, "ID,TIME,DV\n").unwrap();
+        let stale_file = dir.join("tacroped04.csv");
+        std::fs::write(&stale_file, "ID,TIME,DVUGL\n").unwrap();
+
+        let mut state = AppState::new();
+        // Simulate the Run tab currently showing a *different* model, whose
+        // (stale, wrong-for-this-model) data file is what run_data_path holds.
+        state.ui.run_data_path = Some(stale_file);
+        state.workspace.models.push(crate::domain::ModelEntry {
+            model: crate::domain::FerxModel {
+                path: dir.join("tacroped53.ferx"),
+                stem: "tacroped53".to_string(),
+                source: String::new(),
+                params: Default::default(),
+                created_at: None,
+                data_path: Some("tacroped05.csv".to_string()),
+            },
+            fitrx_path: None,
+            fit: None,
+            fit_parse_error: None,
+            meta: Default::default(),
+            is_stale: false,
+        });
+
+        assert_eq!(resolve_data_path_for_run(&state, "tacroped53"), Some(correct_file));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

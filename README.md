@@ -272,6 +272,13 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.9.11 (2026-07-15) — fixed a run silently using the wrong dataset after switching models
+
+**Fixed: the Run tab's data file could silently carry over from a previously viewed model**
+- "Data file" was a single field shared across every model, only auto-filling once per session. Switching from one model to another didn't re-check whether the new model's own dataset differed — so a run could silently launch against a completely different, previously-selected file, with no visible sign anything was wrong.
+- When a model declares its own `[data] path=...`, the Run tab now shows it as read-only (matching how "Method" already works when `[fit_options]` declares one) — no stale file to carry over, since there's nothing left to override. The manual "Browse…" picker only appears for models with no declared dataset.
+- The right-click "Run now" action had the same underlying issue from a different angle and is fixed the same way: a model's own declared dataset now always takes priority over whatever the Run tab happens to be showing for a different model.
+
 ### v0.9.10 (2026-07-15) — the Files tab now follows the active project directory
 
 **Fixed: switching projects in the Models tab didn't switch the Files tab**
