@@ -1071,6 +1071,33 @@ mod reference_model_persistence_tests {
 }
 
 #[cfg(test)]
+mod set_directory_tests {
+    use super::AppState;
+
+    /// Regression test for "switching projects in the Models tab doesn't
+    /// switch the Files tab": `files_cwd` previously only auto-initialized
+    /// from `workspace.directory` once (the first time it was `None`), so a
+    /// later project switch left Files silently showing the old directory.
+    #[test]
+    fn switching_directory_follows_in_the_files_tab() {
+        let mut state = AppState::new();
+        let first = std::env::temp_dir().join("ferxgui_set_directory_test_a");
+        let second = std::env::temp_dir().join("ferxgui_set_directory_test_b");
+
+        state.set_directory(first.clone());
+        assert_eq!(state.ui.files_cwd, Some(first));
+
+        // Simulate having navigated deeper into the first project's Files tab.
+        state.ui.files_cwd = Some(std::env::temp_dir().join("ferxgui_set_directory_test_a/sub"));
+        state.ui.files_back_stack.push(std::env::temp_dir().join("ferxgui_set_directory_test_a"));
+
+        state.set_directory(second.clone());
+        assert_eq!(state.ui.files_cwd, Some(second));
+        assert!(state.ui.files_back_stack.is_empty());
+    }
+}
+
+#[cfg(test)]
 mod run_state_log_tests {
     use super::RunState;
 
@@ -1506,13 +1533,21 @@ impl AppState {
     /// Set the working directory and immediately trigger a scan.
     pub fn set_directory(&mut self, dir: PathBuf) {
         self.workspace.directory = Some(dir.clone());
-        self.workspace.settings.working_directory = Some(dir);
+        self.workspace.settings.working_directory = Some(dir.clone());
         if let Some(warn) = self.workspace.save_settings() {
             self.ui.status_message = warn;
         }
         self.trigger_scan();
         // Close any in-progress bookmark dialog — it holds a path for the old directory.
         self.ui.pending_bookmark = None;
+        // Follow the new workspace directory in the Files tab too — otherwise
+        // switching projects here left Files silently showing the *previous*
+        // project's directory, since `files_cwd` only ever auto-initializes
+        // once (the first time it's `None`), never re-synced afterward.
+        self.ui.files_cwd = Some(dir);
+        self.ui.files_selected = None;
+        self.ui.files_view_mode = crate::state::FilesViewMode::Empty;
+        self.ui.files_back_stack.clear();
     }
 
     /// Reference model OFV for ΔOFV column.

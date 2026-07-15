@@ -272,6 +272,11 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.9.10 (2026-07-15) — the Files tab now follows the active project directory
+
+**Fixed: switching projects in the Models tab didn't switch the Files tab**
+- The Files tab's own directory only ever picked up the workspace directory once, the first time it was unset (a fresh app launch). Switching to a different project afterward — via the folder picker, a bookmark, or the Projects dropdown — updated the Models tab but left Files silently showing whichever directory it had last been pointed at. Switching projects now also resets the Files tab to the new directory (clearing its stale selection and back-history from the previous project), so its contents can be browsed immediately without manually re-navigating.
+
 ### v0.9.9 (2026-07-15) — fixed VPC/GOF export bugs where stray R console output corrupted the result
 
 **Fixed: VPC compute failed with a JSON parse error on any model computed for the first time**
