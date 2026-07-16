@@ -267,6 +267,8 @@ pub struct VpcOpts {
     pub pi_hi: f64,
     pub ci_lo: f64,
     pub ci_hi: f64,
+    /// Independent variable (VPC x-axis / binning variable): "time", "tad", or "tafd".
+    pub idv: String,
     /// Binning method passed to the vpc package.
     pub bins_type: String,
     pub n_bins: u32,
@@ -329,6 +331,7 @@ impl Default for VpcOpts {
             pi_hi: 0.95,
             ci_lo: 0.05,
             ci_hi: 0.95,
+            idv: "time".to_string(),
             bins_type: "jenks".to_string(),
             n_bins: 8,
             manual_bins: String::new(),
@@ -1104,6 +1107,14 @@ mod set_directory_tests {
     #[test]
     fn switching_directory_follows_in_the_files_tab() {
         let mut state = AppState::new();
+        // `AppState::new()` loads the developer's REAL `~/.ferxgui` app dir
+        // (via `app_dir()`), and `set_directory` below persists to it
+        // (`Workspace::save_settings()` writes `settings.json` whenever
+        // `app_dir` is `Some`). Without clearing it here, every `cargo test`
+        // run overwrote the developer's real working-directory setting with
+        // this test's temp path — `save_settings()` is a no-op when
+        // `app_dir` is `None`, which is exactly what we want for a test.
+        state.workspace.app_dir = None;
         let first = std::env::temp_dir().join("ferxgui_set_directory_test_a");
         let second = std::env::temp_dir().join("ferxgui_set_directory_test_b");
 
@@ -1607,5 +1618,13 @@ mod vpc_theme_tests {
         assert_eq!(t.obs_median_style, VpcLineStyle::Solid);
         assert_eq!(t.obs_ci_style, VpcLineStyle::Dashed);
         assert!(t.bin_sep_show);
+    }
+
+    #[test]
+    fn default_idv_is_time() {
+        // The VPC bridge hardcoded TIME as the x-axis before this field
+        // existed; the default must reproduce that behavior unchanged.
+        use super::VpcOpts;
+        assert_eq!(VpcOpts::default().idv, "time");
     }
 }

@@ -112,6 +112,109 @@ emit_error <- function(kind, msg) {
   quit(save = "no", status = 0)
 }
 
+# Attaches an observed-side column (`col`) onto every simulated replicate by
+# ROW POSITION. ferx_simulate() returns each observed row once per replicate,
+# in the same row order as the fit's sdtab — verified element-wise below
+# rather than assumed. A key-based merge cannot work here: (id, time, cmt) is
+# legitimately non-unique in multi-occasion data (EVID=4 resets restart the
+# time course, so one subject can have two observations at the same TIME with
+# different TADs), and merging on it would both misattribute values and fan
+# the simulated rows out. Attaching by position keeps each observation's own
+# value and structurally cannot change the row count.
+# `fail(kind, msg)` reports the problem the caller's way.
+attach_from_obs <- function(obs, sim_dat, col, context, fail) {
+  if (!"sim" %in% names(sim_dat))
+    fail(paste0(context, "_no_sim_col"), paste0(
+      "Cannot attach '", col, "' to the simulated data: no 'sim' replicate column ",
+      "was returned by ferx_simulate()."))
+  keys <- intersect(c("id", "time", "cmt"), intersect(names(obs), names(sim_dat)))
+  out  <- sim_dat
+  out[[col]] <- rep(NA_real_, nrow(sim_dat))
+  for (s in unique(sim_dat$sim)) {
+    idx <- which(sim_dat$sim == s)
+    if (length(idx) != nrow(obs))
+      fail(paste0(context, "_row_count_mismatch"), paste0(
+        "Cannot attach '", col, "' to the simulated data: replicate ", s, " has ",
+        length(idx), " rows but the observed data has ", nrow(obs),
+        ". ferx_simulate() is expected to return each observed row once per replicate."))
+    for (k in keys) {
+      # id can come back as character from ferx_simulate() while sdtab has it
+      # as integer, so only compare numerically when BOTH sides are numeric.
+      okk <- if (is.numeric(obs[[k]]) && is.numeric(sim_dat[[k]]))
+               isTRUE(all.equal(sim_dat[[k]][idx], obs[[k]], tolerance = 1e-9))
+             else identical(as.character(sim_dat[[k]][idx]), as.character(obs[[k]]))
+      if (!okk)
+        fail(paste0(context, "_not_aligned"), paste0(
+          "Cannot attach '", col, "' to the simulated data: column '", k,
+          "' in replicate ", s, " does not match the observed data row-for-row. ",
+          "ferx_simulate() is expected to return the observed rows in sdtab order; ",
+          "attaching by position would misattribute values."))
+    }
+    out[[col]][idx] <- obs[[col]]
+  }
+  out
+}
+
+# Attaches a covariate column (`col`) from the raw input CSV onto `obs`, for
+# use as the VPC independent variable when `col` isn't a native sdtab column.
+# This is the ONLY source for covariates not declared in the model's
+# [covariates] block — those never appear in fit$covtab at all, and fit$sdtab
+# carries no covariates whatsoever, declared or not. Verifies element-wise
+# alignment against `obs` (id/time/dv) with type-tolerant comparisons before
+# trusting the CSV's row order matches sdtab's, rather than assuming it —
+# read.csv() can silently type a numeric column (e.g. DV with "." for missing
+# values on dose rows) as character, and the real risk this guards against is
+# missing a genuine mismatch when the wrong data file is selected.
+attach_from_raw <- function(obs, csv_path, col, context, fail) {
+  raw <- tryCatch({ d <- read.csv(csv_path); names(d) <- tolower(names(d)); d },
+                   error = function(e) NULL)
+  if (is.null(raw))
+    fail(paste0(context, "_raw_read_failed"), paste0(
+      "Could not read the data file '", csv_path, "' to attach '", col, "'."))
+  if (!col %in% names(raw))
+    fail(paste0(context, "_raw_col_missing"), paste0(
+      "Column '", col, "' not found in the data file '", csv_path, "'."))
+
+  # Filter to observation rows, the same rows fit$sdtab is built from: EVID
+  # == 0 and (no MDV column, or MDV == 0) — stricter than EVID==0 alone
+  # against EVID=0/MDV=1 rows (observations excluded from the fit). No EVID
+  # column at all means every row is treated as an observation.
+  if ("evid" %in% names(raw)) {
+    keep <- raw$evid == 0
+    if ("mdv" %in% names(raw)) keep <- keep & (raw$mdv == 0)
+    raw <- raw[keep, , drop = FALSE]
+  }
+
+  if (nrow(raw) != nrow(obs))
+    fail(paste0(context, "_raw_row_mismatch"), paste0(
+      "Cannot attach '", col, "' from the data file: after filtering to observation rows it has ",
+      nrow(raw), " rows but the fit output (sdtab) has ", nrow(obs), " rows. The data file may ",
+      "not match the one the fit was built from (e.g. edited afterward, or a different file selected)."))
+
+  type_tolerant_equal <- function(a, b) {
+    an <- suppressWarnings(as.numeric(as.character(a)))
+    bn <- suppressWarnings(as.numeric(as.character(b)))
+    if (!anyNA(an) && !anyNA(bn)) isTRUE(all.equal(an, bn, tolerance = 1e-9))
+    else identical(as.character(a), as.character(b))
+  }
+  for (k in intersect(c("id", "time", "dv"), intersect(names(obs), names(raw)))) {
+    if (!type_tolerant_equal(raw[[k]], obs[[k]]))
+      fail(paste0(context, "_raw_not_aligned"), paste0(
+        "Cannot attach '", col, "' from the data file: column '", k,
+        "' does not match the fit output (sdtab) row-for-row. The data file may not match ",
+        "the one the fit was built from."))
+  }
+
+  covariate <- suppressWarnings(as.numeric(as.character(raw[[col]])))
+  if (all(is.na(covariate)))
+    fail(paste0(context, "_not_numeric"), paste0(
+      "Column '", col, "' is not numeric and cannot be used as the VPC x-axis. ",
+      "Use Stratification instead for categorical covariates."))
+
+  obs[[col]] <- covariate
+  obs
+}
+
 if (!requireNamespace("jsonlite", quietly = TRUE))
   stop("jsonlite package not available")
 if (!requireNamespace("ferx", quietly = TRUE))
@@ -194,21 +297,41 @@ if (!is.null(cfg$stratify) && length(cfg$stratify) > 0) {
   }
 }
 
+# ---- Independent variable (VPC x-axis / binning variable) ------------------
+# TAD/TAFD are properties of the dosing design — the same value for a given
+# observation in every replicate — so attaching one from obs is exact. Any
+# column already on obs (sdtab) is resolved the same way, so this isn't
+# hardcoded to {time, tad, tafd} and picks up whatever sdtab exposes.
+# Anything else is tried as a covariate from the raw input CSV instead —
+# covariates never appear in fit$sdtab, declared in the model or not.
+idv_col <- if (!is.null(cfg$idv) && nchar(trimws(cfg$idv)) > 0) tolower(trimws(cfg$idv)) else "time"
+if (!idv_col %in% names(obs)) {
+  raw_hdr <- tryCatch({ d <- read.csv(cfg$data_path, nrows = 1); tolower(names(d)) }, error = function(e) NULL)
+  if (is.null(raw_hdr) || !(idv_col %in% raw_hdr)) {
+    emit_error("idv_not_found", paste0(
+      "Independent variable '", idv_col, "' not found in the fit output (sdtab) or the data file. ",
+      "Available sdtab columns: ", paste(names(obs), collapse = ", "), ". ",
+      "Available data file columns: ",
+      if (!is.null(raw_hdr)) paste(raw_hdr, collapse = ", ") else "(could not read data file)"))
+  }
+  obs <- attach_from_raw(obs, cfg$data_path, idv_col, "idv", emit_error)
+}
+if (!idv_col %in% names(sim_dat)) {
+  sim_dat <- attach_from_obs(obs, sim_dat, idv_col, "idv", emit_error)
+}
+
 # ---- pcVPC: expose PRED from sdtab to the vpc package ---------------------
-obs_cols_list <- list(dv = "dv", idv = "time", id = "id")
-sim_cols_list <- list(dv = dv_col, idv = "time", id = "id", sim = "sim")
+obs_cols_list <- list(dv = "dv",  idv = idv_col, id = "id")
+sim_cols_list <- list(dv = dv_col, idv = idv_col, id = "id", sim = "sim")
 if (isTRUE(cfg$pred_corr)) {
   if ("pred" %in% names(obs)) {
     obs_cols_list$pred <- "pred"
     if (!"pred" %in% names(sim_dat)) {
       # vpc::calc_pred_corr_continuous() requires PRED on every simulated
       # replicate too, not just the observed data — ferx_simulate()'s own
-      # output has no PRED column, so merge in the fit's per-observation
-      # PRED (constant across replicates for a given id/time, same as any
-      # other population prediction).
-      key      <- intersect(c("id", "time"), names(obs))
-      pred_map <- unique(obs[, c(key, "pred"), drop = FALSE])
-      sim_dat  <- merge(sim_dat, pred_map, by = key, all.x = TRUE)
+      # output has no PRED column, so attach the fit's per-observation PRED
+      # (the same value across replicates, same idea as the idv attach above).
+      sim_dat <- attach_from_obs(obs, sim_dat, "pred", "pred", emit_error)
     }
     sim_cols_list$pred <- "pred"
   } else {
@@ -260,7 +383,7 @@ db <- if (identical(vpc_type, "censored")) {
   )), error = function(e) emit_error("vpc_failed", conditionMessage(e)))
 }
 
-obs_pts <- data.frame(time = obs[["time"]], dv = obs[["dv"]])
+obs_pts <- data.frame(x = obs[[idv_col]], dv = obs[["dv"]])
 
 result <- list(
   vpc_dat     = db$vpc_dat,
@@ -831,6 +954,111 @@ if (!requireNamespace("ggplot2", quietly = TRUE)) stop("The 'ggplot2' package is
 
 suppressMessages(suppressWarnings({ library(ferx); library(vpc); library(ggplot2) }))
 
+# Attaches an observed-side column (`col`) onto every simulated replicate by
+# ROW POSITION. ferx_simulate() returns each observed row once per replicate,
+# in the same row order as the fit's sdtab — verified element-wise below
+# rather than assumed. A key-based merge cannot work here: (id, time, cmt) is
+# legitimately non-unique in multi-occasion data (EVID=4 resets restart the
+# time course, so one subject can have two observations at the same TIME with
+# different TADs), and merging on it would both misattribute values and fan
+# the simulated rows out. Attaching by position keeps each observation's own
+# value and structurally cannot change the row count.
+# `fail(kind, msg)` reports the problem the caller's way (this script raises
+# an R condition rather than emitting a JSON error object).
+attach_from_obs <- function(obs, sim_dat, col, context, fail) {
+  if (!"sim" %in% names(sim_dat))
+    fail(paste0(context, "_no_sim_col"), paste0(
+      "Cannot attach '", col, "' to the simulated data: no 'sim' replicate column ",
+      "was returned by ferx_simulate()."))
+  keys <- intersect(c("id", "time", "cmt"), intersect(names(obs), names(sim_dat)))
+  out  <- sim_dat
+  out[[col]] <- rep(NA_real_, nrow(sim_dat))
+  for (s in unique(sim_dat$sim)) {
+    idx <- which(sim_dat$sim == s)
+    if (length(idx) != nrow(obs))
+      fail(paste0(context, "_row_count_mismatch"), paste0(
+        "Cannot attach '", col, "' to the simulated data: replicate ", s, " has ",
+        length(idx), " rows but the observed data has ", nrow(obs),
+        ". ferx_simulate() is expected to return each observed row once per replicate."))
+    for (k in keys) {
+      # id can come back as character from ferx_simulate() while sdtab has it
+      # as integer, so only compare numerically when BOTH sides are numeric.
+      okk <- if (is.numeric(obs[[k]]) && is.numeric(sim_dat[[k]]))
+               isTRUE(all.equal(sim_dat[[k]][idx], obs[[k]], tolerance = 1e-9))
+             else identical(as.character(sim_dat[[k]][idx]), as.character(obs[[k]]))
+      if (!okk)
+        fail(paste0(context, "_not_aligned"), paste0(
+          "Cannot attach '", col, "' to the simulated data: column '", k,
+          "' in replicate ", s, " does not match the observed data row-for-row. ",
+          "ferx_simulate() is expected to return the observed rows in sdtab order; ",
+          "attaching by position would misattribute values."))
+    }
+    out[[col]][idx] <- obs[[col]]
+  }
+  out
+}
+fail <- function(kind, msg) stop(paste0("[", kind, "] ", msg))
+
+# Attaches a covariate column (`col`) from the raw input CSV onto `obs`, for
+# use as the VPC independent variable when `col` isn't a native sdtab column.
+# This is the ONLY source for covariates not declared in the model's
+# [covariates] block — those never appear in fit$covtab at all, and fit$sdtab
+# carries no covariates whatsoever, declared or not. Verifies element-wise
+# alignment against `obs` (id/time/dv) with type-tolerant comparisons before
+# trusting the CSV's row order matches sdtab's, rather than assuming it —
+# read.csv() can silently type a numeric column (e.g. DV with "." for missing
+# values on dose rows) as character, and the real risk this guards against is
+# missing a genuine mismatch when the wrong data file is selected.
+attach_from_raw <- function(obs, csv_path, col, context, fail) {
+  raw <- tryCatch({ d <- read.csv(csv_path); names(d) <- tolower(names(d)); d },
+                   error = function(e) NULL)
+  if (is.null(raw))
+    fail(paste0(context, "_raw_read_failed"), paste0(
+      "Could not read the data file '", csv_path, "' to attach '", col, "'."))
+  if (!col %in% names(raw))
+    fail(paste0(context, "_raw_col_missing"), paste0(
+      "Column '", col, "' not found in the data file '", csv_path, "'."))
+
+  # Filter to observation rows, the same rows fit$sdtab is built from: EVID
+  # == 0 and (no MDV column, or MDV == 0) — stricter than EVID==0 alone
+  # against EVID=0/MDV=1 rows (observations excluded from the fit). No EVID
+  # column at all means every row is treated as an observation.
+  if ("evid" %in% names(raw)) {
+    keep <- raw$evid == 0
+    if ("mdv" %in% names(raw)) keep <- keep & (raw$mdv == 0)
+    raw <- raw[keep, , drop = FALSE]
+  }
+
+  if (nrow(raw) != nrow(obs))
+    fail(paste0(context, "_raw_row_mismatch"), paste0(
+      "Cannot attach '", col, "' from the data file: after filtering to observation rows it has ",
+      nrow(raw), " rows but the fit output (sdtab) has ", nrow(obs), " rows. The data file may ",
+      "not match the one the fit was built from (e.g. edited afterward, or a different file selected)."))
+
+  type_tolerant_equal <- function(a, b) {
+    an <- suppressWarnings(as.numeric(as.character(a)))
+    bn <- suppressWarnings(as.numeric(as.character(b)))
+    if (!anyNA(an) && !anyNA(bn)) isTRUE(all.equal(an, bn, tolerance = 1e-9))
+    else identical(as.character(a), as.character(b))
+  }
+  for (k in intersect(c("id", "time", "dv"), intersect(names(obs), names(raw)))) {
+    if (!type_tolerant_equal(raw[[k]], obs[[k]]))
+      fail(paste0(context, "_raw_not_aligned"), paste0(
+        "Cannot attach '", col, "' from the data file: column '", k,
+        "' does not match the fit output (sdtab) row-for-row. The data file may not match ",
+        "the one the fit was built from."))
+  }
+
+  covariate <- suppressWarnings(as.numeric(as.character(raw[[col]])))
+  if (all(is.na(covariate)))
+    fail(paste0(context, "_not_numeric"), paste0(
+      "Column '", col, "' is not numeric and cannot be used as the VPC x-axis. ",
+      "Use Stratification instead for categorical covariates."))
+
+  obs[[col]] <- covariate
+  obs
+}
+
 cfg <- jsonlite::fromJSON(args[1])
 
 sim_dat <- NULL; obs <- NULL
@@ -893,17 +1121,38 @@ if (!is.null(cfg$stratify) && length(cfg$stratify) > 0) {
   }
 }
 
-obs_cols_list <- list(dv = "dv", idv = "time", id = "id")
-sim_cols_list <- list(dv = dv_col, idv = "time", id = "id", sim = "sim")
+# ---- Independent variable (VPC x-axis / binning variable) ------------------
+# TAD/TAFD are properties of the dosing design — the same value for a given
+# observation in every replicate — so attaching one from obs is exact. Any
+# column already on obs (sdtab) is resolved the same way, so this isn't
+# hardcoded to {time, tad, tafd} and picks up whatever sdtab exposes.
+# Anything else is tried as a covariate from the raw input CSV instead —
+# covariates never appear in fit$sdtab, declared in the model or not.
+idv_col <- if (!is.null(cfg$idv) && nchar(trimws(cfg$idv)) > 0) tolower(trimws(cfg$idv)) else "time"
+if (!idv_col %in% names(obs)) {
+  raw_hdr <- tryCatch({ d <- read.csv(cfg$data_path, nrows = 1); tolower(names(d)) }, error = function(e) NULL)
+  if (is.null(raw_hdr) || !(idv_col %in% raw_hdr)) {
+    fail("idv_not_found", paste0(
+      "Independent variable '", idv_col, "' not found in the fit output (sdtab) or the data file. ",
+      "Available sdtab columns: ", paste(names(obs), collapse = ", "), ". ",
+      "Available data file columns: ",
+      if (!is.null(raw_hdr)) paste(raw_hdr, collapse = ", ") else "(could not read data file)"))
+  }
+  obs <- attach_from_raw(obs, cfg$data_path, idv_col, "idv", fail)
+}
+if (!idv_col %in% names(sim_dat)) {
+  sim_dat <- attach_from_obs(obs, sim_dat, idv_col, "idv", fail)
+}
+
+obs_cols_list <- list(dv = "dv",  idv = idv_col, id = "id")
+sim_cols_list <- list(dv = dv_col, idv = idv_col, id = "id", sim = "sim")
 if (isTRUE(cfg$pred_corr)) {
   if ("pred" %in% names(obs)) {
     obs_cols_list$pred <- "pred"
     if (!"pred" %in% names(sim_dat)) {
       # Same fix as vpc.R's JSON-computing script: vpc package requires PRED
       # on every simulated replicate too, not just the observed data.
-      key      <- intersect(c("id", "time"), names(obs))
-      pred_map <- unique(obs[, c(key, "pred"), drop = FALSE])
-      sim_dat  <- merge(sim_dat, pred_map, by = key, all.x = TRUE)
+      sim_dat <- attach_from_obs(obs, sim_dat, "pred", "pred", fail)
     }
     sim_cols_list$pred <- "pred"
   } else {
@@ -952,6 +1201,7 @@ pl <- if (identical(vpc_type, "censored")) {
     stratify = strat_arg, facet = facet_val,
     smooth = isTRUE(cfg$smooth),
     show = list(obs_dv = FALSE),
+    xlab = toupper(idv_col),
     vpc_theme = vpc_theme, vpcdb = FALSE, verbose = FALSE
   ))
 } else {
@@ -965,6 +1215,7 @@ pl <- if (identical(vpc_type, "censored")) {
     stratify = strat_arg, facet = facet_val,
     log_y = isTRUE(cfg$log_y), smooth = isTRUE(cfg$smooth),
     show = list(obs_dv = isTRUE(cfg$show_points)),
+    xlab = toupper(idv_col),
     vpc_theme = vpc_theme, vpcdb = FALSE, verbose = FALSE
   ))
 }

@@ -41,6 +41,8 @@ pub struct VpcConfig {
     /// Confidence-interval bounds for the bands, e.g. 0.05 / 0.95.
     pub ci_lo: f64,
     pub ci_hi: f64,
+    /// Independent variable (VPC x-axis / binning variable): "time", "tad", or "tafd".
+    pub idv: String,
     /// Binning method: "jenks", "kmeans", "pretty", "quantile", "density",
     /// "time", "data", or "manual".
     pub bins_type: String,
@@ -129,9 +131,11 @@ pub struct VpcObsRow {
 }
 
 /// A raw observed data point, for the scatter overlay.
+/// `x` is whatever column is resolved as the VPC independent variable
+/// (TIME/TAD/TAFD — see `VpcConfig::idv`), not necessarily TIME.
 #[derive(Debug, Clone, Deserialize)]
 pub struct VpcObsPoint {
-    #[serde(default)] pub time: f64,
+    #[serde(default)] pub x: f64,
     pub dv: Option<f64>,
 }
 
@@ -443,7 +447,7 @@ mod tests {
          "bin_mid":1.166667,"bin_min":0.5,"bin_max":4}
       ],
       "bins": [0.5, 4, 8, 12, 24, 48, 72, 96, 120],
-      "obs_points": [{"time":0.5,"dv":5.3653},{"time":1.0,"dv":null}],
+      "obs_points": [{"x":0.5,"dv":5.3653},{"x":1.0,"dv":null}],
       "pi_lo": 0.05,
       "pi_hi": 0.95
     }"#;

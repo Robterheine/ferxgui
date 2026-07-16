@@ -377,6 +377,58 @@ fn show_options(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
             });
     });
 
+    // ── X-axis (independent variable) ─────────────────────────────────────────
+    // Placed above Binning because binning is computed on this variable.
+    let covariate_idvs = covariate_idv_candidates(&state.ui.vpc_data_cols);
+    section(ui, "X-axis", true, dark, |ui| {
+        let o = &mut state.ui.vpc_opts;
+        const IDVS: [(&str, &str); 3] = [
+            ("time", "TIME"),
+            ("tad",  "TAD"),
+            ("tafd", "TAFD"),
+        ];
+        egui::ComboBox::from_id_salt("vpc_idv_combo")
+            .selected_text(idv_axis_label(&o.idv))
+            .width(ui.available_width() - 8.0)
+            .show_ui(ui, |ui| {
+                for (val, label) in IDVS {
+                    if ui.selectable_label(o.idv == val, label).clicked() {
+                        o.idv = val.to_string();
+                    }
+                }
+                if !covariate_idvs.is_empty() {
+                    ui.separator();
+                    for cov in &covariate_idvs {
+                        let label = cov.to_uppercase();
+                        if ui.selectable_label(o.idv == *cov, &label).clicked() {
+                            o.idv = cov.clone();
+                        }
+                    }
+                }
+            });
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new(
+            "TAD = time after most recent dose; TAFD = time after first dose. \
+             When dosing differs across subjects, pair TAD with prediction-corrected \
+             VPC (pcVPC) — Bergstrand 2011. For a categorical covariate (e.g. a 0/1 \
+             flag), Stratification below is usually a better tool than binning the x-axis.",
+        ).size(10.5).color(theme::fg2(dark)));
+
+        // A VPC binned on a covariate pools every observation of a subject
+        // across the whole time course at one x-value, so time/dose
+        // variability dominates and a plain VPC vs. a covariate is close to
+        // uninterpretable — prediction-correction removes that confound.
+        let is_covariate = !matches!(o.idv.as_str(), "time" | "tad" | "tafd");
+        if is_covariate && !o.pred_corr {
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(
+                "Binning on a covariate pools each subject's whole time course at one \
+                 x-value. Enable prediction-corrected VPC (pcVPC) in VPC type below for \
+                 a meaningful comparison.",
+            ).size(10.0).color(theme::ORANGE));
+        }
+    });
+
     section(ui, "Binning", true, dark, |ui| {
         let o = &mut state.ui.vpc_opts;
         const METHODS: [(&str, &str); 8] = [
@@ -652,6 +704,7 @@ fn build_config(state: &AppState, idx: usize) -> Result<VpcConfig, String> {
         n_sim: o.n_sim, seed: o.seed,
         pi_lo: o.pi_lo, pi_hi: o.pi_hi,
         ci_lo: o.ci_lo, ci_hi: o.ci_hi,
+        idv: o.idv.clone(),
         bins_type: o.bins_type.clone(), n_bins: o.n_bins,
         manual_bins, log_y: o.log_y, smooth: o.smooth,
         show_points: o.show_points, band_color,
@@ -897,7 +950,7 @@ fn show_vpc_plot(ui: &mut egui::Ui, vpc: &VpcResult, opts: &VpcOpts, dark: bool)
             // only show them on unstratified plots.
             let obs_pts: Vec<[f64; 2]> = if opts.show_points && !is_censored && n_strata == 1 {
                 vpc.obs_points.iter()
-                    .filter_map(|p| p.dv.map(|dv| [p.time, ly(dv)]))
+                    .filter_map(|p| p.dv.map(|dv| [p.x, ly(dv)]))
                     .filter(|p| p[0].is_finite() && p[1].is_finite()).collect()
             } else { vec![] };
 
@@ -924,7 +977,7 @@ fn show_vpc_plot(ui: &mut egui::Ui, vpc: &VpcResult, opts: &VpcOpts, dark: bool)
             // 1 / 10 / 100 / 1000 instead of 0 / 1 / 2 / 3.
             let pl = Plot::new(format!("vpc_plot_{si}"))
                 .height(plot_h)
-                .x_axis_label("Time")
+                .x_axis_label(idv_axis_label(&opts.idv))
                 .y_axis_label(y_label)
                 .legend(Legend::default())
                 .show_grid(egui::Vec2b::new(opts.show_grid_v, opts.show_grid_h))
@@ -981,6 +1034,12 @@ fn show_vpc_plot(ui: &mut egui::Ui, vpc: &VpcResult, opts: &VpcOpts, dark: bool)
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Upper-cases a VPC independent-variable column name ("time"/"tad"/"tafd")
+/// for display as the plot's x-axis label.
+fn idv_axis_label(idv: &str) -> String {
+    idv.to_uppercase()
+}
 
 /// Formats a y-axis gridline value for display.
 ///
@@ -1043,6 +1102,18 @@ mod format_y_tick_tests {
     }
 }
 
+#[cfg(test)]
+mod idv_axis_label_tests {
+    use super::idv_axis_label;
+
+    #[test]
+    fn uppercases_the_stored_idv_column_name() {
+        assert_eq!(idv_axis_label("time"), "TIME");
+        assert_eq!(idv_axis_label("tad"), "TAD");
+        assert_eq!(idv_axis_label("tafd"), "TAFD");
+    }
+}
+
 fn computing_spinner(ui: &mut egui::Ui, opts: &VpcOpts) {
     ui.centered_and_justified(|ui| {
         ui.vertical_centered(|ui| {
@@ -1089,6 +1160,54 @@ fn section(
             });
         });
     ui.add_space(4.0);
+}
+
+/// Columns that are never sensible as a VPC covariate x-axis — they're
+/// already offered as first-class idv options (time), or are IDs/response/
+/// NONMEM-style dosing & record-type columns rather than covariates.
+/// Matched case-insensitively.
+const STRUCTURAL_IDV_COLS: [&str; 11] =
+    ["id", "time", "dv", "evid", "mdv", "amt", "ii", "ss", "cmt", "rate", "dvid"];
+
+/// From a data file's CSV header, returns the columns usable as a VPC
+/// covariate x-axis: lower-cased, de-duplicated, and excluding structural/
+/// dosing columns (case-insensitively). Deliberately does not filter by
+/// cardinality or numeric-ness — the `vpc` package bins categoricals fine,
+/// and a non-numeric column is caught by the R bridge (`attach_from_raw`),
+/// not the dropdown.
+fn covariate_idv_candidates(headers: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    headers.iter()
+        .map(|h| h.trim().to_lowercase())
+        .filter(|h| !h.is_empty())
+        .filter(|h| !STRUCTURAL_IDV_COLS.contains(&h.as_str()))
+        .filter(|h| seen.insert(h.clone()))
+        .collect()
+}
+
+#[cfg(test)]
+mod covariate_idv_candidates_tests {
+    use super::covariate_idv_candidates;
+
+    #[test]
+    fn excludes_structural_columns_case_insensitively() {
+        let headers: Vec<String> = ["ID", "Time", "DV", "EVID", "MDV", "AMT", "II", "SS", "CMT", "RATE", "DVID"]
+            .iter().map(|s| s.to_string()).collect();
+        assert!(covariate_idv_candidates(&headers).is_empty());
+    }
+
+    #[test]
+    fn keeps_covariate_columns_lowercased_and_deduped() {
+        let headers: Vec<String> = ["ID", "TIME", "DV", "WT", "AGE", "wt"]
+            .iter().map(|s| s.to_string()).collect();
+        assert_eq!(covariate_idv_candidates(&headers), vec!["wt".to_string(), "age".to_string()]);
+    }
+
+    #[test]
+    fn ignores_blank_header_entries() {
+        let headers: Vec<String> = ["ID", "", "  ", "WT"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(covariate_idv_candidates(&headers), vec!["wt".to_string()]);
+    }
 }
 
 /// Read column names from the first line of a CSV file (fast — reads one line only).

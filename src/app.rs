@@ -196,9 +196,21 @@ impl FerxApp {
             cc.egui_ctx.set_style(style);
         }
         let mut state = AppState::new();
-        // Auto-scan if a working directory was persisted.
-        if state.workspace.directory.is_some() {
-            state.trigger_scan();
+        // Auto-scan if a working directory was persisted — but only if it
+        // still exists on disk. A moved/deleted project folder previously
+        // left the user with a silently empty model list and no
+        // explanation; surface it as a startup warning instead. The setting
+        // itself is left alone (not cleared) — the folder may be back next
+        // launch (e.g. a temporarily unmounted drive).
+        if let Some(dir) = state.workspace.directory.clone() {
+            if dir.exists() {
+                state.trigger_scan();
+            } else {
+                state.workspace.startup_warnings.push(format!(
+                    "Warning: the last project folder could not be found — {} — pick one via the project menu.",
+                    dir.display()
+                ));
+            }
         }
         // Reconnect any ferx processes that outlived the previous GUI session.
         reconnect_orphaned_runs(&mut state);

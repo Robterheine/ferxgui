@@ -68,116 +68,44 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
 fn show_top_bar(ui: &mut egui::Ui, state: &mut AppState) {
     let dark = ui.visuals().dark_mode;
     let label_fg = if dark { theme::FG2 } else { egui::Color32::from_gray(100) };
-    let path_fg  = if dark { theme::FG  } else { egui::Color32::from_gray(30)  };
 
-    // Row 1: directory breadcrumb + bookmark star + bookmarks dropdown.
+    // Row 1: project identity + switcher. The current project's name and the
+    // control that switches it are the same button (Xcode scheme-selector
+    // pattern) — clicking it opens `show_project_menu` below, which holds
+    // the bookmark toggle, the "SWITCH TO" bookmark list, and "Open Folder…".
+    // This replaces the old two-widget "bookmark pill" + "Projects ▾ combo"
+    // pair, whose pill reused `theme::ACCENT` — the same accent the status
+    // filter pills in Row 2 use for an unrelated meaning (selection, not
+    // project state) — which made the two rows read as one control group.
     ui.horizontal(|ui| {
-        if let Some(dir) = state.workspace.directory.as_ref() {
-            let name = dir.file_name().unwrap_or_default().to_string_lossy().to_string();
-            ui.add(egui::Label::new(
-                egui::RichText::new(name).color(path_fg).strong().size(12.0),
-            ).truncate());
-        } else {
-            ui.label(egui::RichText::new("No directory").color(label_fg).size(12.0));
-        }
-        if ui.small_button("Change…").clicked() {
-            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                state.set_directory(dir);
-            }
-        }
-        if state.workspace.directory.is_some() && ui.small_button("Rescan").clicked() {
-            state.trigger_scan();
-        }
+        ui.label(egui::RichText::new("Project").color(label_fg).size(12.0));
 
-        // "Bookmark project" pill — replaces the ambiguous ☆ star.
-        // Uses a labeled button so it cannot be confused with model-row stars.
-        if let Some(dir) = state.workspace.directory.clone() {
-            let already_bookmarked = state.workspace.bookmarks
-                .iter()
-                .any(|b| b.path == dir);
-            let (btn_label, btn_fill, btn_fg, tip) = if already_bookmarked {
-                (
-                    "✔ Bookmark project",
-                    theme::ACCENT,
-                    egui::Color32::WHITE,
-                    "Remove this directory from project bookmarks",
-                )
-            } else {
-                let fill = if dark { theme::BG3 } else { egui::Color32::TRANSPARENT };
-                let fg   = if dark { theme::FG3 } else { egui::Color32::from_gray(120) };
-                ("+ Bookmark project", fill, fg, "Save this directory as a project bookmark")
-            };
-            if ui.add(
-                egui::Button::new(
-                    egui::RichText::new(btn_label).size(11.0).color(btn_fg),
-                )
-                .fill(btn_fill),
-            ).on_hover_text(tip).clicked() {
-                if already_bookmarked {
-                    state.workspace.bookmarks.retain(|b| b.path != dir);
-                    if let Some(app_dir) = &state.workspace.app_dir.clone() {
-                        if let Err(e) = crate::io::persistence::save_bookmarks(app_dir, &state.workspace.bookmarks) {
-                            state.ui.status_message = format!("Could not save bookmarks: {e}");
-                        }
-                    }
-                } else {
-                    // Open the name dialog; default label = directory name.
-                    let default_label = dir.file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    state.ui.pending_bookmark = Some((dir, default_label));
-                }
-            }
-        }
+        let dir = state.workspace.directory.clone();
+        let button_text = format!("⌄ {}", project_display_name(dir.as_deref()));
+        ui.menu_button(egui::RichText::new(button_text).size(12.0), |ui| {
+            show_project_menu(ui, state);
+        });
 
-        // Projects dropdown — lists all bookmarked directories.
-        let bm_label = if state.workspace.bookmarks.is_empty() {
-            "Projects"
-        } else {
-            "Projects ▾"
-        };
-        egui::ComboBox::from_id_salt("bookmarks_combo")
-            .selected_text(egui::RichText::new(bm_label).size(12.0).color(label_fg))
-            .width(110.0)
-            .show_ui(ui, |ui| {
-                if state.workspace.bookmarks.is_empty() {
-                    ui.label(
-                        egui::RichText::new("No bookmarks yet — use '+ Bookmark project' to add one")
-                            .color(label_fg)
-                            .size(11.0),
-                    );
-                } else {
-                    let bookmarks = state.workspace.bookmarks.clone();
-                    let mut remove_idx: Option<usize> = None;
-                    for (i, bm) in bookmarks.iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            if ui.selectable_label(
-                                state.workspace.directory.as_deref() == Some(&bm.path),
-                                egui::RichText::new(&bm.label).size(12.0),
-                            ).clicked() {
-                                state.set_directory(bm.path.clone());
-                            }
-                            let x_color = if dark { theme::FG3 } else { egui::Color32::from_gray(160) };
-                            if ui.add(
-                                egui::Button::new(egui::RichText::new("✕").size(10.0).color(x_color))
-                                    .frame(false),
-                            ).on_hover_text("Remove bookmark").clicked() {
-                                remove_idx = Some(i);
-                            }
-                        });
-                    }
-                    if let Some(i) = remove_idx {
-                        state.workspace.bookmarks.remove(i);
-                        if let Some(app_dir) = &state.workspace.app_dir.clone() {
-                            if let Err(e) = crate::io::persistence::save_bookmarks(app_dir, &state.workspace.bookmarks) {
-                                state.ui.status_message = format!("Could not save bookmarks: {e}");
-                            }
-                        }
-                    }
+        if let Some(dir) = dir {
+            let path_str = dir.display().to_string();
+            // Rescan (fixed-size) goes in a right-to-left sub-layout so the
+            // path label — added second, i.e. to Rescan's left — is only
+            // ever given the width left over after Rescan, and truncates
+            // instead of pushing Rescan off the row.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("Rescan").clicked() {
+                    state.trigger_scan();
                 }
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&path_str).color(label_fg).size(11.0),
+                    ).truncate(),
+                ).on_hover_text(path_str);
             });
+        }
     });
+
+    ui.separator();
 
     // Row 2: search + status filter + new model.
     ui.horizontal(|ui| {
@@ -244,6 +172,141 @@ fn show_top_bar(ui: &mut egui::Ui, state: &mut AppState) {
             });
         }
     });
+}
+
+/// Display name for the project switcher button: the project directory's
+/// folder name, or a fallback prompting the user to choose one.
+fn project_display_name(dir: Option<&std::path::Path>) -> String {
+    match dir {
+        Some(d) => d
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| d.display().to_string()),
+        None => "Choose project…".to_string(),
+    }
+}
+
+fn is_bookmarked(bookmarks: &[crate::io::persistence::Bookmark], dir: &std::path::Path) -> bool {
+    bookmarks.iter().any(|b| b.path == dir)
+}
+
+/// Saves `state.workspace.bookmarks` to disk, surfacing any I/O error via
+/// the status bar. Shared by both bookmark-removal call sites in
+/// `show_project_menu` (the bookmark-toggle-off and the per-row ✖) so the
+/// save-plus-error-handling isn't duplicated between them.
+fn persist_bookmarks(state: &mut AppState) {
+    if let Some(app_dir) = &state.workspace.app_dir.clone() {
+        if let Err(e) = crate::io::persistence::save_bookmarks(app_dir, &state.workspace.bookmarks) {
+            state.ui.status_message = format!("Could not save bookmarks: {e}");
+        }
+    }
+}
+
+/// Contents of the project switcher menu opened from the "⌄ <name>" button
+/// in the top bar: bookmark toggle for the current project, a "SWITCH TO"
+/// list of bookmarked projects, and "Open Folder…" to browse to a new one.
+///
+/// The bookmark toggle below reads "★ Bookmark this project" / "✔ Bookmark
+/// this project" as plain labelled menu text — a bare ☆ star toggle on the
+/// main bar was tried previously and rejected for being confused with the
+/// model-row ★ stars; a labelled menu item doesn't have that problem.
+fn show_project_menu(ui: &mut egui::Ui, state: &mut AppState) {
+    let dark = ui.visuals().dark_mode;
+    let dim  = if dark { theme::FG2 } else { egui::Color32::from_gray(90) };
+    ui.set_min_width(230.0);
+
+    if let Some(dir) = state.workspace.directory.clone() {
+        let bookmarked = is_bookmarked(&state.workspace.bookmarks, &dir);
+        let label = if bookmarked { "✔ Bookmark this project" } else { "★ Bookmark this project" };
+        if ui.button(label).clicked() {
+            if bookmarked {
+                state.workspace.bookmarks.retain(|b| b.path != dir);
+                persist_bookmarks(state);
+            } else {
+                // Open the name dialog; default label = directory name.
+                let default_label = dir.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                state.ui.pending_bookmark = Some((dir, default_label));
+            }
+            ui.close_menu();
+        }
+        ui.separator();
+    }
+
+    ui.label(egui::RichText::new("SWITCH TO").color(dim).size(10.0));
+    if state.workspace.bookmarks.is_empty() {
+        ui.label(egui::RichText::new("No bookmarks yet").color(dim).size(11.0));
+    } else {
+        let bookmarks = state.workspace.bookmarks.clone();
+        let mut remove_idx: Option<usize> = None;
+        for (i, bm) in bookmarks.iter().enumerate() {
+            let is_current = state.workspace.directory.as_deref() == Some(&bm.path);
+            ui.horizontal(|ui| {
+                let prefix = if is_current { "✔ " } else { "" };
+                if ui.selectable_label(is_current, format!("{prefix}{}", bm.label)).clicked() {
+                    state.set_directory(bm.path.clone());
+                    ui.close_menu();
+                }
+                // The current project has no remove control here — it sits
+                // right next to the ✔ mark, and removing the bookmark for
+                // the project you're actively in is rarely what a stray
+                // click there means.
+                if !is_current {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let x_color = if dark { theme::FG3 } else { egui::Color32::from_gray(160) };
+                        if ui.add(
+                            egui::Button::new(egui::RichText::new("✖").size(10.0).color(x_color))
+                                .frame(false),
+                        ).on_hover_text("Remove bookmark").clicked() {
+                            remove_idx = Some(i);
+                        }
+                    });
+                }
+            });
+        }
+        if let Some(i) = remove_idx {
+            state.workspace.bookmarks.remove(i);
+            persist_bookmarks(state);
+        }
+    }
+
+    ui.separator();
+    if ui.button("Open Folder…").clicked() {
+        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+            state.set_directory(dir);
+        }
+        ui.close_menu();
+    }
+}
+
+#[cfg(test)]
+mod project_bar_tests {
+    use super::{is_bookmarked, project_display_name};
+    use crate::io::persistence::Bookmark;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn display_name_prompts_to_choose_when_no_project_is_open() {
+        assert_eq!(project_display_name(None), "Choose project…");
+    }
+
+    #[test]
+    fn display_name_is_the_final_path_component() {
+        let dir = Path::new("/Users/rob/FERX/TACROPED");
+        assert_eq!(project_display_name(Some(dir)), "TACROPED");
+    }
+
+    #[test]
+    fn is_bookmarked_matches_on_path_not_label() {
+        let bookmarks = vec![Bookmark {
+            label: "TACROPED".to_string(),
+            path: PathBuf::from("/Users/rob/FERX/TACROPED"),
+        }];
+        assert!(is_bookmarked(&bookmarks, Path::new("/Users/rob/FERX/TACROPED")));
+        assert!(!is_bookmarked(&bookmarks, Path::new("/Users/rob/FERX/WARFARIN")));
+    }
 }
 
 // ── Model list table ─────────────────────────────────────────────────────────

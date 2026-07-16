@@ -272,6 +272,25 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.9.14 (2026-07-16) — **corrects v0.9.13 pcVPC results**; custom VPC x-axis (TAD/TAFD/covariates); clearer project bar
+
+**Fixed (correctness — affects results produced by v0.9.13): prediction-corrected VPC could silently compute on duplicated rows**
+- v0.9.13 made pcVPC work by joining the fit's PRED onto the simulated data by `(ID, TIME)`. On datasets where that pair isn't unique, the join silently duplicates simulated rows and the bands are computed on a corrupted table — the plot still renders and looks entirely plausible. Measured on a real multi-occasion dataset: 27,400 simulated rows became 27,600. Two observations sharing an `(ID, TIME)` had PRED values differing only by solver noise (~1e-8), so de-duplication couldn't collapse them.
+- `(ID, TIME)` is legitimately non-unique in **multi-occasion data**, where an `EVID=4` reset restarts the time course and two rows share a nominal time while each carries its own time-after-dose.
+- Fixed by attaching values **positionally** instead: `ferx_simulate()` returns the observed rows replicated once per replicate in the same order, so each simulated row inherits from its own observation. The row count now cannot change, and the alignment is verified element-wise per replicate — if a future ferx version ever reorders its output, the VPC fails loudly instead of silently misattributing values. **If you ran a pcVPC on multi-occasion or duplicate-time data with v0.9.13, re-run it.**
+
+**Added: the VPC x-axis is now selectable — TIME, TAD, TAFD, or any covariate**
+- A new "X-axis" section in the VPC panel. Time-after-dose (TAD) and time-after-first-dose (TAFD) collapse multi-occasion or staggered-dosing data onto a common axis; previously the VPC was always against TIME.
+- Any numeric column in the dataset can also be used, **including covariates the model does not declare** — often the more useful diagnostic, since it can reveal a covariate effect you failed to include. Covariate values are read from the data file and matched to each observation, with the join verified against the fit rather than assumed (pointing at a data file that doesn't match the fit is reported clearly instead of producing a wrong plot).
+- Both the on-screen plot and the exported R/ggplot figure follow the selection.
+- Guidance is shown inline: a covariate-binned VPC pools each subject's observations across the whole time course, so pcVPC is recommended alongside it (Bergstrand 2011); for categorical covariates, Stratification is usually the better tool than binning the x-axis.
+
+**Changed: the Models tab project bar is clearer**
+- The project name is now labelled as such and doubles as the switcher — one `⌄ <project>` menu holding bookmarking, switching between bookmarked projects, and opening a folder, with the project's full path shown beside it. Previously the bookmark control used the same accent colour as the model status filters, so project controls and model filtering read as one group; the accent now means one thing (selection) in that view, and a separator divides the project scope from the model list below.
+
+**Fixed: the last-used project folder could be forgotten (affects builds from source)**
+- A regression test constructed a live app state and set a temporary working directory, which was then persisted over the real one in `~/.ferxgui/settings.json` — so running `cargo test` left the app starting in a folder that no longer existed. The test no longer writes to the real config. Startup now also reports when a remembered project folder can't be found, instead of showing an empty model list with no explanation.
+
 ### v0.9.13 (2026-07-16) — fixed prediction-corrected VPC, added TAD/covariate GOF axes, fixed Files tab scrolling
 
 **Fixed: prediction-corrected VPC (pcVPC) failed with "specified pred-variable (pred) not found in simulated dataset"**
