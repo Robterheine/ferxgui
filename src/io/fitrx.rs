@@ -266,6 +266,7 @@ pub fn read_predictions(fitrx_path: &Path) -> Result<Option<EvalData>, FitrxErro
     let col_cwres  = col("CWRES");
     let col_iwres  = col("IWRES");
     let col_ebeofv = col("EBE_OFV");
+    let col_tad    = col("TAD");
 
     let mut rows = Vec::new();
     for result in rdr.records() {
@@ -280,6 +281,7 @@ pub fn read_predictions(fitrx_path: &Path) -> Result<Option<EvalData>, FitrxErro
             cwres:   col_cwres.map(|c| parse(&rec, c)).unwrap_or(f64::NAN),
             iwres:   col_iwres.map(|c| parse(&rec, c)).unwrap_or(f64::NAN),
             ebe_ofv: col_ebeofv.map(|c| parse(&rec, c)).unwrap_or(f64::NAN),
+            tad:     col_tad.map(|c| parse(&rec, c)).unwrap_or(f64::NAN),
         });
     }
 
@@ -350,6 +352,66 @@ pub fn read_ebes(fitrx_path: &Path) -> Result<Option<crate::domain::EbesData>, F
         .sum();
 
     Ok(Some(crate::domain::EbesData { rows, total_ofv, eta_names }))
+}
+
+/// Read `covtab.csv` from a `.fitrx` bundle — the model's own declared
+/// `[covariates]` block, one row per (ID, TIME). Returns `Ok(None)` when the
+/// entry is absent (models with no declared covariates, or older bundles
+/// predating this column).
+pub fn read_covtab(fitrx_path: &Path) -> Result<Option<crate::domain::CovTabData>, FitrxError> {
+    let file = std::fs::File::open(fitrx_path)?;
+    let mut zip = zip::ZipArchive::new(file)?;
+
+    let entry = match zip.by_name("covtab.csv") {
+        Ok(e)  => e,
+        Err(_) => return Ok(None),
+    };
+    let entry = bound_entry("covtab.csv", entry)?;
+
+    let mut rdr = csv::ReaderBuilder::new()
+        .trim(csv::Trim::All)
+        .from_reader(entry);
+
+    let headers = rdr.headers()
+        .map_err(|e| FitrxError::Io(std::io::Error::other(e)))?
+        .clone();
+
+    let col = |name: &str| headers.iter().position(|h| h.eq_ignore_ascii_case(name));
+
+    let col_id   = col("ID");
+    let col_time = col("TIME");
+
+    // Every column besides ID/TIME/EVID is a declared covariate.
+    let covariate_names: Vec<String> = headers.iter()
+        .filter(|h| {
+            !h.eq_ignore_ascii_case("ID")
+            && !h.eq_ignore_ascii_case("TIME")
+            && !h.eq_ignore_ascii_case("EVID")
+        })
+        .map(|h| h.to_owned())
+        .collect();
+    let covariate_cols: Vec<(String, usize)> = covariate_names.iter()
+        .filter_map(|n| col(n).map(|c| (n.clone(), c)))
+        .collect();
+
+    let mut rows = Vec::new();
+    for result in rdr.records() {
+        let rec = result.map_err(|e| FitrxError::Io(std::io::Error::other(e)))?;
+        let values = covariate_cols.iter()
+            .filter_map(|(name, c)| rec.get(*c)
+                .and_then(|s| s.trim().parse::<f64>().ok())
+                .map(|v| (name.clone(), v)))
+            .collect();
+        rows.push(crate::domain::CovTabRow {
+            id:   col_id.and_then(|c| rec.get(c)).unwrap_or("").to_string(),
+            time: col_time.and_then(|c| rec.get(c))
+                          .and_then(|s| s.trim().parse().ok())
+                          .unwrap_or(f64::NAN),
+            values,
+        });
+    }
+
+    Ok(Some(crate::domain::CovTabData::from_rows(rows, covariate_names)))
 }
 
 /// Read `conddist.csv` from a `.fitrx` bundle — per-subject per-ETA conditional

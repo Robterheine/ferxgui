@@ -200,6 +200,17 @@ sim_cols_list <- list(dv = dv_col, idv = "time", id = "id", sim = "sim")
 if (isTRUE(cfg$pred_corr)) {
   if ("pred" %in% names(obs)) {
     obs_cols_list$pred <- "pred"
+    if (!"pred" %in% names(sim_dat)) {
+      # vpc::calc_pred_corr_continuous() requires PRED on every simulated
+      # replicate too, not just the observed data — ferx_simulate()'s own
+      # output has no PRED column, so merge in the fit's per-observation
+      # PRED (constant across replicates for a given id/time, same as any
+      # other population prediction).
+      key      <- intersect(c("id", "time"), names(obs))
+      pred_map <- unique(obs[, c(key, "pred"), drop = FALSE])
+      sim_dat  <- merge(sim_dat, pred_map, by = key, all.x = TRUE)
+    }
+    sim_cols_list$pred <- "pred"
   } else {
     emit_error("pred_corr_no_pred",
       "Prediction-corrected VPC requires PRED in the fit output (sdtab). Ensure the model converged and produces PRED.")
@@ -887,6 +898,14 @@ sim_cols_list <- list(dv = dv_col, idv = "time", id = "id", sim = "sim")
 if (isTRUE(cfg$pred_corr)) {
   if ("pred" %in% names(obs)) {
     obs_cols_list$pred <- "pred"
+    if (!"pred" %in% names(sim_dat)) {
+      # Same fix as vpc.R's JSON-computing script: vpc package requires PRED
+      # on every simulated replicate too, not just the observed data.
+      key      <- intersect(c("id", "time"), names(obs))
+      pred_map <- unique(obs[, c(key, "pred"), drop = FALSE])
+      sim_dat  <- merge(sim_dat, pred_map, by = key, all.x = TRUE)
+    }
+    sim_cols_list$pred <- "pred"
   } else {
     stop("Prediction-corrected VPC requires PRED in the fit output (sdtab). Ensure the model converged and produces PRED.")
   }

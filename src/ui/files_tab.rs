@@ -438,6 +438,12 @@ fn show_table_view(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
 
     {
         let rows = &state.ui.files_csv_rows;
+        // `TableBuilder` only ever manages its own *vertical* scroll area
+        // internally (egui_extras hardcodes the horizontal component off) —
+        // wrapping it in our own horizontal `ScrollArea` is what lets a table
+        // wider than the panel actually be scrolled to reach later columns,
+        // instead of just clipping them with no way to get to them.
+        egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
         let mut tb = TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
@@ -497,6 +503,7 @@ fn show_table_view(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
                 }
             });
         });
+        }); // ScrollArea::horizontal
     } // rows borrow ends
 
     state.ui.files_csv_edit_buf = new_buf;

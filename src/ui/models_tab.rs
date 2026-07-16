@@ -4312,7 +4312,7 @@ mod dv_vs_pred_points_and_bounds_tests {
     fn row(dv: f64, pred: f64) -> PredRow {
         PredRow {
             id: "1".to_string(), time: 0.0, dv, pred, ipred: pred,
-            cwres: 0.0, iwres: 0.0, ebe_ofv: f64::NAN,
+            cwres: 0.0, iwres: 0.0, ebe_ofv: f64::NAN, tad: f64::NAN,
         }
     }
 

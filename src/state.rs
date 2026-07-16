@@ -455,6 +455,11 @@ pub struct UiState {
     pub eval_data: Option<crate::domain::EvalData>,
     /// Lazily-loaded per-subject EBE / iOFV data from `ebes.csv`.
     pub eval_ebes: Option<crate::domain::EbesData>,
+    /// Lazily-loaded declared-covariate values from `covtab.csv`. `None`
+    /// when the model declares no `[covariates]` block (or an older bundle
+    /// predates this column) — covariates just don't appear as GOF x-axis
+    /// options in that case.
+    pub eval_covtab: Option<crate::domain::CovTabData>,
     /// Index into `eval_data.subject_ids` for the Individual Fits view.
     pub eval_subject_idx: usize,
     /// Whether the DV/PRED axes use log scale.
@@ -699,6 +704,7 @@ impl Default for UiState {
             eval_loaded_fitrx_mtime: None,
             eval_data: None,
             eval_ebes: None,
+            eval_covtab: None,
             eval_subject_idx: 0,
             eval_log_scale: false,
             eval_monotonic_ofv: true,

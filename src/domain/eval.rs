@@ -13,6 +13,9 @@ pub struct PredRow {
     /// Individual OFV contribution (EBE_OFV column).  Same for every
     /// observation of a given subject; NaN when unavailable.
     pub ebe_ofv: f64,
+    /// Time after most recent dose (TAD column). NaN when unavailable
+    /// (older bundles predating this column).
+    pub tad: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -94,6 +97,101 @@ impl EvalData {
         let lo = self.rows.iter().filter_map(|r| r.time.is_finite().then_some(r.time)).fold(f64::INFINITY, f64::min);
         let hi = self.rows.iter().filter_map(|r| r.time.is_finite().then_some(r.time)).fold(f64::NEG_INFINITY, f64::max);
         if lo.is_infinite() { [0.0, 24.0] } else { [lo, hi] }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Declared-covariate values per observation (covtab.csv)
+// ---------------------------------------------------------------------------
+
+/// One row of `covtab.csv` — the model's own declared `[covariates]` block,
+/// one row per (ID, TIME) as ferx-r emits it. Only present when the model
+/// declares covariates.
+#[derive(Debug, Clone)]
+pub struct CovTabRow {
+    pub id:   String,
+    pub time: f64,
+    /// One entry per declared covariate name. Parsed as f64 where possible;
+    /// absent (rather than NaN) when the raw value didn't parse as a number
+    /// (e.g. a genuinely categorical/text covariate).
+    pub values: std::collections::HashMap<String, f64>,
+}
+
+/// Full declared-covariate dataset loaded from `covtab.csv` in a `.fitrx`
+/// bundle.
+#[derive(Debug, Clone, Default)]
+pub struct CovTabData {
+    pub rows: Vec<CovTabRow>,
+    /// Declared covariate names, in the order they appear in `covtab.csv`.
+    pub covariate_names: Vec<String>,
+    /// (id, time bit-pattern) → row index, built once so repeated per-point
+    /// lookups while rendering plots don't rescan every row.
+    index: std::collections::HashMap<(String, u64), usize>,
+}
+
+impl CovTabData {
+    pub fn from_rows(rows: Vec<CovTabRow>, covariate_names: Vec<String>) -> Self {
+        let index = rows.iter().enumerate()
+            .map(|(i, r)| ((r.id.clone(), r.time.to_bits()), i))
+            .collect();
+        Self { rows, covariate_names, index }
+    }
+
+    /// Exact (ID, TIME) lookup of one covariate's value. `None` if no
+    /// covtab.csv row matches, or the value there didn't parse as a number —
+    /// callers treat both the same as an unavailable/NaN value.
+    pub fn lookup(&self, id: &str, time: f64, covariate: &str) -> Option<f64> {
+        self.index.get(&(id.to_string(), time.to_bits()))
+            .and_then(|&i| self.rows[i].values.get(covariate))
+            .copied()
+    }
+}
+
+#[cfg(test)]
+mod covtab_tests {
+    use super::{CovTabData, CovTabRow};
+    use std::collections::HashMap;
+
+    fn row(id: &str, time: f64, values: &[(&str, f64)]) -> CovTabRow {
+        CovTabRow {
+            id: id.to_string(), time,
+            values: values.iter().map(|&(k, v)| (k.to_string(), v)).collect(),
+        }
+    }
+
+    #[test]
+    fn finds_a_covariate_by_exact_id_and_time() {
+        let data = CovTabData::from_rows(
+            vec![row("1", 0.0, &[("WT", 70.0)]), row("2", 0.0, &[("WT", 55.0)])],
+            vec!["WT".to_string()],
+        );
+        assert_eq!(data.lookup("1", 0.0, "WT"), Some(70.0));
+        assert_eq!(data.lookup("2", 0.0, "WT"), Some(55.0));
+    }
+
+    #[test]
+    fn none_when_time_does_not_match_exactly() {
+        let data = CovTabData::from_rows(vec![row("1", 0.0, &[("WT", 70.0)])], vec!["WT".to_string()]);
+        assert_eq!(data.lookup("1", 1.0, "WT"), None);
+    }
+
+    #[test]
+    fn none_for_an_unknown_covariate_name() {
+        let data = CovTabData::from_rows(vec![row("1", 0.0, &[("WT", 70.0)])], vec!["WT".to_string()]);
+        assert_eq!(data.lookup("1", 0.0, "AGE"), None);
+    }
+
+    #[test]
+    fn non_numeric_covariate_values_are_simply_absent() {
+        // A categorical covariate that failed to parse as f64 upstream is
+        // just missing from `values`, not stored as NaN — `lookup` reports
+        // it the same way as an unknown covariate.
+        let empty: HashMap<String, f64> = HashMap::new();
+        let data = CovTabData::from_rows(
+            vec![CovTabRow { id: "1".to_string(), time: 0.0, values: empty }],
+            vec!["FORM".to_string()],
+        );
+        assert_eq!(data.lookup("1", 0.0, "FORM"), None);
     }
 }
 

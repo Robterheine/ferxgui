@@ -112,16 +112,25 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
             ui.add_space(12.0);
             ui.checkbox(&mut state.ui.eval_log_scale, "Log scale");
 
-            // Independent CWRES x-axis pickers.
+            // Independent CWRES x-axis pickers. Options are the fixed
+            // prediction-level columns plus whatever covariates the model
+            // itself declares (from covtab.csv — absent for models with no
+            // `[covariates]` block).
             let dim = theme::fg2(dark);
+            let cov_names: &[String] = state.ui.eval_covtab.as_ref()
+                .map(|c| c.covariate_names.as_slice())
+                .unwrap_or(&[]);
+            let x_opts: Vec<&str> = ["TIME", "PRED", "IPRED", "TAD"].into_iter()
+                .chain(cov_names.iter().map(String::as_str))
+                .collect();
             ui.add_space(10.0);
             ui.label(egui::RichText::new("CWRES₁ x:").color(dim).size(11.0));
             egui::ComboBox::from_id_salt("cwres_x1_combo")
                 .selected_text(&state.ui.eval_cwres_x_col)
                 .width(70.0)
                 .show_ui(ui, |ui| {
-                    for opt in ["TIME", "PRED", "IPRED"] {
-                        ui.selectable_value(&mut state.ui.eval_cwres_x_col, opt.to_string(), opt);
+                    for opt in &x_opts {
+                        ui.selectable_value(&mut state.ui.eval_cwres_x_col, opt.to_string(), *opt);
                     }
                 });
             ui.add_space(6.0);
@@ -130,8 +139,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                 .selected_text(&state.ui.eval_cwres_x_col_2)
                 .width(70.0)
                 .show_ui(ui, |ui| {
-                    for opt in ["PRED", "TIME", "IPRED"] {
-                        ui.selectable_value(&mut state.ui.eval_cwres_x_col_2, opt.to_string(), opt);
+                    for opt in &x_opts {
+                        ui.selectable_value(&mut state.ui.eval_cwres_x_col_2, opt.to_string(), *opt);
                     }
                 });
 
@@ -202,6 +211,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
             .and_then(|p| crate::io::fitrx::read_predictions(p).ok().flatten());
         state.ui.eval_ebes = fitrx.as_deref()
             .and_then(|p| crate::io::fitrx::read_ebes(p).ok().flatten());
+        state.ui.eval_covtab = fitrx.as_deref()
+            .and_then(|p| crate::io::fitrx::read_covtab(p).ok().flatten());
         state.ui.eval_conddist = fitrx.as_deref()
             .and_then(|p| crate::io::fitrx::read_conddist(p).ok().flatten());
         state.ui.eval_loaded_stem = Some(stem);
@@ -359,6 +370,71 @@ pub(crate) fn loess(points: &[[f64; 2]], bandwidth_frac: f64) -> Vec<[f64; 2]> {
 
 // ── GOF 2×2 ──────────────────────────────────────────────────────────────────
 
+/// Resolves a GOF x-axis column name to a value for one prediction row.
+/// `col` is either one of the fixed prediction-level columns, or the name of
+/// a covariate declared in the model's own `[covariates]` block — looked up
+/// by exact (ID, TIME) match in `covtab`, `None` (→ NaN, filtered like any
+/// other non-finite point) when there's no covariate data loaded or no
+/// matching row.
+fn gof_x_value(r: &crate::domain::PredRow, col: &str, covtab: Option<&crate::domain::CovTabData>) -> f64 {
+    match col {
+        "TIME"    => r.time,
+        "PRED"    => r.pred,
+        "IPRED"   => r.ipred,
+        "TAD"     => r.tad,
+        "EBE_OFV" => r.ebe_ofv,
+        other => covtab
+            .and_then(|c| c.lookup(&r.id, r.time, other))
+            .unwrap_or(f64::NAN),
+    }
+}
+
+#[cfg(test)]
+mod gof_x_value_tests {
+    use super::gof_x_value;
+    use crate::domain::{CovTabData, CovTabRow, PredRow};
+
+    fn row() -> PredRow {
+        PredRow {
+            id: "1".to_string(), time: 4.0, dv: 1.0, pred: 2.0, ipred: 3.0,
+            cwres: 0.5, iwres: 0.5, ebe_ofv: 6.0, tad: 1.5,
+        }
+    }
+
+    #[test]
+    fn resolves_each_fixed_column() {
+        let r = row();
+        assert_eq!(gof_x_value(&r, "TIME", None), 4.0);
+        assert_eq!(gof_x_value(&r, "PRED", None), 2.0);
+        assert_eq!(gof_x_value(&r, "IPRED", None), 3.0);
+        assert_eq!(gof_x_value(&r, "TAD", None), 1.5);
+        assert_eq!(gof_x_value(&r, "EBE_OFV", None), 6.0);
+    }
+
+    #[test]
+    fn resolves_a_declared_covariate_via_exact_id_time_match() {
+        let r = row();
+        let covtab = CovTabData::from_rows(
+            vec![CovTabRow {
+                id: "1".to_string(), time: 4.0,
+                values: [("WT".to_string(), 70.0)].into_iter().collect(),
+            }],
+            vec!["WT".to_string()],
+        );
+        assert_eq!(gof_x_value(&r, "WT", Some(&covtab)), 70.0);
+    }
+
+    #[test]
+    fn nan_for_an_unresolvable_covariate_instead_of_defaulting_to_time() {
+        // Regression guard: an unrecognized column name must not silently
+        // fall back to TIME (the old `pick_x` closure's `_ => r.time`
+        // default) — that would misrepresent a plot as showing the
+        // requested covariate when it's actually still showing TIME.
+        let r = row();
+        assert!(gof_x_value(&r, "WT", None).is_nan());
+    }
+}
+
 fn show_gof(ui: &mut egui::Ui, state: &AppState, _idx: usize, dark: bool) {
     let data = match &state.ui.eval_data {
         Some(d) if !d.rows.is_empty() => d,
@@ -389,17 +465,10 @@ fn show_gof(ui: &mut egui::Ui, state: &AppState, _idx: usize, dark: bool) {
         .map(|r| [r.ipred, r.dv]).collect();
 
     // CWRES X column.
+    let covtab = state.ui.eval_covtab.as_ref();
     let cwres_x: Vec<[f64;2]> = data.rows.iter()
         .filter(|r| r.cwres.is_finite())
-        .map(|r| {
-            let x = match state.ui.eval_cwres_x_col.as_str() {
-                "PRED"    => r.pred,
-                "IPRED"   => r.ipred,
-                "EBE_OFV" => r.ebe_ofv,
-                _          => r.time,  // default TIME
-            };
-            [x, r.cwres]
-        })
+        .map(|r| [gof_x_value(r, &state.ui.eval_cwres_x_col, covtab), r.cwres])
         .filter(|p| p[0].is_finite())
         .collect();
 
@@ -430,14 +499,8 @@ fn show_gof(ui: &mut egui::Ui, state: &AppState, _idx: usize, dark: bool) {
     let col1 = state.ui.eval_cwres_x_col.clone();
     let col2 = state.ui.eval_cwres_x_col_2.clone();
 
-    let pick_x = |r: &crate::domain::PredRow, col: &str| match col {
-        "PRED"  => r.pred,
-        "IPRED" => r.ipred,
-        _       => r.time,
-    };
-
     let cwres_2: Vec<[f64;2]> = data.rows.iter()
-        .map(|r| [pick_x(r, &col2), r.cwres])
+        .map(|r| [gof_x_value(r, &col2, covtab), r.cwres])
         .filter(|p| p[0].is_finite() && p[1].is_finite())
         .collect();
     let x_lo_cw2 = cwres_2.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min);
@@ -896,15 +959,41 @@ fn show_export_dialog(ctx: &egui::Context, state: &mut AppState, model_idx: usiz
                     return;
                 }
             };
+            let col1 = state.ui.eval_cwres_x_col.clone();
+            let col2 = state.ui.eval_cwres_x_col_2.clone();
+
+            // Any covariate the on-screen plot can show as an x-axis must
+            // also reach the exported CSV, or the R script's column-name
+            // lookup silently falls back to TIME (see `safe_col` in
+            // GOF_EXPORT_R) — the export would then quietly not match what's
+            // selected on screen instead of erroring.
+            const FIXED_COLS: [&str; 4] = ["TIME", "PRED", "IPRED", "TAD"];
+            let covtab = state.ui.eval_covtab.as_ref();
+            let extra_cov_cols: Vec<&str> = [col1.as_str(), col2.as_str()].into_iter()
+                .filter(|c| !FIXED_COLS.contains(c))
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+
             if let Ok(mut wtr) = csv::Writer::from_path(&tmp_csv) {
-                let _ = wtr.write_record(["ID","TIME","DV","PRED","IPRED","CWRES","IWRES"]);
+                let mut header: Vec<&str> =
+                    vec!["ID", "TIME", "DV", "PRED", "IPRED", "CWRES", "IWRES", "TAD"];
+                header.extend(&extra_cov_cols);
+                let _ = wtr.write_record(&header);
                 for r in &pred_rows {
-                    let _ = wtr.write_record([
-                        &r.id,
-                        &r.time.to_string(),  &r.dv.to_string(),
-                        &r.pred.to_string(),  &r.ipred.to_string(),
-                        &r.cwres.to_string(), &r.iwres.to_string(),
-                    ]);
+                    let mut record: Vec<String> = vec![
+                        r.id.clone(),
+                        r.time.to_string(),  r.dv.to_string(),
+                        r.pred.to_string(),  r.ipred.to_string(),
+                        r.cwres.to_string(), r.iwres.to_string(),
+                        r.tad.to_string(),
+                    ];
+                    for name in &extra_cov_cols {
+                        let v = covtab.and_then(|c| c.lookup(&r.id, r.time, name))
+                            .unwrap_or(f64::NAN);
+                        record.push(v.to_string());
+                    }
+                    let _ = wtr.write_record(&record);
                 }
                 let _ = wtr.flush();
             }
@@ -913,8 +1002,6 @@ fn show_export_dialog(ctx: &egui::Context, state: &mut AppState, model_idx: usiz
             let ctx_cl      = ctx.clone();
             let format      = state.ui.eval_export_format.clone();
             let width       = state.ui.eval_export_width_mm;
-            let col1        = state.ui.eval_cwres_x_col.clone();
-            let col2        = state.ui.eval_cwres_x_col_2.clone();
             let loess       = state.ui.eval_export_loess;
             let ci          = state.ui.eval_export_ci_lines;
 

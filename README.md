@@ -272,6 +272,17 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.9.13 (2026-07-16) — fixed prediction-corrected VPC, added TAD/covariate GOF axes, fixed Files tab scrolling
+
+**Fixed: prediction-corrected VPC (pcVPC) failed with "specified pred-variable (pred) not found in simulated dataset"**
+- The `vpc` R package requires a PRED value on every simulated replicate to compute a pcVPC, not just on the observed data — `ferx_simulate()`'s own output never included one, so the package's own internal check failed as soon as pred-correction was enabled. Fixed by merging each observation's PRED (constant across replicates for a given subject/time, like any other population prediction) into the simulated dataset before handing both to `vpc()`. Verified by reproducing the failure and the fix against a real model and dataset via direct `Rscript` runs. The identical script duplicated in the "Edit and execute R script" popup's default had the same bug and is fixed the same way.
+
+**Added: TAD and the model's own declared covariates as GOF x-axis options**
+- The CWRES x-axis pickers only ever offered TIME/PRED/IPRED. Time-after-dose (TAD) was already being written into every fit bundle but silently never read; it's now a selectable axis. Declared covariates (whatever the model's own `[covariates]` block names — e.g. WT, HT) are now loaded from the bundle and offered too, matched to each observation by subject and time. The "Export figure…" path was extended the same way, since it writes its own temporary CSV independently of the on-screen plot and would otherwise have silently exported against TIME instead of the axis actually selected on screen.
+
+**Fixed: the Files tab's CSV/text preview couldn't be scrolled horizontally**
+- Wide tables (many columns) were clipped at the right edge of the panel with no way to reach the remaining columns — the table's own scroll area only ever handled the vertical axis.
+
 ### v0.9.12 (2026-07-16) — fixed GOF, ETA-Cov, and Covariate-screen showing results from a previous fit after re-running a model
 
 **Fixed: the Evaluation tab's GOF/Individual-Fits, ETA-Cov, and Covariate-screen views could keep showing a previous fit's results after re-running the same model**
