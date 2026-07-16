@@ -186,8 +186,18 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     // previously selected model's plots). Gating the whole reload on
     // `has_fit` skipped the staleness check entirely in that case.
     let stem = state.workspace.models[model_idx].model.stem.clone();
-    if eval_cache_is_stale(state.ui.eval_loaded_stem.as_deref(), &stem) {
-        let fitrx = if has_fit { state.workspace.models[model_idx].fitrx_path.clone() } else { None };
+    let fitrx = if has_fit { state.workspace.models[model_idx].fitrx_path.clone() } else { None };
+    // Re-fitting a model keeps the same stem and the same `.fitrx` filename,
+    // so the stem alone can't tell a fresh fit apart from the previous
+    // (e.g. incorrectly coded) one already cached under that name — the
+    // file's mtime is what actually changes.
+    let current_mtime = fitrx.as_deref()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .and_then(|m| m.modified().ok());
+    if eval_cache_is_stale(
+        state.ui.eval_loaded_stem.as_deref(), &stem,
+        state.ui.eval_loaded_fitrx_mtime, current_mtime,
+    ) {
         state.ui.eval_data = fitrx.as_deref()
             .and_then(|p| crate::io::fitrx::read_predictions(p).ok().flatten());
         state.ui.eval_ebes = fitrx.as_deref()
@@ -195,6 +205,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         state.ui.eval_conddist = fitrx.as_deref()
             .and_then(|p| crate::io::fitrx::read_conddist(p).ok().flatten());
         state.ui.eval_loaded_stem = Some(stem);
+        state.ui.eval_loaded_fitrx_mtime = current_mtime;
         state.ui.eval_subject_idx = 0;
         state.ui.eval_conddist_eta_idx = 0;
     }
@@ -217,13 +228,35 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
 /// Whether the cached prediction/EBE/conddist data needs reloading for
 /// `current_stem`. Must be evaluated unconditionally on every model switch —
 /// see the call site in `show()` for why gating this on `has_fit` was the bug.
-fn eval_cache_is_stale(loaded_stem: Option<&str>, current_stem: &str) -> bool {
-    loaded_stem != Some(current_stem)
+///
+/// Stem alone isn't enough: re-fitting a model keeps the same stem *and* the
+/// same `.fitrx` filename, so a re-run after fixing a miscoded model was
+/// indistinguishable from "nothing changed" by stem comparison — the cache
+/// kept showing the previous (wrong) fit's GOF/Individual-Fits/etc. The
+/// file's mtime is what actually changes on a re-fit, so it's compared too.
+fn eval_cache_is_stale(
+    loaded_stem: Option<&str>,
+    current_stem: &str,
+    loaded_mtime: Option<std::time::SystemTime>,
+    current_mtime: Option<std::time::SystemTime>,
+) -> bool {
+    loaded_stem != Some(current_stem) || loaded_mtime != current_mtime
+}
+
+/// Same staleness check as `eval_cache_is_stale`, for caches that are already
+/// keyed per-stem (`eta_cov_results`/`cov_screen_results`), so only the
+/// `.fitrx` mtime needs comparing.
+fn mtime_cache_is_stale(
+    loaded_mtime: Option<std::time::SystemTime>,
+    current_mtime: Option<std::time::SystemTime>,
+) -> bool {
+    loaded_mtime != current_mtime
 }
 
 #[cfg(test)]
 mod eval_cache_is_stale_tests {
     use super::eval_cache_is_stale;
+    use std::time::{Duration, SystemTime};
 
     #[test]
     fn stale_when_switching_to_a_different_model_even_without_a_fit() {
@@ -232,17 +265,52 @@ mod eval_cache_is_stale_tests {
         // stale, so the previous model's predictions get cleared instead of
         // continuing to display in the newly selected (unfitted) model's
         // GOF/Individual-Fits views.
-        assert!(eval_cache_is_stale(Some("model_a"), "model_b"));
+        assert!(eval_cache_is_stale(Some("model_a"), "model_b", None, None));
     }
 
     #[test]
-    fn not_stale_when_the_stem_matches() {
-        assert!(!eval_cache_is_stale(Some("model_a"), "model_a"));
+    fn not_stale_when_the_stem_and_fitrx_mtime_both_match() {
+        let t = Some(SystemTime::now());
+        assert!(!eval_cache_is_stale(Some("model_a"), "model_a", t, t));
     }
 
     #[test]
     fn stale_when_nothing_loaded_yet() {
-        assert!(eval_cache_is_stale(None, "model_a"));
+        assert!(eval_cache_is_stale(None, "model_a", None, None));
+    }
+
+    #[test]
+    fn stale_when_the_same_stem_was_refit_with_a_newer_fitrx_mtime() {
+        // Regression test for the reported bug: re-running a model after
+        // fixing it keeps the same stem and the same `.fitrx` filename, so
+        // this is the case stem-only comparison missed entirely.
+        let old = Some(SystemTime::now());
+        let new = Some(SystemTime::now() + Duration::from_secs(60));
+        assert!(eval_cache_is_stale(Some("model_a"), "model_a", old, new));
+    }
+}
+
+#[cfg(test)]
+mod mtime_cache_is_stale_tests {
+    use super::mtime_cache_is_stale;
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn not_stale_when_mtimes_match() {
+        let t = Some(SystemTime::now());
+        assert!(!mtime_cache_is_stale(t, t));
+    }
+
+    #[test]
+    fn stale_when_nothing_loaded_yet() {
+        assert!(mtime_cache_is_stale(None, Some(SystemTime::now())));
+    }
+
+    #[test]
+    fn stale_when_refit_produced_a_newer_fitrx_mtime() {
+        let old = Some(SystemTime::now());
+        let new = Some(SystemTime::now() + Duration::from_secs(60));
+        assert!(mtime_cache_is_stale(old, new));
     }
 }
 
@@ -1050,6 +1118,14 @@ fn launch_eta_cov(state: &mut AppState, stem: &str, fitrx_path: &std::path::Path
     // before the Failed branch) left the previous successful table on
     // screen with no sign the retry had failed.
     state.workspace.eta_cov_results.remove(&stem_s);
+    // Record which `.fitrx` this computation is against, so a later re-fit
+    // under the same stem (same filename, newer mtime) is detected as stale
+    // instead of leaving this result cached indefinitely.
+    if let Ok(mtime) = std::fs::metadata(&fitrx).and_then(|m| m.modified()) {
+        state.workspace.eta_cov_loaded_mtime.insert(stem_s.clone(), mtime);
+    } else {
+        state.workspace.eta_cov_loaded_mtime.remove(&stem_s);
+    }
     std::thread::spawn(move || {
         match crate::io::r_extract::compute_eta_cov(&fitrx) {
             Ok(result) => {
@@ -1080,6 +1156,12 @@ fn launch_cov_screen(state: &mut AppState, stem: &str, fitrx_path: &std::path::P
     // Same reasoning as launch_eta_cov: don't let a failed "Re-run" hide
     // behind the previous successful table.
     state.workspace.cov_screen_results.remove(&stem_s);
+    // Same staleness guard as launch_eta_cov.
+    if let Ok(mtime) = std::fs::metadata(&fitrx).and_then(|m| m.modified()) {
+        state.workspace.cov_screen_loaded_mtime.insert(stem_s.clone(), mtime);
+    } else {
+        state.workspace.cov_screen_loaded_mtime.remove(&stem_s);
+    }
     std::thread::spawn(move || {
         match crate::io::r_extract::compute_cov_screen(&fitrx) {
             Ok(result) => {
@@ -1144,6 +1226,17 @@ fn show_eta_cov_dataset_scan(
          and every numeric column found in the original dataset used to fit the model. \
          This is an exploratory, first-pass screen — a flagged pair here is not itself \
          a covariate test. Pairs with |r| ≥ 0.3 are flagged.");
+
+    // A re-fit under the same stem changes the `.fitrx` file's mtime without
+    // changing the stem, so a stem-keyed cache alone would keep showing the
+    // previous fit's results indefinitely. Drop the cached entry once the
+    // mtime no longer matches what it was computed against, so the auto-
+    // trigger below re-fires.
+    let current_mtime = std::fs::metadata(fitrx_path).ok().and_then(|m| m.modified().ok());
+    if mtime_cache_is_stale(state.workspace.eta_cov_loaded_mtime.get(stem).copied(), current_mtime) {
+        state.workspace.eta_cov_results.remove(stem);
+        state.workspace.eta_cov_failed.remove(stem);
+    }
 
     // Auto-trigger the moment a fit exists — no setup step needed any more.
     // Gated on `eta_cov_failed` too: without it, a failed computation left
@@ -1320,6 +1413,13 @@ fn show_eta_cov_declared(
          covariate test — this is a screening aid. Only pairs at or above |association| \
          ≥ 0.2 are returned; note this threshold differs from the Dataset Scan's |r| ≥ \
          0.3 — each view is calibrated independently by ferx-r.");
+
+    // Same re-fit staleness guard as the Dataset Scan view above.
+    let current_mtime = std::fs::metadata(fitrx_path).ok().and_then(|m| m.modified().ok());
+    if mtime_cache_is_stale(state.workspace.cov_screen_loaded_mtime.get(stem).copied(), current_mtime) {
+        state.workspace.cov_screen_results.remove(stem);
+        state.workspace.cov_screen_failed.remove(stem);
+    }
 
     // Gated on `cov_screen_failed` too — see the identical comment on the
     // Dataset Scan view's auto-trigger above for why this matters.

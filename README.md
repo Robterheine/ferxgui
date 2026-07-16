@@ -272,6 +272,11 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.9.12 (2026-07-16) — fixed GOF, ETA-Cov, and Covariate-screen showing results from a previous fit after re-running a model
+
+**Fixed: the Evaluation tab's GOF/Individual-Fits, ETA-Cov, and Covariate-screen views could keep showing a previous fit's results after re-running the same model**
+- All three views cache their computation per model name, but re-fitting a model under the same name produces a new `.fitrx` file without changing that name — so the cached results from the earlier (possibly incorrect) fit kept displaying with no indication they were outdated. Each view now also checks the `.fitrx` file's modification time and recomputes when it's changed, instead of reusing a stale cache.
+
 ### v0.9.11 (2026-07-15) — fixed a run silently using the wrong dataset after switching models
 
 **Fixed: the Run tab's data file could silently carry over from a previously viewed model**

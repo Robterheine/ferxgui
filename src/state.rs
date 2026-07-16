@@ -445,6 +445,12 @@ pub struct UiState {
     // ---- Evaluation tab ----
     /// Which model's predictions are currently cached.
     pub eval_loaded_stem: Option<String>,
+    /// The `.fitrx` file's mtime at the time it was last loaded — re-fitting
+    /// a model keeps the same stem (and `.fitrx` filename), so stem alone
+    /// can't tell a fresh fit apart from the stale, previously-loaded one;
+    /// without this, GOF/Individual-Fits/etc. kept showing an old (e.g.
+    /// incorrectly coded) model's results after re-running it correctly.
+    pub eval_loaded_fitrx_mtime: Option<std::time::SystemTime>,
     /// Lazily-loaded prediction rows from `predictions.csv`.
     pub eval_data: Option<crate::domain::EvalData>,
     /// Lazily-loaded per-subject EBE / iOFV data from `ebes.csv`.
@@ -690,6 +696,7 @@ impl Default for UiState {
             new_model_template: "1cpt_oral".to_string(),
             new_model_stem: String::new(),
             eval_loaded_stem: None,
+            eval_loaded_fitrx_mtime: None,
             eval_data: None,
             eval_ebes: None,
             eval_subject_idx: 0,
@@ -871,6 +878,12 @@ pub struct WorkspaceState {
     /// computation again on the very next frame — an unbounded retry loop
     /// that silently re-spawns R every frame instead of just failing once.
     pub eta_cov_failed: HashMap<String, String>,
+    /// `.fitrx` mtime each `eta_cov_results`/`eta_cov_failed` entry was
+    /// computed against. Re-fitting a model keeps the same stem, so stem
+    /// alone can't tell a fresh fit apart from the stale result already
+    /// cached under that name — without this, ETA-covariate results from a
+    /// since-corrected (re-fit) model kept showing indefinitely.
+    pub eta_cov_loaded_mtime: HashMap<String, std::time::SystemTime>,
     /// Cached declared-covariate screen results (`ferx_cov_screen`) keyed by
     /// model stem. Separate from `eta_cov_*` so the two views in the ETA-Cov
     /// section can be computed independently and lazily.
@@ -880,6 +893,8 @@ pub struct WorkspaceState {
     /// Error message from the last failed covariate-screen computation per
     /// model stem — same unbounded-retry-loop guard as `eta_cov_failed`.
     pub cov_screen_failed: HashMap<String, String>,
+    /// Same staleness guard as `eta_cov_loaded_mtime`, for `cov_screen_*`.
+    pub cov_screen_loaded_mtime: HashMap<String, std::time::SystemTime>,
 }
 
 impl WorkspaceState {
@@ -948,9 +963,11 @@ impl WorkspaceState {
             eta_cov_results:    HashMap::new(),
             eta_cov_running:    HashSet::new(),
             eta_cov_failed:     HashMap::new(),
+            eta_cov_loaded_mtime: HashMap::new(),
             cov_screen_results: HashMap::new(),
             cov_screen_running: HashSet::new(),
             cov_screen_failed:  HashMap::new(),
+            cov_screen_loaded_mtime: HashMap::new(),
         }
     }
 
