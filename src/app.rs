@@ -337,7 +337,7 @@ impl eframe::App for FerxApp {
         render_settings_popup(ctx, &mut self.state);
 
         // Request repaint while a run is active to keep log streaming live.
-        if self.state.run.active_run.is_some() {
+        if !self.state.run.active_runs.is_empty() {
             ctx.request_repaint();
         }
         // Request repaint while SIR is running to update elapsed time.
@@ -454,21 +454,27 @@ fn render_header(ctx: &egui::Context, state: &mut AppState) {
                 }
 
                 // Active run indicator — shown when the popup is closed so there's
-                // always a visible status.  Clicking re-opens the popup.
-                if let Some(run) = &state.run.active_run {
-                    if !state.ui.run_popup_open {
-                        ui.add_space(10.0);
-                        ui.spinner();
-                        let label_resp = ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(format!("Running: {}", run.record.model_stem))
-                                    .color(theme::ACCENT)
-                                    .size(12.0),
-                            ).sense(egui::Sense::click()),
-                        ).on_hover_text("Click to open run output");
-                        if label_resp.clicked() {
-                            state.ui.run_popup_open = true;
-                        }
+                // always a visible status.  Clicking re-opens the popup (which
+                // follows whichever run started most recently — see `display_run`).
+                if !state.run.active_runs.is_empty() && !state.ui.run_popup_open {
+                    ui.add_space(10.0);
+                    ui.spinner();
+                    let label_text = match state.run.active_runs.len() {
+                        1 => format!(
+                            "Running: {}",
+                            state.run.active_runs.values().next().unwrap().record.model_stem
+                        ),
+                        n => format!("{n} runs active"),
+                    };
+                    let label_resp = ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(label_text)
+                                .color(theme::ACCENT)
+                                .size(12.0),
+                        ).sense(egui::Sense::click()),
+                    ).on_hover_text("Click to open run output");
+                    if label_resp.clicked() {
+                        state.ui.run_popup_open = true;
                     }
                 }
 
@@ -886,6 +892,47 @@ fn render_settings(ui: &mut egui::Ui, state: &mut AppState) {
         });
         ui.add_space(16.0);
 
+        // ── Concurrent Runs ──────────────────────────────────────────────────
+        settings_section_label(ui, "Concurrent Runs");
+        ui.group(|ui| {
+            ui.set_width(440.0);
+            ui.horizontal(|ui| {
+                ui.label("Max concurrent fits:");
+                let mut max_concurrent = state.workspace.settings.max_concurrent_runs;
+                if ui.add(egui::DragValue::new(&mut max_concurrent).range(1..=16)).changed() {
+                    state.workspace.settings.max_concurrent_runs = max_concurrent;
+                    if let Some(w) = state.workspace.save_settings() { state.ui.status_message = w; }
+                }
+            });
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(
+                    "How many ferx fits may run at the same time. Default 1 matches earlier \
+                     behaviour — raise it to fit several models in parallel."
+                )
+                .color(theme::fg3(ui.visuals().dark_mode))
+                .size(11.0),
+            );
+
+            // Oversubscription warning — display only, never overrides the
+            // user's setting. `run_threads` is the Run tab's current thread
+            // setting (0 = auto, passed to ferx as NULL, i.e. "use every core").
+            let cores = std::thread::available_parallelism().map(std::num::NonZeroUsize::get).unwrap_or(1);
+            if let Some(warning) = oversubscription_warning(
+                state.workspace.settings.max_concurrent_runs,
+                state.ui.run_threads,
+                cores,
+            ) {
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(format!("⚠ {warning}"))
+                        .color(theme::ORANGE)
+                        .size(11.0),
+                );
+            }
+        });
+        ui.add_space(16.0);
+
         // ── Appearance ──────────────────────────────────────────────────────
         settings_section_label(ui, "Appearance");
         ui.group(|ui| {
@@ -913,15 +960,86 @@ fn settings_section_label(ui: &mut egui::Ui, title: &str) {
     ui.add_space(4.0);
 }
 
+/// Plain-language warning when `max_concurrent` fits at `threads` each would
+/// ask for more logical cores than the machine has — each fit competing for
+/// the same cores tends to run *slower* than running them one at a time, not
+/// faster. `threads == 0` means "auto" (ferx passes `NULL` through to R, so a
+/// single fit may claim every core) so any `max_concurrent > 1` combined
+/// with auto-threads always oversubscribes. Pure and display-only: never
+/// used to change the user's setting, only to explain the consequence of it.
+fn oversubscription_warning(max_concurrent: usize, threads: u32, cores: usize) -> Option<String> {
+    if max_concurrent <= 1 {
+        return None;
+    }
+    if threads == 0 {
+        return Some(format!(
+            "{max_concurrent} concurrent fits with threads set to \"auto\" — each fit may claim \
+             all {cores} core(s) on this machine, so they will likely run slower together than \
+             one at a time. Consider setting an explicit per-run thread count on the Run tab."
+        ));
+    }
+    let requested = max_concurrent as u64 * threads as u64;
+    if requested > cores as u64 {
+        return Some(format!(
+            "{max_concurrent} concurrent fits × {threads} threads each = {requested} threads \
+             requested, more than the {cores} core(s) available — they will likely run slower \
+             together than one at a time. Consider lowering the thread count or the concurrent-fits limit."
+        ));
+    }
+    None
+}
+
+#[cfg(test)]
+mod oversubscription_warning_tests {
+    use super::oversubscription_warning;
+
+    #[test]
+    fn no_warning_when_only_one_concurrent_run_is_allowed() {
+        assert!(oversubscription_warning(1, 0, 8).is_none());
+        assert!(oversubscription_warning(1, 32, 8).is_none());
+    }
+
+    #[test]
+    fn warns_when_threads_is_auto_and_more_than_one_concurrent_run_is_allowed() {
+        assert!(oversubscription_warning(2, 0, 8).is_some());
+    }
+
+    #[test]
+    fn no_warning_when_explicit_threads_fit_within_available_cores() {
+        assert!(oversubscription_warning(2, 2, 8).is_none()); // 4 <= 8
+    }
+
+    #[test]
+    fn warns_when_explicit_threads_exceed_available_cores() {
+        assert!(oversubscription_warning(4, 4, 8).is_some()); // 16 > 8
+    }
+
+    #[test]
+    fn boundary_exactly_equal_to_core_count_is_not_a_warning() {
+        // 4 * 2 == 8 cores exactly — fully subscribed, not OVER-subscribed.
+        assert!(oversubscription_warning(4, 2, 8).is_none());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Floating run-output popup
 // ---------------------------------------------------------------------------
+
+/// Which run the single floating run-popup (and the header's busy indicator)
+/// displays, now that several models may run concurrently: the one that
+/// started most recently. This generalises the old single-`active_run`
+/// semantics — where "the run" and "the newest run" were trivially the same
+/// thing — without adding a new run picker or one window per run (the
+/// approved design deliberately keeps the existing single popup).
+fn display_run(state: &AppState) -> Option<&crate::domain::ActiveRun> {
+    state.run.active_runs.values().max_by_key(|r| r.started_at)
+}
 
 fn render_run_popup(ctx: &egui::Context, state: &mut AppState) {
     use crate::workers::messages::CancelMode;
 
     // Auto-open when a new run starts (unique run ID, so re-running the same model works).
-    if let Some(run) = &state.run.active_run {
+    if let Some(run) = display_run(state) {
         let run_id = run.record.id.clone();
         if state.ui.run_popup_last_run_id.as_deref() != Some(run_id.as_str()) {
             state.ui.run_popup_open = true;
@@ -946,13 +1064,18 @@ fn render_run_popup(ctx: &egui::Context, state: &mut AppState) {
     let dim_fg      = if is_dark { theme::FG2 } else { egui::Color32::from_gray(100) };
     let log_fg      = if is_dark { theme::FG2 } else { egui::Color32::from_gray(50) };
     let (dot_color, stem, elapsed, status_text) = run_panel_status(state);
-    let has_active  = state.run.active_run.is_some();
+    let has_active  = display_run(state).is_some();
     let queue_len   = state.run.run_queue.len();
-    let log_text    = state.run.log_text.clone();
-    let log_path    = state.run.active_run.as_ref()
+    // `stem` (from `run_panel_status`) is this popup's displayed run when
+    // one is active, or the last-finished run's stem otherwise — either way
+    // it's the right key into the per-stem retained log.
+    let log_text    = state.run.run_logs.get(&stem)
+        .map(|l| l.log_text.clone())
+        .unwrap_or_default();
+    let log_path    = display_run(state)
         .map(|r| r.log_path.to_string_lossy().to_string())
         .unwrap_or_default();
-    let active_stem = state.run.active_run.as_ref()
+    let active_stem = display_run(state)
         .map(|r| r.record.model_stem.clone())
         .unwrap_or_default();
     // Only shown once the run itself has finished (export runs as a
@@ -1106,19 +1229,21 @@ fn render_run_popup(ctx: &egui::Context, state: &mut AppState) {
         },
     );
 
-    // Apply actions now that the viewport closure has returned.
+    // Apply actions now that the viewport closure has returned. `active_stem`
+    // was captured above (from the same `display_run` this popup rendered),
+    // so these always act on the run the user was actually looking at.
     if do_kill {
-        if let Some(r) = &state.run.active_run {
+        if let Some(r) = state.run.active_runs.get(&active_stem) {
             let _ = r.cancel_tx.send(CancelMode::Kill);
         }
     }
     if do_stop {
-        if let Some(r) = &state.run.active_run {
+        if let Some(r) = state.run.active_runs.get(&active_stem) {
             let _ = r.cancel_tx.send(CancelMode::Graceful);
         }
     }
     if do_detach {
-        state.run.active_run = None;
+        state.run.active_runs.remove(&active_stem);
         state.ui.status_message = format!("Detached — {active_stem} continues in background");
     }
     if do_close {
@@ -1431,7 +1556,7 @@ fn render_about_popup(ctx: &egui::Context, state: &mut AppState) {
 
 /// Returns (dot_color, model_stem, elapsed_str, status_label) for the panel header.
 fn run_panel_status(state: &AppState) -> (egui::Color32, String, String, String) {
-    if let Some(run) = &state.run.active_run {
+    if let Some(run) = display_run(state) {
         let secs = run.started_at.elapsed().as_secs();
         let elapsed = if secs < 60 {
             format!("{:02}s", secs)
@@ -1486,8 +1611,18 @@ fn render_status_bar(ctx: &egui::Context, state: &AppState) {
 // ---------------------------------------------------------------------------
 
 /// Called once at startup.  Scans `~/.ferxgui/running/` for any run manifests
-/// left over from a previous session.  If the PID is still alive, starts a
-/// monitor/tailer thread to reconnect to it so the run panel shows its output.
+/// left over from a previous session.  For every one whose PID is still
+/// alive, starts a monitor/tailer thread to reconnect to it so the run panel
+/// shows its output.
+///
+/// Reconnects *every* live manifest, not just one — an earlier version of
+/// this function could only track a single active run in the UI, so it kept
+/// the most-recently-modified manifest and silently abandoned the rest
+/// (their processes kept running, untracked, forever). Now that
+/// `active_runs` is keyed by stem, there's no reason to drop any of them,
+/// even if there happen to be more live manifests than `max_concurrent_runs`
+/// allows for *new* launches — that limit only gates starting fresh runs,
+/// not reconnecting ones that are already running.
 fn reconnect_orphaned_runs(state: &mut AppState) {
     use crate::workers::messages::CancelMode;
     use crate::workers::run::reconnect_orphan;
@@ -1502,59 +1637,65 @@ fn reconnect_orphaned_runs(state: &mut AppState) {
     let manifests = scan_manifests(&app_dir);
     if manifests.is_empty() { return; }
 
-    // We can only track one active run in the current UI.  Pick the most
-    // recently modified manifest if there are several.
-    let Some((mfst_path, manifest)) = manifests
-        .into_iter()
-        .max_by_key(|(p, _)| {
-            p.metadata().and_then(|m| m.modified()).ok()
-        })
-    else { return };
+    let mut reconnected_stems: Vec<String> = Vec::new();
+    let mut last_run_id: Option<String> = None;
 
-    if !RunManifest::is_pid_alive(manifest.pid) {
-        // Process already gone — remove stale manifest.
-        RunManifest::remove(&mfst_path);
-        return;
+    for (mfst_path, manifest) in manifests {
+        if !RunManifest::is_pid_alive(manifest.pid) {
+            // Process already gone — remove stale manifest.
+            RunManifest::remove(&mfst_path);
+            continue;
+        }
+
+        // Reconstruct a minimal RunRecord (full details not in manifest).
+        let record = RunRecord {
+            id:            manifest.run_id.clone(),
+            model_stem:    manifest.model_stem.clone(),
+            tool:          "ferx".to_string(),
+            method:        None,
+            status:        JobStatus::Running,
+            started:       String::new(),
+            completed:     None,
+            duration_secs: None,
+            command:       manifest.command.clone(),
+            directory:     manifest.directory.clone(),
+            data_path:     None,
+            file_hashes:   HashMap::new(),
+        };
+
+        let (cancel_tx, cancel_rx) = std::sync::mpsc::channel::<CancelMode>();
+        let tx = state.worker_tx.clone();
+
+        reconnect_orphan(
+            manifest.clone(),
+            mfst_path.clone(),
+            record.clone(),
+            tx,
+            cancel_rx,
+        );
+
+        let stem = manifest.model_stem.clone();
+        state.run.active_runs.insert(stem.clone(), ActiveRun {
+            record,
+            started_at:    std::time::Instant::now(), // approximate
+            log_path:      manifest.log_path,
+            cancel_tx,
+            export_tables:  false, // not known for reconnected runs; user can re-run if needed
+            run_sir_after:  false,
+        });
+        last_run_id = Some(manifest.run_id);
+        reconnected_stems.push(stem);
     }
 
-    // Reconstruct a minimal RunRecord (full details not in manifest).
-    let record = RunRecord {
-        id:            manifest.run_id.clone(),
-        model_stem:    manifest.model_stem.clone(),
-        tool:          "ferx".to_string(),
-        method:        None,
-        status:        JobStatus::Running,
-        started:       String::new(),
-        completed:     None,
-        duration_secs: None,
-        command:       manifest.command.clone(),
-        directory:     manifest.directory.clone(),
-        data_path:     None,
-        file_hashes:   HashMap::new(),
+    if let Some(run_id) = last_run_id {
+        state.ui.run_popup_open = true;
+        state.ui.run_popup_last_run_id = Some(run_id);
+    }
+    state.ui.status_message = match reconnected_stems.as_slice() {
+        [] => return,
+        [one] => format!("Reconnected to running: {one}"),
+        many => format!("Reconnected to {} running fits: {}", many.len(), many.join(", ")),
     };
-
-    let (cancel_tx, cancel_rx) = std::sync::mpsc::channel::<CancelMode>();
-    let tx = state.worker_tx.clone();
-
-    reconnect_orphan(
-        manifest.clone(),
-        mfst_path.clone(),
-        record.clone(),
-        tx,
-        cancel_rx,
-    );
-
-    state.run.active_run = Some(ActiveRun {
-        record,
-        started_at:    std::time::Instant::now(), // approximate
-        log_path:      manifest.log_path,
-        cancel_tx,
-        export_tables:  false, // not known for reconnected runs; user can re-run if needed
-        run_sir_after:  false,
-    });
-    state.ui.run_popup_open = true;
-    state.ui.run_popup_last_run_id = Some(manifest.run_id.clone());
-    state.ui.status_message = format!("Reconnected to running: {}", manifest.model_stem);
 }
 
 // ---------------------------------------------------------------------------

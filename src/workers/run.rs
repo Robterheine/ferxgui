@@ -151,16 +151,18 @@ fn fresh_run_worker(
     tx: Sender<WorkerMsg>,
     cancel_rx: Receiver<CancelMode>,
 ) {
-    let mp  = manifest_path.clone();
-    let tx2 = tx.clone();
+    let mp   = manifest_path.clone();
+    let tx2  = tx.clone();
+    let stem = record.model_stem.clone();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         fresh_run_worker_inner(child, pid, record, log_path, manifest_path, tx, cancel_rx);
     }));
     if result.is_err() {
         RunManifest::remove(&mp);
-        let _ = tx2.send(WorkerMsg::RunError(
-            "Internal error: run worker thread panicked unexpectedly".to_string(),
-        ));
+        let _ = tx2.send(WorkerMsg::RunError {
+            stem,
+            message: "Internal error: run worker thread panicked unexpectedly".to_string(),
+        });
     }
 }
 
@@ -173,7 +175,7 @@ fn fresh_run_worker_inner(
     tx: Sender<WorkerMsg>,
     cancel_rx: Receiver<CancelMode>,
 ) {
-    let mut log_reader = LogReader::new(log_path.clone());
+    let mut log_reader = LogReader::new(log_path.clone(), record.model_stem.clone());
     let mut tail_tick  = 0u32;
 
     let exit_code = loop {
@@ -200,7 +202,10 @@ fn fresh_run_worker_inner(
             }
             Ok(None) => {}
             Err(e) => {
-                let _ = tx.send(WorkerMsg::RunError(format!("wait error: {e}")));
+                let _ = tx.send(WorkerMsg::RunError {
+                    stem: record.model_stem.clone(),
+                    message: format!("wait error: {e}"),
+                });
                 RunManifest::remove(&manifest_path);
                 return;
             }
@@ -221,16 +226,18 @@ fn orphan_worker(
     tx: Sender<WorkerMsg>,
     cancel_rx: Receiver<CancelMode>,
 ) {
-    let mp  = manifest_path.clone();
-    let tx2 = tx.clone();
+    let mp   = manifest_path.clone();
+    let tx2  = tx.clone();
+    let stem = record.model_stem.clone();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         orphan_worker_inner(pid, record, log_path, manifest_path, tx, cancel_rx);
     }));
     if result.is_err() {
         RunManifest::remove(&mp);
-        let _ = tx2.send(WorkerMsg::RunError(
-            "Internal error: orphan worker thread panicked unexpectedly".to_string(),
-        ));
+        let _ = tx2.send(WorkerMsg::RunError {
+            stem,
+            message: "Internal error: orphan worker thread panicked unexpectedly".to_string(),
+        });
     }
 }
 
@@ -242,7 +249,7 @@ fn orphan_worker_inner(
     tx: Sender<WorkerMsg>,
     cancel_rx: Receiver<CancelMode>,
 ) {
-    let mut log_reader = LogReader::new(log_path);
+    let mut log_reader = LogReader::new(log_path, record.model_stem.clone());
     let mut tick = 0u32;
 
     loop {
@@ -369,11 +376,15 @@ struct LogReader {
     path: PathBuf,
     file: Option<File>,
     pos:  u64,
+    /// Model stem this log belongs to — tags every `RunLine` sent so the
+    /// main thread can route it to the right per-stem log (see
+    /// `RunState::run_logs`) when several runs are tailed concurrently.
+    stem: String,
 }
 
 impl LogReader {
-    fn new(path: PathBuf) -> Self {
-        Self { path, file: None, pos: 0 }
+    fn new(path: PathBuf, stem: String) -> Self {
+        Self { path, file: None, pos: 0, stem }
     }
 
     fn drain(&mut self, tx: &Sender<WorkerMsg>) {
@@ -390,7 +401,7 @@ impl LogReader {
                 Ok(0) => break,
                 Ok(_) => {
                     let trimmed = line.trim_end_matches(['\n', '\r']).to_string();
-                    if tx.send(WorkerMsg::RunLine(trimmed)).is_err() {
+                    if tx.send(WorkerMsg::RunLine { stem: self.stem.clone(), line: trimmed }).is_err() {
                         return;
                     }
                 }

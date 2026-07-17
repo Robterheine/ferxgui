@@ -858,9 +858,30 @@ cat(out_path)
 /// Write the detached run script to `app_dir/run_ferx.R` and return its path.
 /// The file must persist for the lifetime of the detached process, so we keep
 /// it in the app data directory rather than a temp file.
+///
+/// Called once per launch (see `do_launch_queued`) and rewrites this same
+/// shared path every time. With a single run that's harmless — the file is
+/// gone by the time anything reads it again. With several runs launching
+/// close together it isn't: an earlier launch's detached `Rscript` process
+/// may still be starting up and reading this file just as a *later* launch
+/// rewrites it. Write-then-rename (atomic on the same filesystem) so that
+/// reader only ever sees the old complete file or the new complete one,
+/// never a truncated/partial write mid-`std::fs::write` — same idea as the
+/// write-then-rename used for the VPC cache file inside the embedded
+/// `VPC_R` script (see its `file.rename` comment), just done here from the
+/// Rust side. The tmp path must live in `app_dir` itself (not the shared
+/// helper temp dir `unique_temp_path` uses) so the rename stays on one
+/// filesystem; it's still made unique (PID + a monotonic counter) purely so
+/// repeated calls never collide on the same tmp filename mid-write.
 pub fn ensure_run_script(app_dir: &Path) -> std::io::Result<std::path::PathBuf> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static SEQ: AtomicU32 = AtomicU32::new(0);
+
     let path = app_dir.join("run_ferx.R");
-    std::fs::write(&path, RUN_FERX_R)?;
+    let seq  = SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp  = app_dir.join(format!(".run_ferx.R.tmp.{}.{seq}", std::process::id()));
+    std::fs::write(&tmp, RUN_FERX_R)?;
+    std::fs::rename(&tmp, &path)?;
     Ok(path)
 }
 

@@ -272,6 +272,25 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.9.15 (2026-07-17) — fit several models at the same time; fixed runs being abandoned on restart
+
+**Added: several models can now be fitted at the same time**
+- Previously ferxgui fitted strictly one model at a time — while a fit was running, every other model's Run button was disabled, and the only way to line up more work was the sequential queue. A new **Max concurrent fits** setting (File → Settings… → Concurrent Runs) allows several fits to run in parallel.
+- **Default is 1, which behaves exactly as before** — existing setups are unchanged until the setting is raised, and a settings file written by an earlier version loads as 1.
+- Each model keeps its own run output: selecting a model shows that model's log, not a merged stream. The same model still cannot be fitted twice at once, since it would overwrite its own results.
+- The run queue now fills every free slot rather than starting one fit at a time, skipping (rather than dropping) any queued model that is already running.
+- A warning appears when the chosen combination would oversubscribe the machine — e.g. four parallel fits while the per-run thread count is left on "auto", where each fit expects the whole machine and the batch can finish *slower* than running them one after another. The warning never changes the thread setting; that stays an explicit choice.
+- When the Run button is disabled it now names the actual reason (all slots busy, this model already running, ferx not configured, no data file, no declared method) instead of listing every possibility, and points at **+ Queue** when the reason is simply that all slots are busy.
+
+**Fixed: runs were silently abandoned when ferxgui restarted**
+- Fits run as detached processes and survive the GUI closing. On restart, ferxgui reconnected to only one of them and silently dropped the rest — those processes kept running, consuming CPU and writing results, with no way to see them finish or stop them. All live runs are now reconnected.
+
+**Fixed: a failed queue start could discard the rest of the queue**
+- If a queued run failed to launch (ferx unconfigured, or the OS refusing to start the process), the queue kept pulling the next model into the same fault, consuming the whole queue and leaving only the last error visible. It now stops at the first failure so the remaining models stay queued.
+
+**Fixed: writing the run helper script was not atomic**
+- The shared R helper script was truncated and rewritten on every launch. Harmless with one run at a time; with several starting together, one could read a partially written file. It is now written and renamed into place atomically.
+
 ### v0.9.14 (2026-07-16) — **corrects v0.9.13 pcVPC results**; custom VPC x-axis (TAD/TAFD/covariates); clearer project bar
 
 **Fixed (correctness — affects results produced by v0.9.13): prediction-corrected VPC could silently compute on duplicated rows**

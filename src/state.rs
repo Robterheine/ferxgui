@@ -405,7 +405,7 @@ pub struct UiState {
     /// (stem, message) from the most recent failed run *launch* (before any
     /// R process even started — e.g. the embedded run script couldn't be
     /// written, or the OS refused to spawn the process). Without this, such
-    /// a failure was invisible: `active_run` never gets set, so the Run
+    /// a failure was invisible: `active_runs` never gets an entry, so the Run
     /// popup's "auto-open on new run" never fires, leaving no visible sign
     /// the click did anything at all beyond the tiny status bar. Keyed by
     /// stem (rather than shown unconditionally) so it only appears on the
@@ -996,34 +996,31 @@ impl WorkspaceState {
 // Run state
 // ---------------------------------------------------------------------------
 
-pub struct RunState {
-    pub active_run: Option<ActiveRun>,
-    /// Ring buffer of stdout/stderr lines from the current / last run.
+/// Retained stdout/stderr log for one model's run — current if it's still
+/// active, otherwise its last one. Kept per model stem (not per run-id) so
+/// the log stays viewable after the run ends ("current / last run" per
+/// model); reset (see `RunState::reset_log`) when a new run for the same
+/// stem starts.
+pub struct RunLog {
+    /// Ring buffer of stdout/stderr lines.
     pub log_buffer: VecDeque<String>,
     /// Pre-joined version of log_buffer — rebuilt only when a new line arrives,
     /// not every frame, avoiding a ~500 KB allocation at 60 fps.
     pub log_text: String,
-    pub run_history: Vec<RunRecord>,
-    /// Sequential run queue — items are started one by one as the previous run finishes.
-    pub run_queue: VecDeque<QueuedRun>,
 }
 
-impl RunState {
-    const LOG_CAPACITY: usize = 5_000;
-
-    pub fn load(app_dir: Option<&PathBuf>) -> Self {
-        let run_history = app_dir.map(|d| load_runs(d)).unwrap_or_default();
+impl Default for RunLog {
+    fn default() -> Self {
         Self {
-            active_run: None,
-            log_buffer: VecDeque::with_capacity(Self::LOG_CAPACITY),
+            log_buffer: VecDeque::with_capacity(RunState::LOG_CAPACITY),
             log_text: String::new(),
-            run_history,
-            run_queue: VecDeque::new(),
         }
     }
+}
 
-    pub fn push_log(&mut self, line: String) {
-        if self.log_buffer.len() == Self::LOG_CAPACITY {
+impl RunLog {
+    fn push(&mut self, line: String) {
+        if self.log_buffer.len() == RunState::LOG_CAPACITY {
             self.log_buffer.pop_front();
             self.log_buffer.push_back(line.clone());
             // Eviction path: remove the first line from the cached text by
@@ -1042,6 +1039,47 @@ impl RunState {
             self.log_text.push_str(&line);
             self.log_buffer.push_back(line);
         }
+    }
+}
+
+pub struct RunState {
+    /// In-flight fits, keyed by model stem. Never more than one entry per
+    /// stem — the same model can't run twice concurrently (it would clobber
+    /// its own `.fitrx` and its own `{stem}_run.log`).
+    pub active_runs: HashMap<String, ActiveRun>,
+    /// Retained log per model stem — see `RunLog`'s doc comment.
+    pub run_logs: HashMap<String, RunLog>,
+    pub run_history: Vec<RunRecord>,
+    /// Sequential run queue — items are started as slots free up (see
+    /// `crate::ui::models_tab::advance_queue`).
+    pub run_queue: VecDeque<QueuedRun>,
+}
+
+impl RunState {
+    const LOG_CAPACITY: usize = 5_000;
+
+    pub fn load(app_dir: Option<&PathBuf>) -> Self {
+        let run_history = app_dir.map(|d| load_runs(d)).unwrap_or_default();
+        Self {
+            active_runs: HashMap::new(),
+            run_logs: HashMap::new(),
+            run_history,
+            run_queue: VecDeque::new(),
+        }
+    }
+
+    pub fn push_log(&mut self, stem: &str, line: String) {
+        self.run_logs.entry(stem.to_string()).or_default().push(line);
+    }
+
+    /// Replace `stem`'s retained log with a fresh, empty one — called when a
+    /// new run for that stem starts. Without this, re-running a model whose
+    /// previous log is still retained (see `RunLog`) would keep appending to
+    /// the old log instead of starting clean (mirrors the pre-existing
+    /// single-run behaviour of clearing `log_buffer`/`log_text` together at
+    /// launch).
+    pub fn reset_log(&mut self, stem: &str) {
+        self.run_logs.insert(stem.to_string(), RunLog::default());
     }
 
     pub fn save_history(&self, app_dir: Option<&PathBuf>) -> Option<String> {
@@ -1137,27 +1175,37 @@ mod run_state_log_tests {
 
     /// Regression test for "starting a run shows the previous run's output":
     /// `log_text` is a separately-maintained pre-joined cache of
-    /// `log_buffer` (see its doc comment above) — clearing only `log_buffer`
-    /// at run-start left `log_text` holding the entire previous run's log
-    /// until enough new lines arrived to incrementally push it out via
-    /// `push_log`'s eviction path. Both must be cleared together.
+    /// `log_buffer` (see `RunLog`'s doc comment above) — clearing only
+    /// `log_buffer` at run-start left `log_text` holding the entire previous
+    /// run's log until enough new lines arrived to incrementally push it out
+    /// via `push_log`'s eviction path. `reset_log` must replace both together.
     #[test]
     fn clearing_log_buffer_and_text_together_removes_previous_run_output() {
         let mut run = RunState::load(None);
-        run.push_log("old run line 1".to_string());
-        run.push_log("old run line 2".to_string());
-        assert!(run.log_text.contains("old run"));
+        run.push_log("model_a", "old run line 1".to_string());
+        run.push_log("model_a", "old run line 2".to_string());
+        assert!(run.run_logs["model_a"].log_text.contains("old run"));
 
-        run.log_buffer.clear();
-        run.log_text.clear();
+        run.reset_log("model_a");
         assert!(
-            run.log_text.is_empty(),
+            run.run_logs["model_a"].log_text.is_empty(),
             "log_text must be empty immediately after a new run starts, not just log_buffer"
         );
 
-        run.push_log("new run line 1".to_string());
-        assert_eq!(run.log_text, "new run line 1");
-        assert!(!run.log_text.contains("old run"));
+        run.push_log("model_a", "new run line 1".to_string());
+        assert_eq!(run.run_logs["model_a"].log_text, "new run line 1");
+        assert!(!run.run_logs["model_a"].log_text.contains("old run"));
+    }
+
+    /// Regression test for concurrent runs: two different models' logs must
+    /// stay independent, not share a single global buffer.
+    #[test]
+    fn different_stems_have_independent_logs() {
+        let mut run = RunState::load(None);
+        run.push_log("model_a", "a line".to_string());
+        run.push_log("model_b", "b line".to_string());
+        assert_eq!(run.run_logs["model_a"].log_text, "a line");
+        assert_eq!(run.run_logs["model_b"].log_text, "b line");
     }
 }
 
@@ -1250,17 +1298,21 @@ impl AppState {
                     .and_then(|s| self.workspace.models.iter().position(|m| m.model.stem == s))
                     .or_else(|| self.workspace.models.iter().position(|m| m.meta.is_reference));
             }
-            RunLine(line) => {
-                self.run.push_log(line);
+            RunLine { stem, line } => {
+                self.run.push_log(&stem, line);
             }
             RunFinished { exit_code, record } => {
                 let record  = *record;
                 let success = exit_code == 0;
                 let stem    = record.model_stem.clone();
-                let export_tables = self.run.active_run.as_ref()
+                // Per-stem lookup — with N concurrent runs, reading from
+                // "the" active run here would pick up a *different* model's
+                // export_tables/run_sir_after flags whenever more than one
+                // run is in flight at once.
+                let export_tables = self.run.active_runs.get(&stem)
                     .map(|r| r.export_tables)
                     .unwrap_or(false);
-                let run_sir_after = self.run.active_run.as_ref()
+                let run_sir_after = self.run.active_runs.get(&stem)
                     .map(|r| r.run_sir_after)
                     .unwrap_or(false);
                 // Clear unconditionally (not just when this run also exports
@@ -1276,7 +1328,7 @@ impl AppState {
                     format!("Run failed (exit {exit_code}): {stem}")
                 };
                 self.run.run_history.push(record.clone());
-                self.run.active_run = None;
+                self.run.active_runs.remove(&stem);
                 if let Some(warn) = self.run.save_history(self.workspace.app_dir.as_ref()) {
                     self.ui.status_message = warn;
                 }
@@ -1356,10 +1408,10 @@ impl AppState {
                     });
                 }
             }
-            RunError(msg) => {
-                self.run.push_log(format!("[error] {}", msg));
-                self.run.active_run = None;
-                self.ui.status_message = format!("Run error: {}", msg);
+            RunError { stem, message } => {
+                self.run.push_log(&stem, format!("[error] {}", message));
+                self.run.active_runs.remove(&stem);
+                self.ui.status_message = format!("Run error ({stem}): {}", message);
             }
             RInspectComplete { stem, info } => {
                 self.workspace.r_inspecting.remove(&stem);

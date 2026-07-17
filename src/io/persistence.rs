@@ -63,6 +63,11 @@ pub struct Settings {
     /// background R-package detection on the next launch.
     #[serde(default)]
     pub ferx_binary_custom: bool,
+    /// Maximum number of ferx fits allowed to run concurrently. Default 1
+    /// reproduces the previous strictly-sequential behaviour unchanged — the
+    /// user opts into running several at once.
+    #[serde(default = "default_max_concurrent_runs")]
+    pub max_concurrent_runs: usize,
 }
 
 impl Default for Settings {
@@ -79,9 +84,12 @@ impl Default for Settings {
                 "csv".into(),
             ],
             ferx_binary_custom: false,
+            max_concurrent_runs: default_max_concurrent_runs(),
         }
     }
 }
+
+fn default_max_concurrent_runs() -> usize { 1 }
 
 fn default_ferx_binary() -> Option<PathBuf> {
     // No synchronous default — the Rscript path is filled in by the background
@@ -281,6 +289,31 @@ fn save_json<T: Serialize + ?Sized>(path: PathBuf, value: &T) -> std::io::Result
     std::fs::write(&tmp, json)?;
     std::fs::rename(&tmp, &path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod settings_backward_compat_tests {
+    use super::Settings;
+
+    /// A `settings.json` written before `max_concurrent_runs` existed must
+    /// still load — with the field defaulting to 1, reproducing the
+    /// strictly-sequential behaviour that file was saved under, rather than
+    /// failing to parse or silently opting an upgraded user into concurrency
+    /// they never asked for.
+    #[test]
+    fn settings_json_without_max_concurrent_runs_defaults_to_one() {
+        let old_json = r#"{
+            "working_directory": null,
+            "ferx_binary": null,
+            "rstudio_path": null,
+            "theme": "dark",
+            "sidebar_collapsed": false,
+            "file_extensions": ["ferx", "fitrx", "csv"],
+            "ferx_binary_custom": false
+        }"#;
+        let s: Settings = serde_json::from_str(old_json).expect("pre-existing settings.json must still parse");
+        assert_eq!(s.max_concurrent_runs, 1);
+    }
 }
 
 #[cfg(test)]

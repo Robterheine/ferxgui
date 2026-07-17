@@ -17,8 +17,10 @@ pub enum WorkerMsg {
     /// Directory scan completed; full refreshed model list.
     ScanComplete(Vec<ModelEntry>),
 
-    /// A line of stdout / stderr from the active ferx subprocess.
-    RunLine(String),
+    /// A line of stdout / stderr from one ferx subprocess, identified by
+    /// model stem — several may be running concurrently, so the line alone
+    /// (without a stem) would be ambiguous about which run's log it belongs to.
+    RunLine { stem: String, line: String },
 
     /// The ferx subprocess exited.
     RunFinished {
@@ -26,8 +28,10 @@ pub enum WorkerMsg {
         record: Box<RunRecord>,
     },
 
-    /// The ferx subprocess could not be spawned or was killed with an error.
-    RunError(String),
+    /// A run's subprocess could not be spawned, or its monitor thread hit an
+    /// unexpected error. Carries the model stem so it can be attributed to
+    /// the right run when several may be in flight at once.
+    RunError { stem: String, message: String },
 
     /// Result of the background ferx detection via the R package.
     /// `Some((rscript_path, ferx_version, r_version))` on success.

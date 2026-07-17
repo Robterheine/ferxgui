@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
@@ -940,18 +940,24 @@ fn show_model_row_context_menu(
         // have been auto-populated for it even
         // though it has run (and has a data path)
         // before.
+        let this_running   = state.run.active_runs.contains_key(&row.stem);
+        let active_count   = state.run.active_runs.len();
+        let max_concurrent = state.workspace.settings.max_concurrent_runs;
+        let has_ferx       = state.workspace.settings.ferx_binary.is_some();
+        let has_data       = resolve_data_path_for_run(state, &row.stem).is_some();
         let can_run = can_launch_run(
-            state.run.active_run.is_some(),
-            state.workspace.settings.ferx_binary.is_some(),
-            resolve_data_path_for_run(state, &row.stem).is_some(),
+            this_running,
+            active_count,
+            max_concurrent,
+            has_ferx,
+            has_data,
         ) && declared_method.is_some();
         let run_resp = ui.add_enabled(can_run, egui::Button::new("Run now"));
         let run_resp = if !can_run {
-            run_resp.on_disabled_hover_text(
-                "A run is already active, ferx isn't configured, no \
-                 data file is selected, or this model has no \
-                 [fit_options] method declared"
-            )
+            let reason = run_disabled_reason(
+                this_running, active_count, max_concurrent, has_ferx, has_data, declared_method.is_some(),
+            ).unwrap_or("Cannot run right now");
+            run_resp.on_disabled_hover_text(reason)
         } else {
             run_resp
         };
@@ -1724,7 +1730,9 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
         state.ui.run_method = m.clone();
     }
 
-    let running = state.run.active_run.is_some();
+    // This model's own run status — not "is any run active", now that
+    // several models can run concurrently (see `RunState::active_runs`).
+    let running = state.run.active_runs.contains_key(&stem);
 
     egui::ScrollArea::vertical()
         .auto_shrink([false; 2])
@@ -1905,24 +1913,36 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
 
             // ── Action buttons ──
             ui.horizontal(|ui| {
+                let active_count   = state.run.active_runs.len();
+                let max_concurrent = state.workspace.settings.max_concurrent_runs;
+                let has_ferx       = state.workspace.settings.ferx_binary.is_some();
+                let has_data       = state.ui.run_data_path.is_some();
                 let can_run = can_launch_run(
                     running,
-                    state.workspace.settings.ferx_binary.is_some(),
-                    state.ui.run_data_path.is_some(),
+                    active_count,
+                    max_concurrent,
+                    has_ferx,
+                    has_data,
                 ) && declared_method.is_some();
-                let can_queue = state.workspace.settings.ferx_binary.is_some()
-                    && state.ui.run_data_path.is_some()
+                let can_queue = has_ferx
+                    && has_data
                     && declared_method.is_some();
 
-                if ui
-                    .add_enabled(
-                        can_run,
-                        egui::Button::new(egui::RichText::new("▶  Run").size(13.0))
-                            .fill(theme::ACCENT)
-                            .min_size(egui::vec2(90.0, 28.0)),
-                    )
-                    .clicked()
-                {
+                let run_btn = ui.add_enabled(
+                    can_run,
+                    egui::Button::new(egui::RichText::new("▶  Run").size(13.0))
+                        .fill(theme::ACCENT)
+                        .min_size(egui::vec2(90.0, 28.0)),
+                );
+                let run_btn = if !can_run {
+                    let reason = run_disabled_reason(
+                        running, active_count, max_concurrent, has_ferx, has_data, declared_method.is_some(),
+                    ).unwrap_or("Cannot run right now");
+                    run_btn.on_disabled_hover_text(reason)
+                } else {
+                    run_btn
+                };
+                if run_btn.clicked() {
                     launch_run(state, idx, &stem);
                 }
 
@@ -1969,7 +1989,7 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
                         .on_hover_text(if cfg!(unix) { "Graceful stop (SIGTERM → kill after 5 s)" } else { "Graceful stop (CTRL_BREAK → kill after 5 s)" })
                         .clicked()
                     {
-                        if let Some(run) = &state.run.active_run {
+                        if let Some(run) = state.run.active_runs.get(&stem) {
                             let _ = run.cancel_tx.send(CancelMode::Graceful);
                         }
                     }
@@ -1985,22 +2005,30 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
                         .on_hover_text("Kill immediately (SIGKILL)")
                         .clicked()
                     {
-                        if let Some(run) = &state.run.active_run {
+                        if let Some(run) = state.run.active_runs.get(&stem) {
                             let _ = run.cancel_tx.send(CancelMode::Kill);
                         }
                     }
                 }
 
-                // Hint when prerequisites are missing.
-                if state.workspace.settings.ferx_binary.is_none() {
+                // Hint when prerequisites are missing. Not shown while
+                // `running`, since the Stop/Kill controls above already make
+                // this model's own status obvious.
+                if !has_ferx {
                     ui.label(
                         egui::RichText::new("ferx binary not found — set path in Settings")
                             .color(theme::ORANGE)
                             .size(11.0),
                     );
-                } else if state.ui.run_data_path.is_none() {
+                } else if !has_data {
                     ui.label(
                         egui::RichText::new("Select a data file above")
+                            .color(theme::fg3(dark))
+                            .size(11.0),
+                    );
+                } else if !running && active_count >= max_concurrent {
+                    ui.label(
+                        egui::RichText::new("All concurrent-run slots are busy — use + Queue instead")
                             .color(theme::fg3(dark))
                             .size(11.0),
                     );
@@ -2009,9 +2037,9 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
 
             // Launch-failure card — without this, a failure here (e.g. the
             // run script couldn't be written, or the OS refused to spawn
-            // the process) was completely invisible: `active_run` never
-            // gets set, so the Run popup never opens, leaving no sign the
-            // click did anything beyond the tiny status bar.
+            // the process) was completely invisible: `active_runs` never
+            // gets an entry, so the Run popup never opens, leaving no sign
+            // the click did anything beyond the tiny status bar.
             if let Some((err_stem, err_msg)) = &state.ui.run_launch_error {
                 if *err_stem == stem {
                     ui.add_space(6.0);
@@ -2294,8 +2322,46 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
 /// Whether a run can be launched right now — shared by the Run pill's button
 /// and the model list's right-click "Run" item, so the two can't drift apart
 /// (e.g. one allowing a second concurrent run that the other would block).
-fn can_launch_run(running: bool, has_ferx_binary: bool, has_data_path: bool) -> bool {
-    !running && has_ferx_binary && has_data_path
+///
+/// `this_stem_running` guards against the *same* model running twice at once
+/// (it would clobber its own `.fitrx` and its own `{stem}_run.log`);
+/// `active_count < max_concurrent` is the separate, independent limit on how
+/// many *different* models may run at the same time.
+fn can_launch_run(
+    this_stem_running: bool,
+    active_count: usize,
+    max_concurrent: usize,
+    has_ferx_binary: bool,
+    has_data_path: bool,
+) -> bool {
+    !this_stem_running && active_count < max_concurrent && has_ferx_binary && has_data_path
+}
+
+/// Human-readable reason the Run button is disabled right now, matching
+/// `can_launch_run`'s gate exactly (same inputs, same precedence) so the
+/// hover text can never describe a different condition than the one that
+/// actually disabled the button. `None` when it's enabled.
+fn run_disabled_reason(
+    this_stem_running: bool,
+    active_count: usize,
+    max_concurrent: usize,
+    has_ferx_binary: bool,
+    has_data_path: bool,
+    has_declared_method: bool,
+) -> Option<&'static str> {
+    if this_stem_running {
+        Some("This model is already running")
+    } else if active_count >= max_concurrent {
+        Some("All concurrent-run slots are busy — use + Queue to run it as soon as one frees up")
+    } else if !has_ferx_binary {
+        Some("ferx isn't configured — set the Rscript path in Settings")
+    } else if !has_data_path {
+        Some("No data file is selected")
+    } else if !has_declared_method {
+        Some("This model has no [fit_options] method declared")
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -2303,11 +2369,61 @@ mod can_launch_run_tests {
     use super::can_launch_run;
 
     #[test]
-    fn requires_not_already_running_and_binary_and_data_path() {
-        assert!(can_launch_run(false, true, true));
-        assert!(!can_launch_run(true, true, true), "must not allow launching while a run is active");
-        assert!(!can_launch_run(false, false, true), "must not allow launching without ferx configured");
-        assert!(!can_launch_run(false, true, false), "must not allow launching without a data path");
+    fn requires_a_free_slot_and_binary_and_data_path() {
+        assert!(can_launch_run(false, 0, 1, true, true));
+        assert!(!can_launch_run(false, 1, 1, true, true), "must not allow launching when all slots are busy");
+        assert!(!can_launch_run(false, 0, 1, false, true), "must not allow launching without ferx configured");
+        assert!(!can_launch_run(false, 0, 1, true, false), "must not allow launching without a data path");
+    }
+
+    #[test]
+    fn blocks_relaunching_a_stem_already_running_even_with_a_free_slot() {
+        // e.g. max_concurrent_runs = 4 with only 1 slot occupied — but that
+        // occupant IS this model, so a second concurrent run of itself must
+        // still be blocked (it would clobber its own .fitrx / run log).
+        assert!(!can_launch_run(true, 1, 4, true, true));
+    }
+
+    #[test]
+    fn allows_launching_when_a_different_stem_occupies_one_of_several_slots() {
+        assert!(can_launch_run(false, 1, 4, true, true));
+    }
+}
+
+#[cfg(test)]
+mod run_disabled_reason_tests {
+    use super::run_disabled_reason;
+
+    #[test]
+    fn none_when_everything_is_satisfied() {
+        assert_eq!(run_disabled_reason(false, 0, 1, true, true, true), None);
+    }
+
+    #[test]
+    fn names_this_model_already_running_before_anything_else() {
+        assert!(run_disabled_reason(true, 0, 1, true, true, true).unwrap().contains("already running"));
+    }
+
+    #[test]
+    fn names_all_slots_busy_and_points_at_queue() {
+        let reason = run_disabled_reason(false, 1, 1, true, true, true).unwrap();
+        assert!(reason.contains("busy"));
+        assert!(reason.contains("Queue"));
+    }
+
+    #[test]
+    fn names_ferx_not_configured() {
+        assert!(run_disabled_reason(false, 0, 1, false, true, true).unwrap().contains("ferx"));
+    }
+
+    #[test]
+    fn names_no_data_file() {
+        assert!(run_disabled_reason(false, 0, 1, true, false, true).unwrap().contains("data file"));
+    }
+
+    #[test]
+    fn names_no_declared_method() {
+        assert!(run_disabled_reason(false, 0, 1, true, true, false).unwrap().contains("fit_options"));
     }
 }
 
@@ -2518,19 +2634,101 @@ fn launch_run(state: &mut AppState, idx: usize, stem: &str) {
     });
 }
 
-/// Pop the next item from the run queue and start it.  No-op when idle queue is empty
-/// or another run is already active.  Called every frame by the app update loop.
-pub fn advance_queue(state: &mut AppState) {
-    if state.run.active_run.is_some() { return; }
-    let Some(queued) = state.run.run_queue.pop_front() else { return };
-    do_launch_queued(state, queued);
+/// Given the model stems currently running and the pending queue, returns
+/// the index of the next queued item whose stem isn't already running — or
+/// `None` if the queue is empty or every remaining item shares a stem with
+/// an already-active run. An item that's skipped this way is left in place
+/// (not dropped): `advance_queue` will try it again on a later frame once
+/// that stem's run finishes, rather than deadlocking or busy-spinning on it.
+fn next_startable_queue_index(
+    running_stems: &HashSet<String>,
+    queue: &std::collections::VecDeque<crate::domain::QueuedRun>,
+) -> Option<usize> {
+    queue.iter().position(|q| !running_stems.contains(&q.stem))
 }
 
-/// Core launch logic: start a run described by `queued`.  Sets `active_run` on success;
-/// on failure, writes to both `status_message` (easy to miss — see
-/// `run_launch_error`'s doc comment) and `run_launch_error`, which is
-/// rendered as a persistent card next to the Run button, since a launch
-/// failure means `active_run` never gets set and the Run popup never opens.
+/// Start queued runs until every concurrent-run slot is full or nothing left
+/// in the queue can start right now. Called every frame by the app update loop.
+pub fn advance_queue(state: &mut AppState) {
+    // Defensive floor: a hand-edited settings.json could set this to 0,
+    // which would otherwise stall the queue forever with no visible cause.
+    let max_concurrent = state.workspace.settings.max_concurrent_runs.max(1);
+    while state.run.active_runs.len() < max_concurrent {
+        let running_stems: HashSet<String> = state.run.active_runs.keys().cloned().collect();
+        let Some(idx) = next_startable_queue_index(&running_stems, &state.run.run_queue) else { break };
+        let queued = state.run.run_queue.remove(idx)
+            .expect("idx came from position() over this same queue");
+        let before = state.run.active_runs.len();
+        do_launch_queued(state, queued);
+        // A failed launch never inserts into `active_runs`, so without this
+        // the loop would pull the next item, and the next, silently draining
+        // the whole queue in a single frame against a persistent fault (ferx
+        // unconfigured, spawn refused) — leaving only the last error visible,
+        // since `do_launch_queued` resets `run_launch_error` on entry. Stop
+        // at the first failure so the remaining queue survives for a retry.
+        if state.run.active_runs.len() == before { break; }
+    }
+}
+
+#[cfg(test)]
+mod next_startable_queue_index_tests {
+    use super::next_startable_queue_index;
+    use std::collections::{HashSet, VecDeque};
+    use std::path::PathBuf;
+
+    fn queued(stem: &str) -> crate::domain::QueuedRun {
+        crate::domain::QueuedRun {
+            stem: stem.to_string(),
+            model_path: PathBuf::new(),
+            data_path: PathBuf::new(),
+            method: "focei".to_string(),
+            covariance: true,
+            gradient: "auto".to_string(),
+            settings: String::new(),
+            threads: 0,
+            optimizer_trace: true,
+            export_tables: false,
+            run_sir_after: false,
+        }
+    }
+
+    #[test]
+    fn picks_the_first_item_when_nothing_is_running() {
+        let running: HashSet<String> = HashSet::new();
+        let queue: VecDeque<_> = [queued("a"), queued("b")].into();
+        assert_eq!(next_startable_queue_index(&running, &queue), Some(0));
+    }
+
+    #[test]
+    fn skips_a_queued_item_whose_stem_is_already_running() {
+        // Regression: must not deadlock or drop the item — it stays queued,
+        // and the next candidate not sharing that stem starts instead.
+        let running: HashSet<String> = ["a".to_string()].into();
+        let queue: VecDeque<_> = [queued("a"), queued("b")].into();
+        assert_eq!(next_startable_queue_index(&running, &queue), Some(1));
+    }
+
+    #[test]
+    fn none_when_every_queued_item_shares_a_running_stem() {
+        let running: HashSet<String> = ["a".to_string()].into();
+        let queue: VecDeque<_> = [queued("a")].into();
+        assert_eq!(next_startable_queue_index(&running, &queue), None);
+    }
+
+    #[test]
+    fn none_when_queue_is_empty() {
+        let running: HashSet<String> = HashSet::new();
+        let queue: VecDeque<crate::domain::QueuedRun> = VecDeque::new();
+        assert_eq!(next_startable_queue_index(&running, &queue), None);
+    }
+}
+
+/// Core launch logic: start a run described by `queued`.  Inserts into
+/// `active_runs` (keyed by stem) on success; on failure, writes to both
+/// `status_message` (easy to miss — see `run_launch_error`'s doc comment)
+/// and `run_launch_error`, which is rendered as a persistent card next to
+/// the Run button, since a launch failure means the run never gets tracked
+/// and the Run popup never opens.
 pub fn do_launch_queued(state: &mut AppState, queued: crate::domain::QueuedRun) {
     state.ui.run_launch_error = None;
 
@@ -2634,7 +2832,7 @@ pub fn do_launch_queued(state: &mut AppState, queued: crate::domain::QueuedRun) 
         cancel_rx,
     ) {
         Ok(spawned) => {
-            state.run.active_run = Some(crate::domain::ActiveRun {
+            state.run.active_runs.insert(queued.stem.clone(), crate::domain::ActiveRun {
                 record,
                 started_at: std::time::Instant::now(),
                 log_path: spawned.log_path,
@@ -2642,14 +2840,12 @@ pub fn do_launch_queued(state: &mut AppState, queued: crate::domain::QueuedRun) 
                 export_tables: queued.export_tables,
                 run_sir_after: queued.run_sir_after,
             });
-            // `log_text` is a separately-maintained pre-joined cache of
-            // `log_buffer` (see its doc comment in state.rs) — it must be
-            // cleared alongside the buffer, or the Run popup keeps showing
-            // the previous run's full log until enough new lines arrive to
-            // incrementally push it out (reported: "popup shows history of
-            // previous runs" on a fresh run).
-            state.run.log_buffer.clear();
-            state.run.log_text.clear();
+            // Replaces this stem's retained log with a fresh, empty one (see
+            // `RunLog`'s doc comment in state.rs) — without this, the Run
+            // popup kept showing the previous run's full log until enough
+            // new lines arrived to incrementally push it out (reported:
+            // "popup shows history of previous runs" on a fresh run).
+            state.run.reset_log(&queued.stem);
             state.ui.status_message = format!("Running {}", queued.stem);
         }
         Err(e) => {
@@ -4035,10 +4231,7 @@ fn show_delete_dialog(ctx: &egui::Context, state: &mut AppState) {
         .is_some();
 
     // Block deletion while model is running.
-    let is_running = state.run.active_run
-        .as_ref()
-        .map(|r| r.record.model_stem == stem)
-        .unwrap_or(false);
+    let is_running = state.run.active_runs.contains_key(&stem);
 
     let mut close   = false;
     let mut execute = false;
