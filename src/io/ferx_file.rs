@@ -200,6 +200,10 @@ fn section_name(line: &str) -> Option<&'static str> {
         "initial_conditions" => Some("initial_conditions"),
         "covariates" => Some("covariates"),
         "data" => Some("data"),
+        // ferx-core 0.3.0 addition (categorical/binary endpoints). Same as
+        // above: recognised for section-boundary tracking, no dedicated field
+        // extraction.
+        "binary_model" => Some("binary_model"),
         _ => None,
     }
 }
@@ -402,7 +406,9 @@ fn classify_word(w: &str) -> TokenKind {
         "method" | "maxiter" | "covariance" | "gradient" | "threads"
         | "output" | "optimizer" | "interaction" | "lloq"
         | "lagtime" | "alag" | "obs_scale" | "sir" | "bloq_method"
-        | "reconverge_gradient_interval" | "stagnation_guard" | "optimizer_trace" => TokenKind::OptionKey,
+        | "reconverge_gradient_interval" | "stagnation_guard" | "optimizer_trace"
+        // ferx-core 0.3.0: [fit_options] ode_method, [binary_model] keys.
+        | "ode_method" | "cmt" | "logit" => TokenKind::OptionKey,
         _ => TokenKind::Plain,
     }
 }
@@ -454,7 +460,7 @@ mod tests {
 
     #[test]
     fn new_dsl_sections_are_recognised() {
-        for name in ["event_model", "adaptive_dosing", "initial_conditions", "covariates"] {
+        for name in ["event_model", "adaptive_dosing", "initial_conditions", "covariates", "binary_model"] {
             assert_eq!(section_name(&format!("[{name}]")), Some(name));
         }
     }

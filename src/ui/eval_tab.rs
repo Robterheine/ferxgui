@@ -38,6 +38,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
             ("ETA-Cov",         EvalSection::EtaCov),
             ("Param Corr",      EvalSection::ParamCorr),
             ("Cond. Dist.",     EvalSection::CondDist),
+            ("NPDE",            EvalSection::Npde),
         ] {
             let active = state.ui.active_eval_section == section;
             if ui.add(
@@ -233,6 +234,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         EvalSection::EtaCov         => show_eta_cov(ui, state, model_idx, dark),
         EvalSection::ParamCorr      => show_param_corr(ui, state, model_idx, dark),
         EvalSection::CondDist       => show_cond_dist(ui, state, model_idx, dark),
+        EvalSection::Npde           => show_npde(ui, state, model_idx, dark),
     }
 }
 
@@ -376,6 +378,19 @@ pub(crate) fn loess(points: &[[f64; 2]], bandwidth_frac: f64) -> Vec<[f64; 2]> {
 /// by exact (ID, TIME) match in `covtab`, `None` (→ NaN, filtered like any
 /// other non-finite point) when there's no covariate data loaded or no
 /// matching row.
+/// Same X-axis resolution as `gof_x_value`, for the NPDE section's rows.
+fn npde_x_value(r: &crate::domain::NpdeRow, col: &str, covtab: Option<&crate::domain::CovTabData>) -> f64 {
+    match col {
+        "TIME"  => r.time,
+        "PRED"  => r.pred,
+        "IPRED" => r.ipred,
+        "TAD"   => r.tad,
+        other => covtab
+            .and_then(|c| c.lookup(&r.id, r.time, other))
+            .unwrap_or(f64::NAN),
+    }
+}
+
 fn gof_x_value(r: &crate::domain::PredRow, col: &str, covtab: Option<&crate::domain::CovTabData>) -> f64 {
     match col {
         "TIME"    => r.time,
@@ -511,13 +526,13 @@ fn show_gof(ui: &mut egui::Ui, state: &AppState, _idx: usize, dark: bool) {
             &format!("CWRES vs {col1}"), &col1, "CWRES",
             half_w, half_h, &cwres_x,
             pt_col, ref_col, loess_col, false,
-            PlotKind::Residual { x_lo: x_lo_cw, x_hi: x_hi_cw, y_pad: cw_pad });
+            PlotKind::Residual { x_lo: x_lo_cw, x_hi: x_hi_cw, y_pad: cw_pad, bands: vec![2.0] });
         ui.add_space(4.0);
         scatter_with_loess(ui, "gof_cwres_x2",
             &format!("CWRES vs {col2}"), &col2, "CWRES",
             half_w, half_h, &cwres_2,
             pt_col, ref_col, loess_col, false,
-            PlotKind::Residual { x_lo: x_lo_cw2, x_hi: x_hi_cw2, y_pad: cw_pad });
+            PlotKind::Residual { x_lo: x_lo_cw2, x_hi: x_hi_cw2, y_pad: cw_pad, bands: vec![2.0] });
     });
 }
 
@@ -527,7 +542,7 @@ fn show_gof(ui: &mut egui::Ui, state: &AppState, _idx: usize, dark: bool) {
 pub(crate) enum PlotKind {
     Identity { lo: f64, hi: f64 },
     #[allow(dead_code)]
-    Residual { x_lo: f64, x_hi: f64, y_pad: f64 },
+    Residual { x_lo: f64, x_hi: f64, y_pad: f64, bands: Vec<f64> },
 }
 
 pub(crate) fn scatter_with_loess(
@@ -595,17 +610,343 @@ pub(crate) fn scatter_with_loess(
                         p.line(Line::new(PlotPoints::new(vec![[lo,lo],[hi,hi]]))
                             .color(ref_color).width(1.2));
                     }
-                    PlotKind::Residual { x_lo: _, x_hi: _, y_pad: _ } => {
+                    PlotKind::Residual { x_lo: _, x_hi: _, y_pad: _, ref bands } => {
                         p.hline(HLine::new(0.0).color(ref_color).width(1.2));
-                        for &lvl in &[2.0_f64, -2.0] {
-                            p.hline(HLine::new(lvl)
-                                .color(egui::Color32::from_rgba_unmultiplied(232,149,64,160))
-                                .width(1.0));
+                        let band_col = egui::Color32::from_rgba_unmultiplied(232, 149, 64, 160);
+                        for &lvl in bands {
+                            p.hline(HLine::new(lvl).color(band_col).width(1.0));
+                            p.hline(HLine::new(-lvl).color(band_col).width(1.0));
                         }
                     }
                 }
             });
     });
+}
+
+// ── NPDE / NPD ──────────────────────────────────────────────────────────────
+
+/// Simulation-based NPDE/NPD diagnostics (`ferx_calc_npde()`) — always
+/// explicitly triggered (never auto-computed like GOF/CWRES, which are free
+/// reads off the `.fitrx` bundle): simulating `nsim` replicates per subject
+/// is the single most expensive computation in the app.
+fn show_npde(ui: &mut egui::Ui, state: &mut AppState, model_idx: usize, dark: bool) {
+    let entry = &state.workspace.models[model_idx];
+    let stem = entry.model.stem.clone();
+    let Some(fitrx_path) = entry.fitrx_path.clone() else {
+        ui.centered_and_justified(|ui| {
+            ui.label(egui::RichText::new("No run output yet").color(theme::fg3(dark)).size(13.0));
+        });
+        return;
+    };
+
+    // A re-fit under the same stem changes the `.fitrx` mtime without
+    // changing the stem — drop the (now stale) cached NPDE result so it
+    // isn't shown indefinitely against an outdated fit.
+    let current_mtime = std::fs::metadata(&fitrx_path).ok().and_then(|m| m.modified().ok());
+    if mtime_cache_is_stale(state.workspace.npde_loaded_mtime.get(&stem).copied(), current_mtime) {
+        state.workspace.npde_results.remove(&stem);
+        state.workspace.npde_loaded_mtime.remove(&stem);
+    }
+
+    let running = state.workspace.npde_running.contains(&stem);
+    let can_compute = state.workspace.settings.ferx_binary.is_some() && !running;
+    let dim = if dark { theme::FG2 } else { egui::Color32::from_gray(100) };
+
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("nsim:").color(dim).size(11.0));
+        ui.add(egui::DragValue::new(&mut state.ui.npde_nsim).range(100..=100_000).speed(10));
+        ui.add_space(10.0);
+        ui.label(egui::RichText::new("seed:").color(dim).size(11.0));
+        let seed_suffix = if state.ui.npde_seed == 0 { " (auto)" } else { "" };
+        ui.add(egui::DragValue::new(&mut state.ui.npde_seed).range(0..=u32::MAX).suffix(seed_suffix));
+        ui.add_space(10.0);
+
+        let has_result = state.workspace.npde_results.contains_key(&stem);
+        let label = if has_result { "Recompute NPDE" } else { "Compute NPDE" };
+        if ui
+            .add_enabled(can_compute, egui::Button::new(egui::RichText::new(label).size(12.0))
+                .fill(theme::elevated_fill(dark)))
+            .on_hover_text(
+                "Monte-Carlo simulation from the model + data recorded on this fit — \
+                 robust to nonlinearity and non-Gaussian random effects, and (unlike \
+                 CWRES) doesn't rely on a first-order approximation.",
+            )
+            .clicked()
+        {
+            let nsim = state.ui.npde_nsim;
+            let seed = if state.ui.npde_seed == 0 { None } else { Some(state.ui.npde_seed) };
+            state.workspace.npde_error.remove(&stem);
+            state.workspace.npde_running.insert(stem.clone());
+            if let Ok(m) = std::fs::metadata(&fitrx_path).and_then(|m| m.modified()) {
+                state.workspace.npde_loaded_mtime.insert(stem.clone(), m);
+            }
+            let tx      = state.worker_tx.clone();
+            let ctx     = ui.ctx().clone();
+            let stem_cl = stem.clone();
+            std::thread::spawn(move || {
+                match crate::io::r_extract::compute_npde(&fitrx_path, nsim, seed) {
+                    Ok(result) => {
+                        let _ = tx.send(crate::workers::messages::WorkerMsg::NpdeComplete {
+                            stem: stem_cl, result: Box::new(result),
+                        });
+                    }
+                    Err(e) => {
+                        let _ = tx.send(crate::workers::messages::WorkerMsg::RTaskError {
+                            context: format!("npde {stem_cl}"),
+                            message: e,
+                        });
+                    }
+                }
+                ctx.request_repaint();
+            });
+        }
+
+        if running {
+            ui.add_space(8.0);
+            ui.spinner();
+            ui.label(egui::RichText::new("Simulating…").color(dim).size(11.0));
+        }
+    });
+
+    // Independent X-axis pickers for the two scatter panels — same "fixed
+    // columns + declared covariates" choice as the GOF section's CWRES₁/₂.
+    let cov_names: &[String] = state.ui.eval_covtab.as_ref()
+        .map(|c| c.covariate_names.as_slice())
+        .unwrap_or(&[]);
+    let x_opts: Vec<&str> = ["TIME", "PRED", "IPRED", "TAD"].into_iter()
+        .chain(cov_names.iter().map(String::as_str))
+        .collect();
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("NPDE₁ x:").color(dim).size(11.0));
+        egui::ComboBox::from_id_salt("npde_x1_combo")
+            .selected_text(&state.ui.eval_npde_x_col)
+            .width(70.0)
+            .show_ui(ui, |ui| {
+                for opt in &x_opts {
+                    ui.selectable_value(&mut state.ui.eval_npde_x_col, opt.to_string(), *opt);
+                }
+            });
+        ui.add_space(10.0);
+        ui.label(egui::RichText::new("NPDE₂ x:").color(dim).size(11.0));
+        egui::ComboBox::from_id_salt("npde_x2_combo")
+            .selected_text(&state.ui.eval_npde_x_col_2)
+            .width(70.0)
+            .show_ui(ui, |ui| {
+                for opt in &x_opts {
+                    ui.selectable_value(&mut state.ui.eval_npde_x_col_2, opt.to_string(), *opt);
+                }
+            });
+    });
+    ui.separator();
+
+    if running && !state.workspace.npde_results.contains_key(&stem) {
+        ui.ctx().request_repaint();
+    }
+
+    if let Some(err) = state.workspace.npde_error.get(&stem).cloned() {
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new(format!("NPDE failed: {err}")).color(theme::RED).size(12.0));
+        return;
+    }
+
+    let Some(result) = state.workspace.npde_results.get(&stem).cloned() else {
+        ui.centered_and_justified(|ui| {
+            ui.label(
+                egui::RichText::new("Not yet computed — click \"Compute NPDE\" above")
+                    .color(theme::fg3(dark)).size(13.0),
+            );
+        });
+        return;
+    };
+    if result.rows.is_empty() {
+        ui.centered_and_justified(|ui| {
+            ui.label(egui::RichText::new("No observations returned").color(theme::fg3(dark)).size(13.0));
+        });
+        return;
+    }
+
+    let avail = ui.available_size();
+    let half_w = (avail.x / 2.0 - 6.0).max(150.0);
+    let half_h = (avail.y / 2.0 - 6.0).max(150.0);
+    let pt_col  = if dark { egui::Color32::from_rgba_unmultiplied(76,138,255,200) }
+                  else    { egui::Color32::from_rgba_unmultiplied(30, 90,210,180) };
+    let ref_col = if dark { egui::Color32::from_gray(120) } else { egui::Color32::from_gray(160) };
+    let loess_col = theme::ORANGE;
+
+    // Standard NPDE reference bands: |NPDE| > 1.96 flags the 5% tail,
+    // |NPDE| > 2.58 the 1% tail, against the N(0,1) null.
+    let npde_abs_max = result.rows.iter()
+        .filter(|r| r.npde.is_finite())
+        .fold(0.0f64, |m, r| m.max(r.npde.abs()));
+    let y_pad = (npde_abs_max * 1.15).max(3.0);
+
+    let covtab = state.ui.eval_covtab.as_ref();
+    let col1 = state.ui.eval_npde_x_col.clone();
+    let col2 = state.ui.eval_npde_x_col_2.clone();
+    let pts_1: Vec<[f64;2]> = result.rows.iter()
+        .map(|r| [npde_x_value(r, &col1, covtab), r.npde])
+        .filter(|p| p[0].is_finite() && p[1].is_finite()).collect();
+    let pts_2: Vec<[f64;2]> = result.rows.iter()
+        .map(|r| [npde_x_value(r, &col2, covtab), r.npde])
+        .filter(|p| p[0].is_finite() && p[1].is_finite()).collect();
+    let x_lo_t = pts_1.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min);
+    let x_hi_t = pts_1.iter().map(|p| p[0]).fold(f64::NEG_INFINITY, f64::max);
+    let x_lo_p = pts_2.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min);
+    let x_hi_p = pts_2.iter().map(|p| p[0]).fold(f64::NEG_INFINITY, f64::max);
+
+    ui.horizontal(|ui| {
+        scatter_with_loess(ui, "npde_x1", &format!("NPDE vs {col1}"), &col1, "NPDE",
+            half_w, half_h, &pts_1,
+            pt_col, ref_col, loess_col, false,
+            PlotKind::Residual { x_lo: x_lo_t, x_hi: x_hi_t, y_pad, bands: vec![1.96, 2.58] });
+        ui.add_space(4.0);
+        scatter_with_loess(ui, "npde_x2", &format!("NPDE vs {col2}"), &col2, "NPDE",
+            half_w, half_h, &pts_2,
+            pt_col, ref_col, loess_col, false,
+            PlotKind::Residual { x_lo: x_lo_p, x_hi: x_hi_p, y_pad, bands: vec![1.96, 2.58] });
+    });
+    ui.add_space(4.0);
+
+    // QQ-normal: sorted NPDE quantiles against the N(0,1) they should follow
+    // under a correctly specified model — the distributional check NPDE is
+    // for, which the two scatter panels above don't show on their own.
+    let mut sorted: Vec<f64> = result.rows.iter()
+        .map(|r| r.npde).filter(|v| v.is_finite()).collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = sorted.len();
+    let qq_pts: Vec<[f64;2]> = sorted.iter().enumerate()
+        .map(|(i, &y)| {
+            let p = (i as f64 + 0.5) / n as f64;
+            [normal_quantile(p), y]
+        })
+        .collect();
+    let qq_bound = qq_pts.iter()
+        .flat_map(|p| [p[0].abs(), p[1].abs()])
+        .fold(3.0f64, f64::max);
+
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.label(egui::RichText::new("QQ-normal (NPDE vs N(0,1))")
+                .size(11.0).color(theme::fg2(dark)).strong());
+            Plot::new("npde_qq")
+                .width(half_w).height(half_h - 18.0)
+                .data_aspect(1.0)
+                .show_grid(true)
+                .label_formatter(|_, v| format!("theoretical={:.3}  npde={:.3}", v.x, v.y))
+                .show(ui, |p| {
+                    p.points(Points::new(PlotPoints::new(qq_pts.clone())).radius(2.2).color(pt_col));
+                    p.line(Line::new(PlotPoints::new(vec![[-qq_bound, -qq_bound], [qq_bound, qq_bound]]))
+                        .color(ref_col).width(1.2));
+                });
+        });
+        ui.add_space(4.0);
+        ui.vertical(|ui| {
+            ui.label(egui::RichText::new(format!("N = {n} observations"))
+                .size(11.0).color(theme::fg2(dark)).strong());
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(
+                    "Points should scatter along the diagonal under a correctly \
+                     specified model. Systematic curvature indicates a distributional \
+                     misspecification the scatter panels alone won't show.",
+                )
+                .size(11.0).color(dim),
+            );
+            let n_flag_95 = result.rows.iter().filter(|r| r.npde.is_finite() && r.npde.abs() > 1.96).count();
+            let n_flag_99 = result.rows.iter().filter(|r| r.npde.is_finite() && r.npde.abs() > 2.58).count();
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new(format!(
+                "|NPDE| > 1.96: {n_flag_95}/{n} ({:.1}%, expect ~5%)",
+                100.0 * n_flag_95 as f64 / n as f64,
+            )).size(11.0).color(theme::fg(dark)));
+            ui.label(egui::RichText::new(format!(
+                "|NPDE| > 2.58: {n_flag_99}/{n} ({:.1}%, expect ~1%)",
+                100.0 * n_flag_99 as f64 / n as f64,
+            )).size(11.0).color(theme::fg(dark)));
+
+            // NPD — the whole-subject decorrelated counterpart to NPDE.
+            // Same N(0,1) null and the same two flag thresholds apply.
+            let n_flag_95_npd = result.rows.iter().filter(|r| r.npd.is_finite() && r.npd.abs() > 1.96).count();
+            let n_flag_99_npd = result.rows.iter().filter(|r| r.npd.is_finite() && r.npd.abs() > 2.58).count();
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new("NPD").size(11.0).color(theme::fg2(dark)).strong());
+            ui.label(egui::RichText::new(format!(
+                "|NPD| > 1.96: {n_flag_95_npd}/{n} ({:.1}%, expect ~5%)",
+                100.0 * n_flag_95_npd as f64 / n as f64,
+            )).size(11.0).color(theme::fg(dark)));
+            ui.label(egui::RichText::new(format!(
+                "|NPD| > 2.58: {n_flag_99_npd}/{n} ({:.1}%, expect ~1%)",
+                100.0 * n_flag_99_npd as f64 / n as f64,
+            )).size(11.0).color(theme::fg(dark)));
+        });
+    });
+}
+
+/// Inverse standard normal CDF (quantile function) via Acklam's rational
+/// approximation (accurate to ~1.15e-9) — used only for the NPDE QQ-normal
+/// plot, so a full statistics crate isn't worth pulling in for one function.
+// The coefficients below are Acklam's published constants verbatim (16
+// significant digits) — truncating them to placate `excessive_precision`
+// would just be re-typing a verified numerical algorithm from memory.
+#[allow(clippy::excessive_precision)]
+fn normal_quantile(p: f64) -> f64 {
+    if !(0.0..1.0).contains(&p) || p.is_nan() {
+        return f64::NAN;
+    }
+    const A: [f64; 6] = [-3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02,
+                          1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00];
+    const B: [f64; 5] = [-5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02,
+                          6.680131188771972e+01, -1.328068155288572e+01];
+    const C: [f64; 6] = [-7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00,
+                          -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00];
+    const D: [f64; 4] = [7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00,
+                          3.754408661907416e+00];
+    let p_low = 0.02425;
+    let p_high = 1.0 - p_low;
+
+    if p < p_low {
+        let q = (-2.0 * p.ln()).sqrt();
+        (((((C[0]*q+C[1])*q+C[2])*q+C[3])*q+C[4])*q+C[5]) /
+        ((((D[0]*q+D[1])*q+D[2])*q+D[3])*q+1.0)
+    } else if p <= p_high {
+        let q = p - 0.5;
+        let r = q * q;
+        (((((A[0]*r+A[1])*r+A[2])*r+A[3])*r+A[4])*r+A[5]) * q /
+        (((((B[0]*r+B[1])*r+B[2])*r+B[3])*r+B[4])*r+1.0)
+    } else {
+        let q = (-2.0 * (1.0 - p).ln()).sqrt();
+        -(((((C[0]*q+C[1])*q+C[2])*q+C[3])*q+C[4])*q+C[5]) /
+        ((((D[0]*q+D[1])*q+D[2])*q+D[3])*q+1.0)
+    }
+}
+
+#[cfg(test)]
+mod normal_quantile_tests {
+    use super::normal_quantile;
+
+    #[test]
+    fn median_is_zero() {
+        assert!(normal_quantile(0.5).abs() < 1e-8);
+    }
+
+    #[test]
+    fn matches_known_two_sided_95_percent_bound() {
+        assert!((normal_quantile(0.975) - 1.959964).abs() < 1e-4);
+        assert!((normal_quantile(0.025) + 1.959964).abs() < 1e-4);
+    }
+
+    #[test]
+    fn matches_known_two_sided_99_percent_bound() {
+        assert!((normal_quantile(0.995) - 2.575829).abs() < 1e-4);
+    }
+
+    #[test]
+    fn out_of_range_inputs_are_nan_not_a_panic() {
+        assert!(normal_quantile(0.0).is_nan());
+        assert!(normal_quantile(1.0).is_nan());
+        assert!(normal_quantile(-0.1).is_nan());
+        assert!(normal_quantile(f64::NAN).is_nan());
+    }
 }
 
 // ── Individual Fits ───────────────────────────────────────────────────────────

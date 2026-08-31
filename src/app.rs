@@ -916,7 +916,8 @@ fn render_settings(ui: &mut egui::Ui, state: &mut AppState) {
 
             // Oversubscription warning — display only, never overrides the
             // user's setting. `run_threads` is the Run tab's current thread
-            // setting (0 = auto, passed to ferx as NULL, i.e. "use every core").
+            // setting (0 = auto, passed to ferx as NULL — ferx-r 0.3.0 documents
+            // the actual default as cores − 1, capped at 8, not "every core").
             let cores = std::thread::available_parallelism().map(std::num::NonZeroUsize::get).unwrap_or(1);
             if let Some(warning) = oversubscription_warning(
                 state.workspace.settings.max_concurrent_runs,
@@ -972,10 +973,13 @@ fn oversubscription_warning(max_concurrent: usize, threads: u32, cores: usize) -
         return None;
     }
     if threads == 0 {
+        // ferx-r 0.3.0 documents the real "auto" default as cores − 1, capped at 8
+        // (not "every core") — quote that estimate rather than the raw core count.
+        let auto_threads = cores.saturating_sub(1).min(8);
         return Some(format!(
             "{max_concurrent} concurrent fits with threads set to \"auto\" — each fit may claim \
-             all {cores} core(s) on this machine, so they will likely run slower together than \
-             one at a time. Consider setting an explicit per-run thread count on the Run tab."
+             up to {auto_threads} core(s) on this machine, so they will likely run slower together \
+             than one at a time. Consider setting an explicit per-run thread count on the Run tab."
         ));
     }
     let requested = max_concurrent as u64 * threads as u64;

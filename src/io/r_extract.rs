@@ -5,7 +5,7 @@
 /// a background thread.
 use std::path::Path;
 
-use crate::domain::{CheckInitResult, CovScreenResult, EtaCovResult, RModelInfo, SimRunConfig, SimRunResult, SirCi, SirResult, VpcConfig, VpcResult};
+use crate::domain::{AdaptiveSimResult, CheckInitResult, CovScreenResult, EtaCovResult, ModelValidateResult, NpdeResult, RModelInfo, SimRunConfig, SimRunResult, SirCi, SirResult, VpcConfig, VpcResult};
 
 // ---------------------------------------------------------------------------
 // Embedded R scripts
@@ -50,6 +50,7 @@ suppressMessages(suppressWarnings(library(ferx)))
 suppressMessages(suppressWarnings(library(jsonlite)))
 
 chk <- ferx_check_init(model_path, data_path, method = "focei")
+
 s   <- chk$summary
 
 finite_or_null <- function(x) if (is.finite(x)) x else NULL
@@ -62,6 +63,217 @@ out <- list(
   converged = isTRUE(s$converged)
 )
 cat(toJSON(out, auto_unbox = TRUE, na = "null"))
+"#;
+
+/// Static syntax/structure validation of a `.ferx` file — no fit, no
+/// optimizer iterations. Args: <model_path> [data_path] (empty string = no
+/// data, matching the function's own `data = NULL` default).
+const MODEL_VALIDATE_R: &str = r#"
+args <- commandArgs(trailingOnly = TRUE)
+if (length(args) < 1) stop("usage: model_validate.R <model_path> [data_path]")
+model_path <- args[1]
+data_path  <- if (length(args) >= 2 && nchar(args[2]) > 0) args[2] else NULL
+
+suppressMessages(suppressWarnings(library(ferx)))
+suppressMessages(suppressWarnings(library(jsonlite)))
+
+invisible(capture.output(res <- ferx_model_validate(model_path, data = data_path)))
+
+diag <- res$diagnostics
+rows <- if (is.null(diag) || nrow(diag) == 0) list() else lapply(seq_len(nrow(diag)), function(i) {
+  list(
+    severity   = as.character(diag$severity[i]),
+    code       = as.character(diag$code[i]),
+    message    = as.character(diag$message[i]),
+    block      = if (is.na(diag$block[i])) NA_character_ else as.character(diag$block[i]),
+    line       = if (is.na(diag$line[i])) NA_integer_ else as.integer(diag$line[i]),
+    suggestion = if (is.na(diag$suggestion[i])) NA_character_ else as.character(diag$suggestion[i])
+  )
+})
+cat(toJSON(list(ok = isTRUE(res$ok), diagnostics = rows), auto_unbox = TRUE, na = "null"))
+"#;
+
+/// Call `ferx_model_validate()` via R — static syntax/structure check, no
+/// fit or optimizer iterations. `data_path` is optional (column-dependent
+/// checks are skipped without it, matching the function's own `data = NULL`
+/// default) — pass `None` when no dataset is resolved yet.
+/// Blocking — run from a background thread.
+pub fn compute_model_validate(model_path: &Path, data_path: Option<&Path>) -> Result<ModelValidateResult, String> {
+    let data_arg = match data_path {
+        Some(p) => path_as_str(p)?,
+        None => "",
+    };
+    let json = run_script(MODEL_VALIDATE_R, &[
+        path_as_str(model_path)?,
+        data_arg,
+    ])?;
+    serde_json::from_str(&json)
+        .map_err(|e| format!("model_validate JSON parse error: {e}\nR output: {}", &json[..json.len().min(500)]))
+}
+
+/// Simulation-based NPDE/NPD diagnostics. Args: <fitrx_path> [nsim] [seed]
+/// (empty string = use the function's own defaults, nsim=1000).
+const NPDE_R: &str = r#"
+args <- commandArgs(trailingOnly = TRUE)
+if (length(args) < 1) stop("usage: npde.R <fitrx_path> [nsim] [seed]")
+fitrx_path <- args[1]
+nsim <- if (length(args) >= 2 && nchar(args[2]) > 0) as.integer(args[2]) else 1000L
+seed <- if (length(args) >= 3 && nchar(args[3]) > 0) as.integer(args[3]) else NULL
+
+suppressMessages(library(ferx))
+suppressMessages(library(jsonlite))
+
+fit <- ferx_load_fit(fitrx_path)
+fit <- ferx_calc_npde(fit, nsim = nsim, seed = seed)
+
+sd <- fit$sdtab
+na_num <- function(x) if (is.na(x)) NA_real_ else as.numeric(x)
+rows <- lapply(seq_len(nrow(sd)), function(i) {
+  list(
+    id    = as.character(sd$ID[i]),
+    time  = as.numeric(sd$TIME[i]),
+    pred  = as.numeric(sd$PRED[i]),
+    ipred = na_num(sd$IPRED[i]),
+    tad   = na_num(sd$TAD[i]),
+    npde  = as.numeric(sd$NPDE[i]),
+    npd   = as.numeric(sd$NPD[i])
+  )
+})
+cat(toJSON(list(rows = rows), auto_unbox = TRUE, na = "null"))
+"#;
+
+/// Call `ferx_simulate_adaptive()` via R. Blocking — run from a background thread.
+pub fn compute_adaptive_sim(
+    model_path:     &Path,
+    data_path:      &Path,
+    n_sim:          u32,
+    seed:           u32,
+    max_decisions:  u32,
+    out_path:       &Path,
+) -> Result<AdaptiveSimResult, String> {
+    let n_sim_str = n_sim.to_string();
+    let seed_str  = seed.to_string();
+    let max_str   = max_decisions.to_string();
+    let json = run_script(ADAPTIVE_SIM_R, &[
+        path_as_str(model_path)?,
+        path_as_str(data_path)?,
+        &n_sim_str,
+        &seed_str,
+        &max_str,
+        path_as_str(out_path)?,
+    ])?;
+    serde_json::from_str(&json)
+        .map_err(|e| format!("adaptive-sim JSON parse error: {e}\nR output: {}", &json[..json.len().min(500)]))
+}
+
+/// Call `ferx_calc_npde()` via R — Monte-Carlo simulation from the model+data
+/// recorded on the fit, `nsim` replicates per subject (default 1000). This is
+/// the most expensive diagnostic in the app; always run explicitly, never
+/// auto-triggered. Blocking — run from a background thread.
+pub fn compute_npde(fitrx_path: &Path, nsim: u32, seed: Option<u32>) -> Result<NpdeResult, String> {
+    let nsim_str = nsim.to_string();
+    let seed_str = seed.map(|s| s.to_string()).unwrap_or_default();
+    let json = run_script(NPDE_R, &[
+        path_as_str(fitrx_path)?,
+        &nsim_str,
+        &seed_str,
+    ])?;
+    serde_json::from_str(&json)
+        .map_err(|e| format!("npde JSON parse error: {e}\nR output: {}", &json[..json.len().min(500)]))
+}
+
+/// Adaptive-dosing simulation via `ferx_simulate_adaptive()` — runs the
+/// model's own `[adaptive_dosing]` controller against its declared
+/// parameters. Unlike `ferx_simulate()` this takes no `fit` argument at all.
+/// Args: <model> <data> <n_sim> <seed> <max_decisions> <out_csv>
+const ADAPTIVE_SIM_R: &str = r#"
+args <- commandArgs(trailingOnly = TRUE)
+if (length(args) < 6) stop("usage: adaptive_sim.R <model> <data> <n_sim> <seed> <max_decisions> <out_csv>")
+model_path <- args[1]
+data_path  <- args[2]
+n_sim      <- as.integer(args[3])
+seed       <- as.integer(args[4])
+max_dec    <- as.integer(args[5])
+out_path   <- args[6]
+
+suppressMessages(library(ferx))
+suppressMessages(library(jsonlite))
+
+res <- ferx_simulate_adaptive(model_path, data_path, n_sim = n_sim, seed = seed,
+                               verify = TRUE, max_decisions = max_dec)
+
+write.csv(res$trajectories, out_path, row.names = FALSE)
+
+na_chr <- function(x) if (is.na(x)) NA_character_ else as.character(x)
+na_num <- function(x) if (is.na(x)) NA_real_ else as.numeric(x)
+na_int <- function(x) if (is.na(x)) NA_integer_ else as.integer(x)
+
+doses <- res$doses
+dose_rows <- if (is.null(doses) || nrow(doses) == 0) list() else lapply(seq_len(nrow(doses)), function(i) {
+  list(
+    id       = na_chr(doses$ID[i]),
+    time     = na_num(doses$TIME[i]),
+    amt      = na_num(doses$AMT[i]),
+    decision = na_int(doses$DECISION[i]),
+    signal   = na_num(doses$SIGNAL[i]),
+    rule     = na_chr(doses$RULE[i])
+  )
+})
+
+dec <- res$decisions
+dec_rows <- if (is.null(dec) || nrow(dec) == 0) list() else lapply(seq_len(nrow(dec)), function(i) {
+  list(
+    id       = na_chr(dec$ID[i]),
+    decision = na_int(dec$DECISION[i]),
+    time     = na_num(dec$TIME[i]),
+    signal   = na_num(dec$SIGNAL[i]),
+    outcome  = na_chr(dec$OUTCOME[i])
+  )
+})
+
+met <- res$metrics
+met_rows <- if (is.null(met) || nrow(met) == 0) list() else lapply(seq_len(nrow(met)), function(i) {
+  list(
+    id                 = na_chr(met$ID[i]),
+    cum_dose           = na_num(met$CUM_DOSE[i]),
+    n_doses            = na_int(met$N_DOSES[i]),
+    n_increases        = na_int(met$N_INCREASES[i]),
+    n_decreases        = na_int(met$N_DECREASES[i]),
+    n_holds            = na_int(met$N_HOLDS[i]),
+    discontinued       = isTRUE(met$DISCONTINUED[i]),
+    signal_min         = na_num(met$SIGNAL_MIN[i]),
+    signal_max         = na_num(met$SIGNAL_MAX[i]),
+    signal_mean        = na_num(met$SIGNAL_MEAN[i]),
+    pct_time_in_window = na_num(met$PCT_TIME_IN_WINDOW[i])
+  )
+})
+
+cat(toJSON(list(
+  out_path = out_path,
+  n_rows = nrow(res$trajectories),
+  columns = names(res$trajectories),
+  doses = dose_rows,
+  decisions = dec_rows,
+  metrics = met_rows
+), auto_unbox = TRUE, na = "null"))
+"#;
+
+/// Recompute the covariance step on an existing `.fitrx` bundle and overwrite
+/// it in place. Args: <fitrx_path> <covariance_method: r|s|rsr>
+const COVARIANCE_R: &str = r#"
+args <- commandArgs(trailingOnly = TRUE)
+if (length(args) < 2) stop("usage: covariance.R <fitrx_path> <covariance_method>")
+fitrx_path <- args[1]
+cov_method <- args[2]
+
+suppressMessages(library(ferx))
+suppressMessages(library(jsonlite))
+
+fit <- ferx_load_fit(fitrx_path)
+fit <- ferx_covariance(fit, covariance_method = cov_method)
+ferx_save_fit(fit, fitrx_path)
+
+cat(toJSON(list(covariance_status = fit$covariance_status), auto_unbox = TRUE))
 "#;
 
 /// Run script — spawned (detached) to fit a model and write a `.fitrx` bundle.
@@ -902,6 +1114,29 @@ pub fn compute_check_init(model_path: &Path, data_path: &Path) -> Result<CheckIn
     ])?;
     serde_json::from_str(&json)
         .map_err(|e| format!("check_init JSON parse error: {e}\nR output: {}", &json[..json.len().min(500)]))
+}
+
+/// Recompute the covariance step on an already-completed fit — via
+/// `ferx_covariance()` — and overwrite the `.fitrx` bundle in place with the
+/// refreshed standard errors / covariance matrix. Does not re-optimize.
+///
+/// Returns the refreshed `covariance_status` string on success; the caller
+/// rescans the directory (same as after a normal run) to pick up the updated
+/// bundle rather than round-tripping the full parameter table through here —
+/// `fitrx.rs::read_fit_summary` already knows how to parse everything the
+/// updated bundle carries (SEs, condition number via
+/// `condition_number_from_covariance`, etc.).
+/// Blocking — run from a background thread.
+pub fn compute_covariance(fitrx_path: &Path, covariance_method: &str) -> Result<String, String> {
+    let json = run_script(COVARIANCE_R, &[
+        path_as_str(fitrx_path)?,
+        covariance_method,
+    ])?;
+    #[derive(serde::Deserialize)]
+    struct Out { covariance_status: String }
+    let out: Out = serde_json::from_str(&json)
+        .map_err(|e| format!("covariance JSON parse error: {e}\nR output: {}", &json[..json.len().min(500)]))?;
+    Ok(out.covariance_status)
 }
 
 /// Compute a VPC by delegating all statistics to the `vpc` R package

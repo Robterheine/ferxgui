@@ -139,6 +139,7 @@ pub enum EvalSection {
     EtaCov,
     ParamCorr,
     CondDist,
+    Npde,
 }
 
 /// Which sub-view is active inside the Cond. Dist. (SAEM conditional
@@ -198,6 +199,12 @@ pub enum SimBasis {
     /// Parameter sets resampled from the SIR tab's kept resamples. Requires a
     /// SIR run for this model with "Keep resamples" enabled.
     SirUncertainty,
+    /// `ferx_simulate_adaptive()` — the model's own `[adaptive_dosing]`
+    /// controller against the model's declared parameters. Unlike the other
+    /// bases this takes no `fit` argument at all (no posterior/uncertainty
+    /// concept applies), and returns trajectories + a dose ledger + a
+    /// decision log + per-subject metrics instead of a single CSV.
+    AdaptiveDosing,
 }
 
 /// Line style for VPC observed-percentile lines. Maps to an egui `LineStyle`
@@ -400,8 +407,13 @@ pub struct UiState {
     pub run_threads: u32,
     pub run_extra_args: String,
     pub run_data_path: Option<std::path::PathBuf>,
-    /// Gradient method for ferx_fit(): "auto", "ad", or "fd".
+    /// Gradient method for ferx_fit(): "auto" or "fd" ("ad" — Enzyme AD — was
+    /// retired in ferx-r 0.3.0 and now errors; "auto" already resolves to the
+    /// analytic Dual2 path it used to provide).
     pub run_gradient: String,
+    /// `covariance_method` picker for the standalone "Recompute SEs" action
+    /// (`ferx_covariance()`) on the Parameters pill: "r", "s", or "rsr".
+    pub covariance_method: String,
     /// (stem, message) from the most recent failed run *launch* (before any
     /// R process even started — e.g. the embedded run script couldn't be
     /// written, or the OS refused to spawn the process). Without this, such
@@ -499,6 +511,19 @@ pub struct UiState {
     /// Index into `eval_conddist.eta_names` for the currently displayed ETA.
     pub eval_conddist_eta_idx: usize,
 
+    // ---- Evaluation tab (NPDE section) ----
+    /// `nsim` replicates per subject for the next "Compute NPDE" click.
+    pub npde_nsim: u32,
+    /// RNG seed for the next "Compute NPDE" click — `0` means unset (the
+    /// function's own default), matching the `run_threads`
+    /// zero-means-auto convention already used elsewhere.
+    pub npde_seed: u32,
+    /// Independent X-axis choices for the two NPDE scatter panels — same
+    /// "fixed columns + declared covariates" picker as the GOF section's
+    /// `eval_cwres_x_col`/`_2`.
+    pub eval_npde_x_col:   String,
+    pub eval_npde_x_col_2: String,
+
     // ---- Evaluation tab (ETA-Cov section) ----
     /// Which of the two covariate-screening views (Dataset Scan / Declared
     /// Covariates) is shown.
@@ -552,6 +577,9 @@ pub struct UiState {
     pub duplicate_set_as_child: bool,
     /// Model awaiting a delete-confirmation dialog.
     pub pending_delete: Option<usize>,
+    /// Model index + chosen `covariance_method` awaiting the "Recompute SEs"
+    /// confirmation dialog (it overwrites the `.fitrx` bundle in place).
+    pub pending_covariance_confirm: Option<(usize, String)>,
     // ---- Compare dialog ----
     /// Two model stems open for side-by-side parameter comparison.
     pub compare_a: Option<String>,
@@ -605,6 +633,15 @@ pub struct UiState {
     /// Eta/epsilon replicates per parameter draw — used only when
     /// `simrun_basis` is an uncertainty mode.
     pub simrun_n_sim_per_draw: u32,
+    /// `n_sim` for `ferx_simulate_adaptive()` — used only when `simrun_basis
+    /// == AdaptiveDosing`.
+    pub adaptive_n_sim: u32,
+    /// Seed for `ferx_simulate_adaptive()` — the R function's own default is
+    /// 42, unlike the other bases' 0-means-auto convention.
+    pub adaptive_seed: u32,
+    /// Cap on controller decisions per subject; `0` means unlimited
+    /// (`max_decisions = 0L` is itself the R function's "no cap" value).
+    pub adaptive_max_decisions: u32,
 
     // ---- History tab ----
     pub history_filter: String,
@@ -688,6 +725,7 @@ impl Default for UiState {
             run_extra_args: String::new(),
             run_data_path: None,
             run_gradient: "auto".to_string(),
+            covariance_method: "r".to_string(),
             run_launch_error: None,
             export_tables_error: None,
             run_optimizer_trace: true,
@@ -724,6 +762,10 @@ impl Default for UiState {
             eval_conddist: None,
             eval_conddist_view: CondDistView::default(),
             eval_conddist_eta_idx: 0,
+            npde_nsim: 1000,
+            npde_seed: 0,
+            eval_npde_x_col:   "TIME".to_string(),
+            eval_npde_x_col_2: "PRED".to_string(),
             eval_eta_cov_view: EtaCovView::default(),
             run_popup_open:        false,
             about_open:            false,
@@ -743,6 +785,7 @@ impl Default for UiState {
             duplicate_description_buf: String::new(),
             duplicate_set_as_child: true,
             pending_delete: None,
+            pending_covariance_confirm: None,
             compare_a: None,
             compare_b: None,
             compare_gof_a: None,
@@ -766,6 +809,9 @@ impl Default for UiState {
             simrun_out_path: String::new(),
             simrun_n_draws: 100,
             simrun_n_sim_per_draw: 1,
+            adaptive_n_sim: 1,
+            adaptive_seed: 42,
+            adaptive_max_decisions: 0,
             history_filter: String::new(),
             history_selected: None,
             history_sort_col: HistorySortCol::Started,
@@ -852,6 +898,13 @@ pub struct WorkspaceState {
     /// Error message from the last failed Simulate-tab run per model stem —
     /// same silent-revert-to-pristine-hint gap as `vpc_error`.
     pub simrun_error: HashMap<String, String>,
+    /// `ferx_simulate_adaptive()` results keyed by model stem — separate from
+    /// `simrun_*` since the config and result shape are genuinely different
+    /// (no `fit` argument, and a dose ledger / decision log / metrics table
+    /// instead of a single CSV summary).
+    pub adaptive_sim_results:  HashMap<String, crate::domain::AdaptiveSimResult>,
+    pub adaptive_sim_computing: HashSet<String>,
+    pub adaptive_sim_error:    HashMap<String, String>,
     /// Cached `ferx_check_init()` results keyed by model stem.
     pub check_init_results: HashMap<String, crate::domain::CheckInitResult>,
     /// Stems for which a check_init is currently in flight.
@@ -862,6 +915,19 @@ pub struct WorkspaceState {
     /// else"). Rendered as a proper error card next to the "Check inits"
     /// button instead.
     pub check_init_error: HashMap<String, String>,
+    /// Stems for which a covariance recompute (`ferx_covariance()`) is
+    /// currently in flight.
+    pub covariance_running: HashSet<String>,
+    /// Error message from the last failed covariance recompute per model
+    /// stem, mirroring `check_init_error`.
+    pub covariance_error: HashMap<String, String>,
+    /// Cached `ferx_model_validate()` results keyed by model stem.
+    pub model_validate_results: HashMap<String, crate::domain::ModelValidateResult>,
+    /// Stems for which a model validation is currently in flight.
+    pub model_validate_running: HashSet<String>,
+    /// Error message from the last failed validation per model stem,
+    /// mirroring `check_init_error`.
+    pub model_validate_error: HashMap<String, String>,
     /// Cached SIR results keyed by model stem.
     pub sir_results: HashMap<String, crate::domain::SirResult>,
     /// Stems for which a SIR run is currently in flight.
@@ -893,6 +959,20 @@ pub struct WorkspaceState {
     /// cached under that name — without this, ETA-covariate results from a
     /// since-corrected (re-fit) model kept showing indefinitely.
     pub eta_cov_loaded_mtime: HashMap<String, std::time::SystemTime>,
+    /// Cached NPDE/NPD results (`ferx_calc_npde`) keyed by model stem —
+    /// always explicitly triggered (never auto), since simulating 1000
+    /// replicates per subject is the most expensive diagnostic in the app.
+    pub npde_results: HashMap<String, crate::domain::NpdeResult>,
+    /// Stems for which an NPDE computation is currently in flight.
+    pub npde_running: HashSet<String>,
+    /// Error message from the last failed NPDE computation per model stem,
+    /// mirroring `check_init_error`.
+    pub npde_error: HashMap<String, String>,
+    /// `.fitrx` mtime each `npde_results` entry was computed against — same
+    /// staleness guard as `eta_cov_loaded_mtime`, so a re-fit under the same
+    /// stem clears the (now stale) cached NPDE result instead of leaving it
+    /// displayed indefinitely.
+    pub npde_loaded_mtime: HashMap<String, std::time::SystemTime>,
     /// Cached declared-covariate screen results (`ferx_cov_screen`) keyed by
     /// model stem. Separate from `eta_cov_*` so the two views in the ETA-Cov
     /// section can be computed independently and lazily.
@@ -961,9 +1041,17 @@ impl WorkspaceState {
             simrun_results:     HashMap::new(),
             simrun_computing:   HashSet::new(),
             simrun_error:       HashMap::new(),
+            adaptive_sim_results:   HashMap::new(),
+            adaptive_sim_computing: HashSet::new(),
+            adaptive_sim_error:     HashMap::new(),
             check_init_results: HashMap::new(),
             check_init_running: HashSet::new(),
             check_init_error:   HashMap::new(),
+            covariance_running: HashSet::new(),
+            covariance_error:   HashMap::new(),
+            model_validate_results: HashMap::new(),
+            model_validate_running: HashSet::new(),
+            model_validate_error:   HashMap::new(),
             sir_results:        HashMap::new(),
             sir_running:        HashSet::new(),
             sir_started_at:     HashMap::new(),
@@ -973,6 +1061,10 @@ impl WorkspaceState {
             eta_cov_running:    HashSet::new(),
             eta_cov_failed:     HashMap::new(),
             eta_cov_loaded_mtime: HashMap::new(),
+            npde_results:      HashMap::new(),
+            npde_running:      HashSet::new(),
+            npde_error:        HashMap::new(),
+            npde_loaded_mtime: HashMap::new(),
             cov_screen_results: HashMap::new(),
             cov_screen_running: HashSet::new(),
             cov_screen_failed:  HashMap::new(),
@@ -1486,6 +1578,41 @@ impl AppState {
                 self.workspace.check_init_error.remove(&stem);
                 self.workspace.check_init_results.insert(stem, *result);
             }
+            ModelValidateComplete { stem, result } => {
+                self.workspace.model_validate_running.remove(&stem);
+                self.workspace.model_validate_error.remove(&stem);
+                self.workspace.model_validate_results.insert(stem, *result);
+            }
+            NpdeComplete { stem, result } => {
+                self.workspace.npde_running.remove(&stem);
+                self.workspace.npde_error.remove(&stem);
+                self.workspace.npde_results.insert(stem, *result);
+            }
+            AdaptiveSimComplete { stem, result } => {
+                self.workspace.adaptive_sim_computing.remove(&stem);
+                self.workspace.adaptive_sim_error.remove(&stem);
+                self.workspace.adaptive_sim_results.insert(stem, *result);
+            }
+            CovarianceComplete { stem, covariance_status } => {
+                self.workspace.covariance_running.remove(&stem);
+                self.workspace.covariance_error.remove(&stem);
+                self.ui.status_message = format!("Covariance recomputed ({covariance_status}): {stem}");
+                // The .fitrx bundle was already overwritten in place by the
+                // time this message was sent (compute_covariance() is
+                // synchronous end-to-end) — rescan immediately to pick up
+                // the refreshed SEs/condition number, same data path a
+                // normal run's ScanComplete already refreshes.
+                if let Some(dir) = self.workspace.directory.clone() {
+                    let tx = self.worker_tx.clone();
+                    let meta = match (self.workspace.app_dir.as_deref(), self.workspace.directory.as_deref()) {
+                        (Some(app_dir), Some(ws)) => crate::io::persistence::load_model_meta(app_dir, ws),
+                        _ => Default::default(),
+                    };
+                    std::thread::spawn(move || {
+                        crate::workers::scan::scan_directory(dir, meta, tx);
+                    });
+                }
+            }
             SirComplete { stem, result } => {
                 self.workspace.sir_running.remove(&stem);
                 self.workspace.sir_started_at.remove(&stem);
@@ -1551,6 +1678,22 @@ impl AppState {
                 if let Some(stem) = context.strip_prefix("check_init ") {
                     self.workspace.check_init_running.remove(stem);
                     self.workspace.check_init_error.insert(stem.to_string(), message.clone());
+                }
+                if let Some(stem) = context.strip_prefix("covariance ") {
+                    self.workspace.covariance_running.remove(stem);
+                    self.workspace.covariance_error.insert(stem.to_string(), message.clone());
+                }
+                if let Some(stem) = context.strip_prefix("model_validate ") {
+                    self.workspace.model_validate_running.remove(stem);
+                    self.workspace.model_validate_error.insert(stem.to_string(), message.clone());
+                }
+                if let Some(stem) = context.strip_prefix("npde ") {
+                    self.workspace.npde_running.remove(stem);
+                    self.workspace.npde_error.insert(stem.to_string(), message.clone());
+                }
+                if let Some(stem) = context.strip_prefix("adaptive_sim ") {
+                    self.workspace.adaptive_sim_computing.remove(stem);
+                    self.workspace.adaptive_sim_error.insert(stem.to_string(), message.clone());
                 }
                 if let Some(stem) = context.strip_prefix("sir:manual:") {
                     self.workspace.sir_running.remove(stem.trim());

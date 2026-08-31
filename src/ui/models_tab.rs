@@ -58,6 +58,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     show_bookmark_dialog(ui.ctx(), state);
     show_duplicate_dialog(ui.ctx(), state);
     show_delete_dialog(ui.ctx(), state);
+    show_covariance_confirm_dialog(ui.ctx(), state);
     show_new_model_dialog(ui.ctx(), state);
     show_compare_picker(ui.ctx(), state);
     show_compare_dialog(ui.ctx(), state);
@@ -1820,7 +1821,11 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
                             .selected_text(&state.ui.run_gradient)
                             .width(70.0)
                             .show_ui(ui, |ui| {
-                                for g in ["auto", "ad", "fd"] {
+                                // "ad" (Enzyme AD) was retired in ferx-r 0.3.0 —
+                                // gradient = "ad" now errors (E_AD_RETIRED); "auto"
+                                // already resolves to the analytic Dual2 path it used
+                                // to provide, so it's no longer offered here.
+                                for g in ["auto", "fd"] {
                                     ui.selectable_value(
                                         &mut state.ui.run_gradient, g.to_string(), g);
                                 }
@@ -2235,6 +2240,122 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             }
 
+            // ── Model validation ──
+            {
+                let validating = state.workspace.model_validate_running.contains(&stem);
+                let can_validate = state.workspace.settings.ferx_binary.is_some() && !validating;
+                let model_path = state.workspace.models[idx].model.path.clone();
+                let data_path  = state.ui.run_data_path.clone();
+                let dark = ui.visuals().dark_mode;
+                let dim  = if dark { theme::FG2 } else { egui::Color32::from_gray(100) };
+
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            can_validate,
+                            egui::Button::new(egui::RichText::new("✔ Validate").size(12.0))
+                                .fill(theme::elevated_fill(dark))
+                                .min_size(egui::vec2(110.0, 24.0)),
+                        )
+                        .on_hover_text(
+                            "Static syntax/structure check of the model file — no fit, \
+                             no optimizer iterations",
+                        )
+                        .clicked()
+                    {
+                        state.workspace.model_validate_results.remove(&stem);
+                        state.workspace.model_validate_error.remove(&stem);
+                        state.workspace.model_validate_running.insert(stem.clone());
+                        let tx      = state.worker_tx.clone();
+                        let ctx     = ui.ctx().clone();
+                        let stem_cl = stem.clone();
+                        std::thread::spawn(move || {
+                            match crate::io::r_extract::compute_model_validate(&model_path, data_path.as_deref()) {
+                                Ok(result) => {
+                                    let _ = tx.send(crate::workers::messages::WorkerMsg::ModelValidateComplete {
+                                        stem: stem_cl,
+                                        result: Box::new(result),
+                                    });
+                                }
+                                Err(e) => {
+                                    let _ = tx.send(crate::workers::messages::WorkerMsg::RTaskError {
+                                        context: format!("model_validate {stem_cl}"),
+                                        message: e,
+                                    });
+                                }
+                            }
+                            ctx.request_repaint();
+                        });
+                    }
+
+                    if validating {
+                        ui.add_space(8.0);
+                        ui.spinner();
+                        ui.label(egui::RichText::new("Validating…").color(dim).size(11.0));
+                    }
+                });
+
+                if let Some(err) = state.workspace.model_validate_error.get(&stem).cloned() {
+                    ui.add_space(6.0);
+                    egui::Frame::new()
+                        .fill(egui::Color32::from_rgba_unmultiplied(0xe8, 0x55, 0x55, 20))
+                        .inner_margin(egui::Margin::same(8))
+                        .corner_radius(egui::CornerRadius::same(5))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(
+                                egui::RichText::new("Validate failed")
+                                    .color(theme::RED).size(13.0).strong(),
+                            );
+                            ui.add_space(4.0);
+                            ui.label(egui::RichText::new(&err).color(theme::RED).size(11.0));
+                        });
+                }
+
+                if let Some(result) = state.workspace.model_validate_results.get(&stem).cloned() {
+                    ui.add_space(6.0);
+                    if result.ok && result.diagnostics.is_empty() {
+                        egui::Frame::new()
+                            .fill(egui::Color32::from_rgba_unmultiplied(0x3e, 0xc9, 0x7a, 20))
+                            .inner_margin(egui::Margin::same(8))
+                            .corner_radius(egui::CornerRadius::same(5))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("✔").color(theme::GREEN).size(13.0).strong());
+                                    ui.label(egui::RichText::new("No issues found").color(theme::GREEN).size(11.0));
+                                });
+                            });
+                    } else {
+                        // Known severities first, in priority order; anything
+                        // outside this vocabulary (the engine's severity set
+                        // isn't guaranteed stable) still gets its own card
+                        // below rather than being silently dropped.
+                        let known: &[&str] = &["error", "warning", "info"];
+                        for (severity, icon, color, bg) in [
+                            ("error",   "✖", theme::RED,      egui::Color32::from_rgba_unmultiplied(0xe8, 0x55, 0x55, 25)),
+                            ("warning", "⚠", theme::ORANGE,   egui::Color32::BLACK),
+                            ("info",    "ℹ", theme::fg2(dark), egui::Color32::from_rgba_unmultiplied(0x4c, 0x8a, 0xff, 15)),
+                        ] {
+                            let group: Vec<_> = result.diagnostics.iter()
+                                .filter(|d| d.severity == severity)
+                                .collect();
+                            if group.is_empty() { continue; }
+                            validate_diag_card(ui, dark, &severity.to_uppercase(), icon, color, bg, &group);
+                        }
+                        let other: Vec<_> = result.diagnostics.iter()
+                            .filter(|d| !known.contains(&d.severity.as_str()))
+                            .collect();
+                        if !other.is_empty() {
+                            let label = other[0].severity.to_uppercase();
+                            validate_diag_card(ui, dark, &label, "•", theme::fg2(dark),
+                                egui::Color32::from_rgba_unmultiplied(0x4c, 0x8a, 0xff, 15), &other);
+                        }
+                    }
+                }
+            }
+
             // ── Queue list ──
             if !state.run.run_queue.is_empty() {
                 ui.add_space(8.0);
@@ -2309,10 +2430,14 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
 
             ui.add_space(8.0);
 
-            // Output lives in the bottom run panel (visible across all tabs).
+            // Output opens automatically in its own window (see render_run_popup
+            // in app.rs); if closed, the header shows a "Running: <model>" /
+            // "N runs active" indicator to reopen it. This note used to describe
+            // an older bottom-of-window run panel that no longer exists — fixed
+            // after it was reported as pointing at nothing.
             let note_fg = if ui.visuals().dark_mode { theme::FG3 } else { egui::Color32::from_gray(150) };
             ui.label(
-                egui::RichText::new("▼  Live output appears in the run panel at the bottom of the window")
+                egui::RichText::new("▼  Live output opens in a separate Run window")
                     .color(note_fg)
                     .size(11.0),
             );
@@ -3063,6 +3188,9 @@ fn show_params_pill(ui: &mut egui::Ui, state: &mut AppState) {
         }
     };
     let params = entry.model.params.clone();
+    let stem = entry.model.stem.clone();
+
+    show_covariance_bar(ui, state, idx, &stem, &fit);
 
     egui::ScrollArea::vertical()
         .auto_shrink([false; 2])
@@ -3254,6 +3382,131 @@ fn show_params_pill(ui: &mut egui::Ui, state: &mut AppState) {
                     });
             }
         });
+}
+
+/// One severity-grouped card in the `ferx_model_validate()` results — same
+/// visual language as the fit's own structured-warnings cards (Output pill).
+fn validate_diag_card(
+    ui:       &mut egui::Ui,
+    dark:     bool,
+    label:    &str,
+    icon:     &str,
+    color:    egui::Color32,
+    bg:       egui::Color32,
+    group:    &[&crate::domain::ValidateDiagnostic],
+) {
+    ui.add_space(6.0);
+    egui::Frame::new()
+        .fill(bg)
+        .inner_margin(egui::Margin::same(10))
+        .corner_radius(egui::CornerRadius::same(6))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(
+                egui::RichText::new(format!("{icon}  {label} ({})", group.len()))
+                    .color(color).size(11.0).strong(),
+            );
+            ui.add_space(4.0);
+            for d in group {
+                let loc = match (&d.block, d.line) {
+                    (Some(b), Some(l)) => format!("[{b}:{l}] "),
+                    (Some(b), None)    => format!("[{b}] "),
+                    (None, Some(l))    => format!("[line {l}] "),
+                    (None, None)       => String::new(),
+                };
+                let code = if d.code.is_empty() { String::new() } else { format!("{} — ", d.code) };
+                ui.label(
+                    egui::RichText::new(format!("• {loc}{code}{}", d.message))
+                        .color(color).size(11.0),
+                );
+                if let Some(sugg) = &d.suggestion {
+                    let dim = if dark { theme::FG2 } else { egui::Color32::from_gray(100) };
+                    ui.label(
+                        egui::RichText::new(format!("   → {sugg}"))
+                            .color(dim).size(10.0).italics(),
+                    );
+                }
+            }
+        });
+}
+
+/// Covariance status + "Recompute SEs" action shown above the parameter
+/// tables — `ferx_covariance()` refreshes standard errors on an existing fit
+/// (e.g. one run with `covariance = FALSE`, or under a different
+/// `covariance_method`) without re-optimizing.
+fn show_covariance_bar(
+    ui:   &mut egui::Ui,
+    state: &mut AppState,
+    idx:  usize,
+    stem: &str,
+    fit:  &crate::domain::FitSummary,
+) {
+    let dark = ui.visuals().dark_mode;
+    let dim  = if dark { theme::FG2 } else { egui::Color32::from_gray(100) };
+
+    let fitrx_path = state.workspace.models.get(idx).and_then(|m| m.fitrx_path.clone());
+    let running = state.workspace.covariance_running.contains(stem);
+    let can_recompute = state.workspace.settings.ferx_binary.is_some()
+        && fitrx_path.is_some()
+        && !running;
+
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Covariance:").color(dim).size(11.0));
+        ui.label(
+            egui::RichText::new(if fit.covariance_ok { "✔ OK" } else { "✖ Failed" })
+                .color(if fit.covariance_ok { theme::GREEN } else { theme::RED })
+                .size(11.0),
+        );
+        if fit.cov_condition_number.is_finite() {
+            let cn_color = if fit.cn_high() { theme::ORANGE } else { dim };
+            ui.label(
+                egui::RichText::new(format!("· CN {}", fmt_f64_0dp(fit.cov_condition_number)))
+                    .color(cn_color)
+                    .size(11.0),
+            );
+        }
+
+        ui.add_space(12.0);
+        egui::ComboBox::from_id_salt("covariance_method_combo")
+            .selected_text(state.ui.covariance_method.clone())
+            .width(52.0)
+            .show_ui(ui, |ui| {
+                for m in ["r", "s", "rsr"] {
+                    ui.selectable_value(&mut state.ui.covariance_method, m.to_string(), m);
+                }
+            });
+
+        if ui
+            .add_enabled(
+                can_recompute,
+                egui::Button::new(egui::RichText::new("Recompute SEs").size(11.0))
+                    .fill(theme::elevated_fill(dark)),
+            )
+            .on_hover_text(
+                "Recompute standard errors without re-fitting — overwrites the \
+                 saved .fitrx bundle in place",
+            )
+            .clicked()
+        {
+            state.ui.pending_covariance_confirm = Some((idx, state.ui.covariance_method.clone()));
+        }
+
+        if running {
+            ui.add_space(6.0);
+            ui.spinner();
+            ui.label(egui::RichText::new("Recomputing…").color(dim).size(11.0));
+        }
+    });
+
+    if let Some(err) = state.workspace.covariance_error.get(stem).cloned() {
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(format!("Recompute failed: {err}"))
+                .color(theme::RED)
+                .size(11.0),
+        );
+    }
+    ui.add_space(6.0);
 }
 
 fn section_header(ui: &mut egui::Ui, title: &str) {
@@ -4300,6 +4553,97 @@ fn show_delete_dialog(ctx: &egui::Context, state: &mut AppState) {
     if execute {
         do_delete(state, del_idx);
         state.ui.pending_delete = None;
+    }
+}
+
+// ── Covariance recompute confirm dialog ────────────────────────────────────────
+
+fn show_covariance_confirm_dialog(ctx: &egui::Context, state: &mut AppState) {
+    let Some((idx, method)) = state.ui.pending_covariance_confirm.clone() else { return };
+
+    let Some(entry) = state.workspace.models.get(idx) else {
+        state.ui.pending_covariance_confirm = None;
+        return;
+    };
+    let stem       = entry.model.stem.clone();
+    let fitrx_path = entry.fitrx_path.clone();
+
+    let mut close   = false;
+    let mut execute = false;
+
+    egui::Window::new("Recompute Standard Errors")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            ui.set_min_width(340.0);
+            let dark = ui.visuals().dark_mode;
+            let dim  = if dark { theme::FG2 } else { egui::Color32::from_gray(90) };
+
+            ui.label(
+                egui::RichText::new(format!("Recompute SEs for \"{stem}\"  (method = {method})?"))
+                    .strong()
+                    .size(14.0)
+                    .color(theme::fg(dark)),
+            );
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new(
+                    "This runs the covariance step against the existing fit — no \
+                     re-optimization — and overwrites the saved .fitrx bundle in place \
+                     with the refreshed standard errors.",
+                )
+                .color(dim)
+                .size(12.0),
+            );
+
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() { close = true; }
+                ui.add_space(8.0);
+                if ui
+                    .add(
+                        egui::Button::new(egui::RichText::new("Recompute").color(egui::Color32::WHITE))
+                            .fill(theme::ACCENT),
+                    )
+                    .clicked()
+                {
+                    execute = true;
+                }
+            });
+
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                close = true;
+            }
+        });
+
+    if close { state.ui.pending_covariance_confirm = None; }
+    if execute {
+        state.ui.pending_covariance_confirm = None;
+        if let Some(fitrx_path) = fitrx_path {
+            state.workspace.covariance_error.remove(&stem);
+            state.workspace.covariance_running.insert(stem.clone());
+            let tx      = state.worker_tx.clone();
+            let ctx_cl  = ctx.clone();
+            let stem_cl = stem.clone();
+            std::thread::spawn(move || {
+                match crate::io::r_extract::compute_covariance(&fitrx_path, &method) {
+                    Ok(covariance_status) => {
+                        let _ = tx.send(crate::workers::messages::WorkerMsg::CovarianceComplete {
+                            stem: stem_cl,
+                            covariance_status,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = tx.send(crate::workers::messages::WorkerMsg::RTaskError {
+                            context: format!("covariance {stem_cl}"),
+                            message: e,
+                        });
+                    }
+                }
+                ctx_cl.request_repaint();
+            });
+        }
     }
 }
 

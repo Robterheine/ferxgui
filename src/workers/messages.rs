@@ -112,4 +112,30 @@ pub enum WorkerMsg {
         stem:   String,
         result: Box<crate::domain::SimRunResult>,
     },
+
+    /// `ferx_covariance()` recompute completed and the `.fitrx` bundle was
+    /// overwritten in place — carries just the refreshed status string; the
+    /// caller triggers a rescan to pick up the updated SEs/condition number.
+    CovarianceComplete {
+        stem:              String,
+        covariance_status: String,
+    },
+
+    /// `ferx_model_validate()` completed for the given model stem.
+    ModelValidateComplete {
+        stem:   String,
+        result: Box<crate::domain::ModelValidateResult>,
+    },
+
+    /// `ferx_calc_npde()` completed for the given model stem.
+    NpdeComplete {
+        stem:   String,
+        result: Box<crate::domain::NpdeResult>,
+    },
+
+    /// `ferx_simulate_adaptive()` completed for the given model stem.
+    AdaptiveSimComplete {
+        stem:   String,
+        result: Box<crate::domain::AdaptiveSimResult>,
+    },
 }

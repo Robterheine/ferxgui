@@ -13,6 +13,8 @@ Built with Rust + [egui](https://github.com/emilk/egui). Runs on macOS, Windows,
 ### Model workflow
 - Browse, create, and edit `.ferx` model files with syntax highlighting
 - Run models with configurable methods (FOCE, FOCEI, SAEM, Gradient Newton), covariance step, optimizer trace, and output tables
+- **Validate** — static syntax/structure check of a model file (severity, error code, block, line, suggested fix) before committing to a fit, with no data required
+- **Recompute SEs** — re-run the covariance step (`r`/`s`/`rsr`) on an already-completed fit without re-optimizing, e.g. to add standard errors to a fit run with covariance off
 - Live log streaming, run queue, process detachment (runs survive GUI close or SSH disconnect)
 - Model ancestry tree with ΔOFV labels, pan/zoom, and PNG export
 
@@ -23,6 +25,7 @@ Built with Rust + [egui](https://github.com/emilk/egui). Runs on macOS, Windows,
 - Convergence trace (OFV + method-specific metric: MH accept rate, LM λ, gradient norm)
 - ETA–covariate correlations
 - Parameter correlation heatmap from the covariance matrix
+- **NPDE/NPD** — simulation-based normalized prediction distribution errors, robust to nonlinearity and non-Gaussian random effects (unlike CWRES): NPDE vs a selectable X-axis (time, PRED, IPRED, TAD, or any covariate — independently per panel, same as the GOF section), a QQ-normal plot, and tail-flag summary stats against the N(0,1) null
 
 ### Visual Predictive Check (VPC)
 Powered by the R [vpc package](https://vpc.ronkeizer.com/) — all two-stage statistics, binning, and confidence bands are computed by the package; FeRx GUI renders them natively and interactively.
@@ -40,7 +43,7 @@ Powered by the R [vpc package](https://vpc.ronkeizer.com/) — all two-stage sta
 ### Simulate
 Runs `ferx_simulate()` and writes a CSV — paired with Simulation plot below, which displays whatever file it's pointed at.
 
-- **Basis**: initial estimates (prior predictive), fitted estimates (posterior predictive), or with parameter uncertainty (asymptotic MVN draws around the ML estimate, or resampled from the SIR tab's kept results)
+- **Basis**: initial estimates (prior predictive), fitted estimates (posterior predictive), with parameter uncertainty (asymptotic MVN draws around the ML estimate, or resampled from the SIR tab's kept results), or **adaptive dosing** — runs the model's own `[adaptive_dosing]` controller (`ferx_simulate_adaptive()`) against its declared parameters, with a dose ledger, decision log, and per-subject metrics (cumulative dose, dose adjustments, % time in therapeutic window) alongside the concentration-time trajectory
 - Output CSV carries the full input dataset (covariates, `EVID`, `CMT`, dose rows, …) alongside the simulated `IPRED`/`DV_SIM` — not just `ferx_simulate()`'s bare return columns
 - "Open in Sim Plot" hands the written file straight to the Simulation plot tab below
 
@@ -63,7 +66,7 @@ FeRx NLME runs entirely inside R. FeRx GUI calls `Rscript` for all modelling ope
 | Software | Minimum version | Notes |
 |---|---|---|
 | **R** | 4.2 | [r-project.org](https://www.r-project.org/) |
-| **ferx** R package | 0.2.0 | Compiles a Rust backend on install — see [Installing R packages](#installing-r-packages) |
+| **ferx** R package | 0.3.0 | Compiles a Rust backend on install — see [Installing R packages](#installing-r-packages) |
 | **vpc** R package | 1.0 | Required for VPC tab |
 | **ggplot2** R package | 3.0 | Required for R ggplot export |
 | **jsonlite** R package | — | Usually installed with R |
@@ -271,6 +274,41 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 ---
 
 ## Changelog
+
+### v0.9.16 (2026-08-31) — ferx-r 0.3.0 support: model validation, NPDE, adaptive dosing, standalone covariance recompute
+
+A gap analysis against ferx-r's full function reference (every documented topic checked against what FeRx GUI actually calls, not the module map) turned up four ferx-r capabilities with real value and no GUI surface. All four are new in ferx-r 0.3.0; each R call was verified directly via `Rscript` against a real fit before being wired in.
+
+**Added: static model validation (`ferx_model_validate`)**
+- A **✔ Validate** button next to Check inits — parses a `.ferx` file for syntax/structural errors via the Rust engine itself, no fit or optimizer iterations required. Distinct from Check inits, which runs 5 real FOCEI iterations to sanity-check starting values; Validate answers "is this file even valid" instead.
+- Findings render as severity-grouped cards (error/warning/info, plus an uncategorised bucket for any future severity the engine might introduce) with the block, line number, ferx-core error code, and suggested fix where available. A clean model shows an explicit "No issues found" card rather than an empty panel.
+- Timely given ferx-core's move toward stricter validation: unknown or deprecated model-file blocks (e.g. the long-dead `[initial_values]` spelling) are becoming hard parse errors instead of failing silently mid-fit — this surfaces exactly those errors with a line number instead of a raw R stack trace.
+
+**Added: NPDE/NPD diagnostics (`ferx_calc_npde`)**
+- A new **NPDE** section in the Evaluation tab. Unlike CWRES/IWRES (free reads off the `.fitrx` bundle), NPDE requires Monte-Carlo simulation from the model + data recorded on the fit — nsim/seed are user-configurable (default 1000 replicates) and it's always explicitly triggered via a **Compute NPDE** button, never auto-computed, since it's the single most expensive diagnostic in the app.
+- Two scatter panels (NPDE vs a selectable X-axis, independently per panel — time, PRED, IPRED, TAD, or any covariate, matching the GOF section's CWRES₁/₂ pickers) with ±1.96/±2.58 reference bands, plus a QQ-normal plot against the N(0,1) the NPDE should follow under a correctly specified model — the distributional check the scatter panels alone don't show. Tail-flag counts (expect ~5%/~1% beyond ±1.96/±2.58) are reported for both NPDE and its whole-subject decorrelated counterpart, NPD.
+- Results are cached per model and invalidated on re-fit (same `.fitrx`-mtime staleness check already used for ETA-Cov/Covariate-screen), not recomputed on every tab switch.
+
+**Added: adaptive dosing simulation (`ferx_simulate_adaptive`)**
+- A new **Adaptive dosing** basis in the Simulate tab (only enabled on a model that declares an `[adaptive_dosing]` block), alongside Initial/Fitted/uncertainty estimates. Runs the model's own dosing controller against its declared parameters — dose titration, not population simulation — with `n_sim`, seed, and a cap on controller decisions per subject.
+- Unlike every other basis, `ferx_simulate_adaptive()` takes no `fit` argument at all — no posterior/uncertainty concept applies, since the controller logic lives entirely in the model file's `[adaptive_dosing]` block, not in fitted parameters. The result view goes beyond the usual concentration-time trajectory (still openable in Sim Plot) with a dose ledger, a full decision log (including holds the ledger omits), and per-subject metrics — cumulative dose, dose increases/decreases/holds, discontinuation, and % time in the therapeutic window.
+
+**Added: standalone covariance recompute (`ferx_covariance`)**
+- A **Recompute SEs** action on the Parameters pill of any already-fitted model, with a covariance-method picker (`r`/`s`/`rsr`). Adds standard errors to a fit run with covariance off, or tries a different method, without a full re-optimization.
+- Overwrites the `.fitrx` bundle in place — the same fit, only its SE/covariance fields refresh — behind an explicit confirmation dialog, since it mutates a saved file on disk. The Models list picks up the refreshed condition number/SEs via the same rescan a normal run already triggers; no new refresh mechanism was needed.
+
+**Changed: minimum supported ferx R package version is now 0.3.0** (was 0.2.0)
+- All four features above are new in ferx-r 0.3.0 and hard-fail (an unhandled R error) on older installs. Everything else in FeRx GUI is unaffected — ferx-r 0.3.0's other breaking changes (several function renames, `ferx_cor_matrix()`/`ferx_estimates()`/`ferx_eta_cov()` removed in favour of fit-object fields) touch none of the calls FeRx GUI makes; the `ferx_eta_cov()` migration happened back in v0.6.0.
+
+**Fixed: two ferx-r 0.3.0 compatibility issues, found before they could bite**
+- The Run popup's Gradient dropdown offered `"ad"` (Enzyme AD) as a choice; ferx-r 0.3.0 makes `gradient = "ad"` a hard parse error (`E_AD_RETIRED`) now that it's retired in favour of the analytic Dual2 path `"auto"` already provides. Removed from the dropdown — a `.ferx` file that still declares `gradient = ad` in `[fit_options]` still round-trips as free text, it just isn't offered as a fresh choice.
+- The "auto" thread-count setting was documented (in a comment and in the oversubscription warning's own wording) as "use every core"; ferx-r 0.3.0's doc corrections state the real default is cores − 1, capped at 8. The warning now quotes that estimate instead of the raw core count.
+
+**Added: editor syntax highlighting for ferx-core 0.3.0's new model-file surface**
+- `[binary_model]` (categorical/binary endpoints) is now a recognised section, and its `cmt`/`logit` keys plus the new `[fit_options]` `ode_method` setting are coloured consistently with `method`/`maxiter`/etc. Per-route absorption `lag=` needed no change — it's a plain function argument, rendered the same as `ka=`/`cl=`/`dur=` already were.
+
+**Fixed: stale hint text pointed at a run panel that no longer exists**
+- The Run pill's footer note ("Live output appears in the run panel at the bottom of the window") described a layout FeRx GUI hasn't had since the Run popup became its own OS-native window (v0.8.0) — reported as confusing after a Validate run produced no visible change nearby. Corrected to describe where live output actually appears now.
 
 ### v0.9.15 (2026-07-17) — fit several models at the same time; fixed runs being abandoned on restart
 

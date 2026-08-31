@@ -213,6 +213,79 @@ pub struct SimRunResult {
 }
 
 // ---------------------------------------------------------------------------
+// Adaptive dosing simulation (ferx_simulate_adaptive, ferx-r >= 0.3.0)
+// ---------------------------------------------------------------------------
+
+/// Result of `ferx_simulate_adaptive()`. `trajectories` (concentration/AMT
+/// vs TIME, potentially many rows) is written to disk the same way plain
+/// `ferx_simulate()` output is; `doses`, `decisions`, and `metrics` are
+/// naturally small (bounded by controller decision points and subjects, not
+/// by observation count) and come back inline.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AdaptiveSimResult {
+    pub out_path: String,
+    pub n_rows:   usize,
+    #[serde(default)]
+    pub columns:  Vec<String>,
+    #[serde(default)]
+    pub doses:     Vec<AdaptiveDoseRow>,
+    #[serde(default)]
+    pub decisions: Vec<AdaptiveDecisionRow>,
+    #[serde(default)]
+    pub metrics:   Vec<AdaptiveMetricsRow>,
+}
+
+/// One row of `ferx_simulate_adaptive()$doses` — the controller's dose ledger.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AdaptiveDoseRow {
+    pub id:       String,
+    pub time:     f64,
+    pub amt:      f64,
+    pub decision: i64,
+    pub signal:   f64,
+    #[serde(default)]
+    pub rule:     String,
+}
+
+/// One row of `ferx_simulate_adaptive()$decisions` — every controller
+/// decision point, including holds/no-dose outcomes the dose ledger omits.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AdaptiveDecisionRow {
+    pub id:       String,
+    pub decision: i64,
+    pub time:     f64,
+    pub signal:   f64,
+    #[serde(default)]
+    pub outcome:  String,
+}
+
+/// One row of `ferx_simulate_adaptive()$metrics` — per-subject summary.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AdaptiveMetricsRow {
+    pub id:                 String,
+    pub cum_dose:           f64,
+    pub n_doses:            i64,
+    #[serde(default)]
+    pub n_increases:        i64,
+    #[serde(default)]
+    pub n_decreases:        i64,
+    #[serde(default)]
+    pub n_holds:            i64,
+    #[serde(default)]
+    pub discontinued:       bool,
+    #[serde(default)]
+    pub signal_min:         Option<f64>,
+    #[serde(default)]
+    pub signal_max:         Option<f64>,
+    #[serde(default)]
+    pub signal_mean:        Option<f64>,
+    /// Fraction (0-1) of the subject's time in the therapeutic window —
+    /// `NULL` on the R side (via jsonlite) shows up here as `None`.
+    #[serde(default)]
+    pub pct_time_in_window: Option<f64>,
+}
+
+// ---------------------------------------------------------------------------
 // Init check (ferx_check_init)
 // ---------------------------------------------------------------------------
 
@@ -231,6 +304,69 @@ pub struct CheckInitResult {
     #[serde(default)]
     #[allow(dead_code)]
     pub converged: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Model validation (ferx_model_validate, ferx-r >= 0.3.0)
+// ---------------------------------------------------------------------------
+
+/// Result of `ferx_model_validate()` — static syntax/structure check of a
+/// `.ferx` file via the Rust engine, no fit or dataset required beyond
+/// optional data-dependent column checks.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModelValidateResult {
+    pub ok: bool,
+    #[serde(default)]
+    pub diagnostics: Vec<ValidateDiagnostic>,
+}
+
+/// One row of `ferx_model_validate()`'s diagnostics data frame.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ValidateDiagnostic {
+    /// e.g. "error" | "warning" | "info" — treated as a free string since the
+    /// engine's severity vocabulary isn't guaranteed stable across versions.
+    #[serde(default)]
+    pub severity: String,
+    /// Typed error code, e.g. "E_DEPRECATED_BLOCK", "E_UNKNOWN_BLOCK".
+    #[serde(default)]
+    pub code: String,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub block: Option<String>,
+    #[serde(default)]
+    pub line: Option<u32>,
+    #[serde(default)]
+    pub suggestion: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// NPDE / NPD diagnostics (ferx_calc_npde, ferx-r >= 0.3.0)
+// ---------------------------------------------------------------------------
+
+/// Result of `ferx_calc_npde()` — simulation-based Normalized Prediction
+/// Distribution Errors / Discrepancies, one row per observation.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NpdeResult {
+    #[serde(default)]
+    pub rows: Vec<NpdeRow>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NpdeRow {
+    /// Needed to resolve a custom X-axis against declared covariates
+    /// (`CovTabData::lookup` is keyed by id + time), same as `PredRow`.
+    pub id:    String,
+    pub time:  f64,
+    pub pred:  f64,
+    #[serde(default)]
+    pub ipred: f64,
+    #[serde(default)]
+    pub tad:   f64,
+    pub npde:  f64,
+    /// The whole-subject decorrelated counterpart to `npde` — distinct
+    /// diagnostic quantity, surfaced alongside it in the NPDE section.
+    pub npd:   f64,
 }
 
 // ---------------------------------------------------------------------------

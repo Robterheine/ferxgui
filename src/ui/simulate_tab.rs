@@ -23,6 +23,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         .map(|f| f.covariance_ok).unwrap_or(false);
     let has_sir_resamples = state.workspace.sir_results.get(&stem)
         .map(|r| r.sir_resamples_n > 0).unwrap_or(false);
+    let has_adaptive_dosing = state.workspace.models[idx].model.source.contains("[adaptive_dosing]");
 
     // A fit (and, for the uncertainty bases, a covariance matrix or kept SIR
     // resamples) is required for anything beyond "Initial estimates" — fall
@@ -35,6 +36,9 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         state.ui.simrun_basis = SimBasis::Initial;
     }
     if state.ui.simrun_basis == SimBasis::SirUncertainty && !has_sir_resamples {
+        state.ui.simrun_basis = SimBasis::Initial;
+    }
+    if state.ui.simrun_basis == SimBasis::AdaptiveDosing && !has_adaptive_dosing {
         state.ui.simrun_basis = SimBasis::Initial;
     }
 
@@ -65,10 +69,15 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.set_width(left_w - 6.0);
-                    show_options(ui, state, idx, has_fitrx, has_covariance, has_sir_resamples, dark);
+                    show_options(ui, state, idx, has_fitrx, has_covariance, has_sir_resamples, has_adaptive_dosing, dark);
                 });
 
-            let running    = state.workspace.simrun_computing.contains(&stem);
+            let is_adaptive = state.ui.simrun_basis == SimBasis::AdaptiveDosing;
+            let running = if is_adaptive {
+                state.workspace.adaptive_sim_computing.contains(&stem)
+            } else {
+                state.workspace.simrun_computing.contains(&stem)
+            };
             let has_data   = state.ui.simrun_data_path.is_some();
 
             ui.add_space(4.0);
@@ -79,7 +88,11 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                     .fill(theme::ACCENT)
                     .min_size(egui::vec2(ui.available_width(), 34.0)),
             ).clicked() {
-                start_compute(ui, state, idx, &stem);
+                if is_adaptive {
+                    start_adaptive_compute(ui, state, idx, &stem);
+                } else {
+                    start_compute(ui, state, idx, &stem);
+                }
             }
         });
 
@@ -90,7 +103,25 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
             ui.label(egui::RichText::new(&stem).size(12.0).strong().color(theme::fg(dark)));
             ui.add_space(4.0);
 
-            if state.workspace.simrun_computing.contains(&stem) {
+            if state.ui.simrun_basis == SimBasis::AdaptiveDosing {
+                if state.workspace.adaptive_sim_computing.contains(&stem) {
+                    computing_spinner(ui, state.ui.simrun_basis, state.ui.adaptive_n_sim, 0, 0);
+                    ui.ctx().request_repaint();
+                } else if let Some(result) = state.workspace.adaptive_sim_results.get(&stem).cloned() {
+                    show_adaptive_result(ui, state, &result, dark);
+                } else if let Some(err) = state.workspace.adaptive_sim_error.get(&stem).cloned() {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(40.0);
+                        ui.label(
+                            egui::RichText::new("Simulation failed").color(theme::RED).size(13.0).strong(),
+                        );
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new(&err).color(theme::RED).size(11.0));
+                    });
+                } else {
+                    hint(ui, "Set options on the left, then click Run simulation.");
+                }
+            } else if state.workspace.simrun_computing.contains(&stem) {
                 computing_spinner(ui, state.ui.simrun_basis, state.ui.simrun_n_sim, state.ui.simrun_n_draws, state.ui.simrun_n_sim_per_draw);
                 ui.ctx().request_repaint();
             } else if let Some(result) = state.workspace.simrun_results.get(&stem).cloned() {
@@ -118,7 +149,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
 // Options panel
 // ---------------------------------------------------------------------------
 
-fn show_options(ui: &mut egui::Ui, state: &mut AppState, idx: usize, has_fitrx: bool, has_covariance: bool, has_sir_resamples: bool, dark: bool) {
+fn show_options(ui: &mut egui::Ui, state: &mut AppState, idx: usize, has_fitrx: bool, has_covariance: bool, has_sir_resamples: bool, has_adaptive_dosing: bool, dark: bool) {
     section(ui, "Data file", true, dark, |ui| {
         let path_str = state.ui.simrun_data_path
             .as_ref()
@@ -190,13 +221,45 @@ fn show_options(ui: &mut egui::Ui, state: &mut AppState, idx: usize, has_fitrx: 
                 state.ui.simrun_basis = SimBasis::SirUncertainty;
             }
         });
+        ui.add_enabled_ui(has_adaptive_dosing, |ui| {
+            if ui.selectable_label(state.ui.simrun_basis == SimBasis::AdaptiveDosing, "Adaptive dosing")
+                .on_hover_text(if has_adaptive_dosing {
+                    "Run the model's own [adaptive_dosing] controller (ferx_simulate_adaptive) \
+                     against its declared parameters — dose titration, not population simulation. \
+                     Takes no fitted-parameter basis; the other options above don't apply here."
+                } else {
+                    "This model has no [adaptive_dosing] block."
+                })
+                .clicked()
+            {
+                state.ui.simrun_basis = SimBasis::AdaptiveDosing;
+            }
+        });
     });
 
     let is_uncertainty = matches!(
         state.ui.simrun_basis,
         SimBasis::AsymptoticUncertainty | SimBasis::SirUncertainty
     );
-    if is_uncertainty {
+    if state.ui.simrun_basis == SimBasis::AdaptiveDosing {
+        section(ui, "Simulation", true, dark, |ui| {
+            egui::Grid::new("simrun_grid").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+                ui.label(egui::RichText::new("Replicates (n_sim)").size(11.0));
+                ui.add(egui::DragValue::new(&mut state.ui.adaptive_n_sim).speed(1).range(1..=500));
+                ui.end_row();
+                ui.label(egui::RichText::new("Seed").size(11.0));
+                ui.add(egui::DragValue::new(&mut state.ui.adaptive_seed).speed(1));
+                ui.end_row();
+                ui.label(egui::RichText::new("Max decisions").size(11.0));
+                let suffix = if state.ui.adaptive_max_decisions == 0 { " (unlimited)" } else { "" };
+                ui.add(egui::DragValue::new(&mut state.ui.adaptive_max_decisions).speed(1).suffix(suffix));
+                ui.end_row();
+            });
+            ui.label(egui::RichText::new(
+                "Caps how many controller decisions run per subject — 0 for unlimited.",
+            ).size(9.5).color(theme::fg3(dark)).italics());
+        });
+    } else if is_uncertainty {
         section(ui, "Simulation", true, dark, |ui| {
             egui::Grid::new("simrun_grid").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
                 ui.label(egui::RichText::new("Uncertainty draws").size(11.0));
@@ -280,7 +343,11 @@ fn build_config(state: &AppState, idx: usize) -> Option<SimRunConfig> {
     let fitrx_arg = match state.ui.simrun_basis {
         SimBasis::Fitted | SimBasis::AsymptoticUncertainty | SimBasis::SirUncertainty
                           => fitrx_path.map(|p| p.to_string_lossy().into_owned()),
-        SimBasis::Initial => None,
+        // Never actually reached: the "Run simulation" click handler in
+        // `show()` routes AdaptiveDosing to `start_adaptive_compute()`
+        // instead of calling `build_config()`/`compute_simulation()` at all
+        // — `ferx_simulate_adaptive()` takes no `fit` argument.
+        SimBasis::Initial | SimBasis::AdaptiveDosing => None,
     };
 
     let (uncertainty_method, n_uncertainty_draws, n_sim_per_draw) = match state.ui.simrun_basis {
@@ -294,7 +361,7 @@ fn build_config(state: &AppState, idx: usize) -> Option<SimRunConfig> {
             Some(state.ui.simrun_n_draws),
             Some(state.ui.simrun_n_sim_per_draw),
         ),
-        SimBasis::Initial | SimBasis::Fitted => (None, None, None),
+        SimBasis::Initial | SimBasis::Fitted | SimBasis::AdaptiveDosing => (None, None, None),
     };
 
     let (sir_resamples_flat, sir_resamples_n, sir_resamples_dim) = if state.ui.simrun_basis == SimBasis::SirUncertainty {
@@ -343,6 +410,47 @@ fn start_compute(ui: &egui::Ui, state: &mut AppState, idx: usize, stem: &str) {
     });
 }
 
+fn start_adaptive_compute(ui: &egui::Ui, state: &mut AppState, idx: usize, stem: &str) {
+    state.workspace.adaptive_sim_error.remove(stem);
+
+    let model_path = state.workspace.models[idx].model.path.clone();
+    let Some(data_path) = state.ui.simrun_data_path.clone() else {
+        let msg = "Could not start simulation — choose a data file".to_string();
+        state.ui.status_message = msg.clone();
+        state.workspace.adaptive_sim_error.insert(stem.to_string(), msg);
+        return;
+    };
+    let out_path = if state.ui.simrun_out_path.trim().is_empty() {
+        match default_out_path(state, idx) {
+            Some(p) => p,
+            None => {
+                let msg = "Could not derive an output path".to_string();
+                state.workspace.adaptive_sim_error.insert(stem.to_string(), msg);
+                return;
+            }
+        }
+    } else {
+        std::path::PathBuf::from(state.ui.simrun_out_path.trim())
+    };
+
+    let n_sim = state.ui.adaptive_n_sim;
+    let seed  = state.ui.adaptive_seed;
+    let max_decisions = state.ui.adaptive_max_decisions;
+
+    state.workspace.adaptive_sim_computing.insert(stem.to_string());
+    state.workspace.adaptive_sim_results.remove(stem);
+    let tx = state.worker_tx.clone();
+    let ctx = ui.ctx().clone();
+    let stem_cl = stem.to_string();
+    std::thread::spawn(move || {
+        match r_extract::compute_adaptive_sim(&model_path, &data_path, n_sim, seed, max_decisions, &out_path) {
+            Ok(result) => { let _ = tx.send(WorkerMsg::AdaptiveSimComplete { stem: stem_cl, result: Box::new(result) }); }
+            Err(e)     => { let _ = tx.send(WorkerMsg::RTaskError { context: format!("adaptive_sim {stem_cl}"), message: e }); }
+        }
+        ctx.request_repaint();
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Result panel
 // ---------------------------------------------------------------------------
@@ -376,6 +484,115 @@ fn show_result(ui: &mut egui::Ui, state: &mut AppState, result: &crate::domain::
         });
 }
 
+fn show_adaptive_result(ui: &mut egui::Ui, state: &mut AppState, result: &crate::domain::AdaptiveSimResult, dark: bool) {
+    egui::Frame::new()
+        .fill(theme::card_fill(dark))
+        .inner_margin(egui::Margin::same(12))
+        .corner_radius(egui::CornerRadius::same(6))
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new("✔ Simulation complete").color(theme::GREEN).size(13.0).strong());
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new(format!("{} trajectory rows written", result.n_rows))
+                .size(12.0).color(theme::fg2(dark)));
+            ui.add(egui::Label::new(
+                egui::RichText::new(&result.out_path).monospace().size(10.5).color(theme::fg3(dark)),
+            ).truncate());
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(format!("Columns: {}", result.columns.join(", ")))
+                .size(9.5).color(theme::fg3(dark)).italics());
+            ui.add_space(10.0);
+            if ui.add(
+                egui::Button::new(egui::RichText::new("Open trajectories in Sim Plot").size(13.0).strong())
+                    .fill(theme::ACCENT)
+                    .min_size(egui::vec2(220.0, 30.0)),
+            ).clicked() {
+                state.sim.file_path = result.out_path.clone();
+                crate::ui::sim_tab::load_sim_file(state);
+                state.ui.active_tab = crate::state::Tab::SimPlot;
+            }
+        });
+
+    ui.add_space(10.0);
+    egui::ScrollArea::vertical().id_salt("adaptive_result_scroll").auto_shrink([false, false]).show(ui, |ui| {
+        // ── Metrics (per subject) ──
+        ui.label(egui::RichText::new(format!("Metrics  ({} subject(s))", result.metrics.len()))
+            .size(12.0).strong().color(theme::fg(dark)));
+        ui.add_space(4.0);
+        egui::Grid::new("adaptive_metrics_grid").num_columns(7).spacing([14.0, 4.0]).striped(true).show(ui, |ui| {
+            for h in ["ID", "Doses", "Cum. dose", "↑/↓/hold", "Discontinued", "Signal range", "% time in window"] {
+                ui.label(egui::RichText::new(h).color(theme::fg3(dark)).size(10.5).strong());
+            }
+            ui.end_row();
+            for m in &result.metrics {
+                ui.label(egui::RichText::new(&m.id).monospace().size(11.0));
+                ui.label(egui::RichText::new(m.n_doses.to_string()).size(11.0));
+                ui.label(egui::RichText::new(format!("{:.1}", m.cum_dose)).size(11.0));
+                ui.label(egui::RichText::new(format!("{}/{}/{}", m.n_increases, m.n_decreases, m.n_holds)).size(11.0));
+                let disc_color = if m.discontinued { theme::ORANGE } else { theme::fg2(dark) };
+                ui.label(egui::RichText::new(if m.discontinued { "yes" } else { "no" }).color(disc_color).size(11.0));
+                let range = match (m.signal_min, m.signal_max, m.signal_mean) {
+                    (Some(lo), Some(hi), Some(mean)) => format!("{lo:.2} – {hi:.2} (mean {mean:.2})"),
+                    (Some(lo), Some(hi), None)       => format!("{lo:.2} – {hi:.2}"),
+                    _ => "—".to_string(),
+                };
+                ui.label(egui::RichText::new(range).size(11.0));
+                let pct = m.pct_time_in_window.map(|p| format!("{:.1}%", p * 100.0)).unwrap_or_else(|| "—".to_string());
+                ui.label(egui::RichText::new(pct).size(11.0));
+                ui.end_row();
+            }
+        });
+
+        ui.add_space(14.0);
+
+        // ── Dose ledger ──
+        ui.label(egui::RichText::new(format!("Dose ledger  ({} dose(s))", result.doses.len()))
+            .size(12.0).strong().color(theme::fg(dark)));
+        ui.add_space(4.0);
+        egui::Grid::new("adaptive_doses_grid").num_columns(6).spacing([14.0, 4.0]).striped(true).show(ui, |ui| {
+            for h in ["ID", "Decision", "Time", "Amount", "Signal", "Rule"] {
+                ui.label(egui::RichText::new(h).color(theme::fg3(dark)).size(10.5).strong());
+            }
+            ui.end_row();
+            for d in &result.doses {
+                ui.label(egui::RichText::new(&d.id).monospace().size(11.0));
+                ui.label(egui::RichText::new(d.decision.to_string()).size(11.0));
+                ui.label(egui::RichText::new(format!("{:.2}", d.time)).size(11.0));
+                ui.label(egui::RichText::new(format!("{:.2}", d.amt)).size(11.0));
+                ui.label(egui::RichText::new(format!("{:.3}", d.signal)).size(11.0));
+                ui.label(egui::RichText::new(&d.rule).size(10.5).color(theme::fg2(dark)));
+                ui.end_row();
+            }
+        });
+
+        ui.add_space(14.0);
+
+        // ── Decision log ──
+        ui.label(egui::RichText::new(format!("Decision log  ({} decision(s))", result.decisions.len()))
+            .size(12.0).strong().color(theme::fg(dark)));
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new("Every controller decision point, including holds the dose ledger above omits.")
+                .size(10.0).color(theme::fg3(dark)).italics(),
+        );
+        ui.add_space(4.0);
+        egui::Grid::new("adaptive_decisions_grid").num_columns(5).spacing([14.0, 4.0]).striped(true).show(ui, |ui| {
+            for h in ["ID", "Decision", "Time", "Signal", "Outcome"] {
+                ui.label(egui::RichText::new(h).color(theme::fg3(dark)).size(10.5).strong());
+            }
+            ui.end_row();
+            for d in &result.decisions {
+                ui.label(egui::RichText::new(&d.id).monospace().size(11.0));
+                ui.label(egui::RichText::new(d.decision.to_string()).size(11.0));
+                ui.label(egui::RichText::new(format!("{:.2}", d.time)).size(11.0));
+                ui.label(egui::RichText::new(format!("{:.3}", d.signal)).size(11.0));
+                let outcome_color = if d.outcome == "dosed" { theme::GREEN } else { theme::fg2(dark) };
+                ui.label(egui::RichText::new(&d.outcome).color(outcome_color).size(11.0));
+                ui.end_row();
+            }
+        });
+    });
+}
+
 fn computing_spinner(ui: &mut egui::Ui, basis: SimBasis, n_sim: u32, n_draws: u32, n_sim_per_draw: u32) {
     let detail = match basis {
         SimBasis::AsymptoticUncertainty | SimBasis::SirUncertainty => format!(
@@ -384,6 +601,8 @@ fn computing_spinner(ui: &mut egui::Ui, basis: SimBasis, n_sim: u32, n_draws: u3
         SimBasis::Initial | SimBasis::Fitted => format!(
             "ferx_simulate({n_sim} replicates), merged with the input dataset."
         ),
+        SimBasis::AdaptiveDosing => "ferx_simulate_adaptive() — running the model's own \
+            [adaptive_dosing] controller.".to_string(),
     };
     ui.centered_and_justified(|ui| {
         ui.vertical_centered(|ui| {
