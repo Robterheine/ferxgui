@@ -9,7 +9,7 @@ pub struct FerxModel {
     pub stem: String,
     /// Raw source text.
     pub source: String,
-    /// Parameter names + initial values extracted from [parameters] / [initial_values].
+    /// Parameter names + initial values extracted from [parameters].
     pub params: ParsedParams,
     /// File creation/modification time as "YYYY-MM-DD HH:MM" for the audit trail.
     pub created_at: Option<String>,
@@ -30,8 +30,47 @@ pub struct ParsedParams {
     pub omega_init: Vec<f64>,   // diagonal variances only
     pub sigma_names: Vec<String>,
     pub sigma_init: Vec<f64>,
+    /// Names in `theta_names` declared as a level block (`theta NAME[COL, ...]`); the
+    /// fit expands each into one theta per observed level (`NAME[STUDY=1,TIME=1]`).
+    pub theta_level_blocks: Vec<String>,
+    /// Priors declared inline with `prior(value, rse = X%)` on a theta / omega / sigma.
+    pub priors: Vec<DeclaredPrior>,
+    /// `from_fit = "path"` of a `[priors]` section, if present.
+    pub priors_from_fit: Option<String>,
     /// First comment line or $PROBLEM-equivalent text (used as description).
     pub description: String,
+}
+
+/// A prior declared in the model file: `prior(value, rse = 25%)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeclaredPrior {
+    pub name: String,
+    pub value: f64,
+    /// Relative standard error of the prior, in percent.
+    pub rse_pct: f64,
+}
+
+impl ParsedParams {
+    /// Initial value for a fitted theta name. A level-block theta
+    /// (`PLACEBO[STUDY=1,TIME=1]`) reports the init of its block (`PLACEBO`).
+    /// Falls back to position only when the model has no level blocks.
+    pub fn theta_init_for(&self, fit_name: &str, idx: usize) -> f64 {
+        let base = fit_name.split('[').next().unwrap_or(fit_name);
+        if let Some(k) = self.theta_names.iter().position(|n| n == fit_name || n == base) {
+            return self.theta_init.get(k).copied().unwrap_or(f64::NAN);
+        }
+        if self.theta_level_blocks.is_empty() {
+            self.theta_init.get(idx).copied().unwrap_or(f64::NAN)
+        } else {
+            f64::NAN
+        }
+    }
+
+    /// True if the model declares a level block (MBMA); ferx refuses SIR and the
+    /// covariance recompute for these in 0.4.0.
+    pub fn has_level_block(&self) -> bool {
+        !self.theta_level_blocks.is_empty()
+    }
 }
 
 /// Metadata stored in `model_meta.json`, keyed by model stem.
@@ -148,8 +187,9 @@ impl ModelEntry {
     }
 
     /// ΔOFV relative to a reference model's OFV.
+    /// Compared on the data half of the objective (see `FitSummary::ofv_cmp`).
     pub fn delta_ofv(&self, reference_ofv: f64) -> f64 {
-        let ofv = self.ofv();
+        let ofv = self.fit.as_ref().map(|f| f.ofv_cmp()).unwrap_or(f64::NAN);
         if ofv.is_nan() || reference_ofv.is_nan() {
             f64::NAN
         } else {

@@ -2066,6 +2066,38 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             }
 
+            // Validation gate: a pre-run Validate found errors and held the run back.
+            if state.run.validate_blocked.contains_key(&stem) {
+                ui.add_space(6.0);
+                let mut run_anyway = false;
+                let mut dismiss = false;
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgba_unmultiplied(0xe8, 0x55, 0x55, 20))
+                    .inner_margin(egui::Margin::same(8))
+                    .corner_radius(egui::CornerRadius::same(5))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(egui::RichText::new("Run not started — validation found errors")
+                            .color(theme::RED).size(13.0).strong());
+                        ui.add_space(2.0);
+                        ui.label(egui::RichText::new(
+                            "Details are in the Validate section below. Fix the model, or run it anyway.")
+                            .color(theme::fg2(dark)).size(11.0));
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Run anyway").clicked() { run_anyway = true; }
+                            if ui.button("Dismiss").clicked() { dismiss = true; }
+                        });
+                    });
+                if run_anyway {
+                    if let Some(q) = state.run.validate_blocked.remove(&stem) {
+                        do_launch_queued(state, q);
+                    }
+                } else if dismiss {
+                    state.run.validate_blocked.remove(&stem);
+                }
+            }
+
             // ── Init check ──
             {
                 let checking = state.workspace.check_init_running.contains(&stem);
@@ -2744,7 +2776,7 @@ fn launch_run(state: &mut AppState, idx: usize, stem: &str) {
             return;
         }
     };
-    do_launch_queued(state, crate::domain::QueuedRun {
+    let queued = crate::domain::QueuedRun {
         stem: stem.to_string(),
         model_path,
         data_path: data,
@@ -2756,6 +2788,60 @@ fn launch_run(state: &mut AppState, idx: usize, stem: &str) {
         optimizer_trace: state.ui.run_optimizer_trace,
         export_tables: state.ui.run_export_tables,
         run_sir_after: state.ui.run_sir_after_fit,
+    };
+    gate_on_validation(state, idx, queued);
+}
+
+/// ferx 0.4.0 rejects many previously-quiet models at parse time. Validate before
+/// launching unless the current file was already validated: a clean result starts the
+/// run, errors hold it behind a "Run anyway" prompt (see `ModelValidateComplete`).
+fn gate_on_validation(state: &mut AppState, idx: usize, queued: crate::domain::QueuedRun) {
+    let stem = queued.stem.clone();
+    state.run.validate_blocked.remove(&stem);
+    if state.workspace.settings.ferx_binary.is_none() {
+        // Surfaces the usual "ferx is not available" launch error.
+        return do_launch_queued(state, queued);
+    }
+    let hash = crate::state::source_hash(&state.workspace.models[idx].model.source);
+    if state.workspace.model_validated_hash.get(&stem) == Some(&hash) {
+        if let Some(res) = state.workspace.model_validate_results.get(&stem) {
+            let has_errors = !res.ok || res.diagnostics.iter().any(|d| d.severity == "error");
+            if has_errors {
+                state.ui.status_message = format!("{stem}: validation found errors — run not started");
+                state.run.validate_blocked.insert(stem, queued);
+            } else {
+                do_launch_queued(state, queued);
+            }
+            return;
+        }
+    }
+    if state.workspace.model_validate_running.contains(&stem) {
+        // A validation is already in flight (manual click): just wait for it.
+        state.run.pending_validate.insert(stem, queued);
+        return;
+    }
+    state.ui.status_message = format!("Validating {stem} before run…");
+    state.workspace.model_validate_results.remove(&stem);
+    state.workspace.model_validate_error.remove(&stem);
+    state.workspace.model_validate_running.insert(stem.clone());
+    let model_path = queued.model_path.clone();
+    let data_path = Some(queued.data_path.clone());
+    state.run.pending_validate.insert(stem.clone(), queued);
+    let tx = state.worker_tx.clone();
+    std::thread::spawn(move || {
+        match crate::io::r_extract::compute_model_validate(&model_path, data_path.as_deref()) {
+            Ok(result) => {
+                let _ = tx.send(crate::workers::messages::WorkerMsg::ModelValidateComplete {
+                    stem, result: Box::new(result),
+                });
+            }
+            Err(e) => {
+                let _ = tx.send(crate::workers::messages::WorkerMsg::RTaskError {
+                    context: format!("model_validate {stem}"),
+                    message: e,
+                });
+            }
+        }
     });
 }
 
@@ -3034,7 +3120,8 @@ fn show_output_pill(ui: &mut egui::Ui, state: &mut AppState) {
                             ui.end_row();
 
                             // Row 2
-                            kv(ui, "OFV", &fmt_f64_4dp(fit.ofv), theme::fg(dark));
+                            kv(ui, if fit.has_prior() { "OFV (penalized)" } else { "OFV" },
+                               &fmt_f64_4dp(fit.ofv), theme::fg(dark));
                             kv(ui, "AIC", &fmt_f64_2dp(fit.aic), theme::fg(dark));
                             kv(ui, "BIC", &fmt_f64_2dp(fit.bic), theme::fg(dark));
                             kv(ui, "nPar", &fit.n_parameters.to_string(), theme::fg(dark));
@@ -3202,7 +3289,7 @@ fn show_params_pill(ui: &mut egui::Ui, state: &mut AppState) {
                 for i in 0..fit.theta.len() {
                     let name = fit.theta_names.get(i).cloned()
                         .unwrap_or_else(|| format!("THETA{}", i + 1));
-                    let init = params.theta_init.get(i).copied().unwrap_or(f64::NAN);
+                    let init = params.theta_init_for(&name, i);
                     let est  = fit.theta.get(i).copied().unwrap_or(f64::NAN);
                     let se   = fit.se_theta.get(i).copied().unwrap_or(f64::NAN);
                     let at_b = fit.at_lower_bound.get(i).copied().unwrap_or(false);
@@ -3221,8 +3308,8 @@ fn show_params_pill(ui: &mut egui::Ui, state: &mut AppState) {
                         .unwrap_or_else(|| format!("OMEGA({},{})", i + 1, i + 1));
                     let init = params.omega_init.get(i).copied().unwrap_or(f64::NAN);
                     let est  = fit.omega_value(i, i).unwrap_or(f64::NAN);
-                    // se_omega from ferx has one entry per diagonal parameter.
-                    let se   = fit.se_omega.get(i).copied().unwrap_or(f64::NAN);
+                    // Layout-aware: a block omega stores the packed lower triangle.
+                    let se   = fit.se_omega_diag(i).unwrap_or(f64::NAN);
                     let param_type = fit.eta_param_types.get(i).map(|s| s.as_str()).unwrap_or("log_normal");
                     omega_param_row(ui, &name, init, est, se, param_type, false, false);
                 }
@@ -3250,22 +3337,30 @@ fn show_params_pill(ui: &mut egui::Ui, state: &mut AppState) {
                     let dim  = if dark { theme::FG2 } else { egui::Color32::from_gray(100) };
                     ui.add_space(6.0);
                     ui.label(
-                        egui::RichText::new("Covariances / correlations  (SE not available for off-diagonal)")
+                        egui::RichText::new("Covariances / correlations")
                             .color(dim).size(10.0),
                     );
                     ui.add_space(3.0);
                     egui::Grid::new("omega_offdiag")
-                        .num_columns(3)
+                        .num_columns(4)
                         .spacing([16.0, 3.0])
                         .show(ui, |ui| {
-                            for h in ["ETA PAIR", "COV", "CORR"] {
+                            for h in ["ETA PAIR", "COV", "SE", "CORR"] {
                                 ui.label(egui::RichText::new(h).color(theme::fg3(dark)).size(10.0).strong());
                             }
                             ui.end_row();
                             for (rn, cn, cov, corr) in &off_diag {
                                 let pair = format!("{rn} ~ {cn}");
+                                // Index back into the packed SE vector by name position.
+                                let (ri, ci) = (
+                                    fit.omega_names.iter().position(|n| n == rn).unwrap_or(0),
+                                    fit.omega_names.iter().position(|n| n == cn).unwrap_or(0),
+                                );
+                                let cov_se = fit.se_omega_offdiag(ri, ci);
                                 ui.label(egui::RichText::new(pair).color(theme::fg2(dark)).size(11.0).monospace());
                                 ui.label(egui::RichText::new(fmt_sig4(*cov)).color(theme::fg(dark)).size(11.0));
+                                ui.label(egui::RichText::new(cov_se.map_or("—".to_string(), fmt_sig4))
+                                    .color(theme::fg2(dark)).size(11.0));
                                 let cc = if corr.abs() > 0.5 { theme::ORANGE }
                                          else if corr.abs() > 0.3 { theme::YELLOW }
                                          else { theme::FG };
@@ -3286,7 +3381,7 @@ fn show_params_pill(ui: &mut egui::Ui, state: &mut AppState) {
                         let name = fit.kappa_names.get(i).cloned()
                             .unwrap_or_else(|| format!("KAPPA{}", i + 1));
                         let est = fit.kappa_value(i, i).unwrap_or(f64::NAN);
-                        let se  = fit.se_kappa.get(i).copied().unwrap_or(f64::NAN);
+                        let se  = fit.se_kappa_diag(i).unwrap_or(f64::NAN);
                         omega_param_row(ui, &name, f64::NAN, est, se, "log_normal", false, false);
                     }
                 });
@@ -3310,16 +3405,15 @@ fn show_params_pill(ui: &mut egui::Ui, state: &mut AppState) {
                         let dim = if dark { theme::FG2 } else { egui::Color32::from_gray(100) };
                         ui.add_space(6.0);
                         ui.label(
-                            egui::RichText::new(
-                                "Covariances / correlations  (SE not available for off-diagonal)")
+                            egui::RichText::new("Covariances / correlations")
                                 .color(dim).size(10.0),
                         );
                         ui.add_space(3.0);
                         egui::Grid::new("kappa_offdiag")
-                            .num_columns(3)
+                            .num_columns(4)
                             .spacing([16.0, 3.0])
                             .show(ui, |ui| {
-                                for h in ["KAPPA PAIR", "COV", "CORR"] {
+                                for h in ["KAPPA PAIR", "COV", "SE", "CORR"] {
                                     ui.label(egui::RichText::new(h).color(theme::fg3(dark))
                                         .size(10.0).strong());
                                 }
@@ -3330,6 +3424,13 @@ fn show_params_pill(ui: &mut egui::Ui, state: &mut AppState) {
                                         .size(11.0).monospace());
                                     ui.label(egui::RichText::new(fmt_sig4(*cov))
                                         .color(theme::fg(dark)).size(11.0));
+                                    let (ri, ci) = (
+                                        fit.kappa_names.iter().position(|n| n == rn).unwrap_or(0),
+                                        fit.kappa_names.iter().position(|n| n == cn).unwrap_or(0),
+                                    );
+                                    ui.label(egui::RichText::new(
+                                        fit.se_kappa_offdiag(ri, ci).map_or("—".to_string(), fmt_sig4))
+                                        .color(theme::fg2(dark)).size(11.0));
                                     let cc = if corr.abs() > 0.5 { theme::ORANGE }
                                              else if corr.abs() > 0.3 { theme::YELLOW }
                                              else { theme::FG };
@@ -3357,6 +3458,77 @@ fn show_params_pill(ui: &mut egui::Ui, state: &mut AppState) {
                     theta_param_row(ui, &name, init, est, se, false, false);
                 }
             });
+
+            // ── block_sigma residual correlations ──
+            if !fit.residual_correlations.is_empty() {
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("Residual correlations (block_sigma)")
+                    .color(theme::fg3(dark)).size(10.0));
+                ui.add_space(3.0);
+                egui::Grid::new("sigma_rho_grid").num_columns(4).spacing([16.0, 3.0]).show(ui, |ui| {
+                    for h in ["SIGMA PAIR", "RHO", "SE", ""] {
+                        ui.label(egui::RichText::new(h).color(theme::fg3(dark)).size(10.0).strong());
+                    }
+                    ui.end_row();
+                    for rc in &fit.residual_correlations {
+                        let a = fit.sigma_names.get(rc.sigma_i).map(String::as_str).unwrap_or("?");
+                        let b = fit.sigma_names.get(rc.sigma_j).map(String::as_str).unwrap_or("?");
+                        ui.label(egui::RichText::new(format!("{a} ~ {b}"))
+                            .color(theme::fg2(dark)).size(11.0).monospace());
+                        let cc = if rc.rho.abs() > 0.9 { theme::ORANGE } else { theme::fg(dark) };
+                        ui.label(egui::RichText::new(format!("{:.3}", rc.rho)).color(cc).size(11.0));
+                        ui.label(egui::RichText::new(if rc.fixed { "—".to_string() } else { fmt_sig4(rc.se) })
+                            .color(theme::fg2(dark)).size(11.0));
+                        ui.label(egui::RichText::new(if rc.fixed { "fixed" } else { "" })
+                            .color(theme::fg3(dark)).size(10.0));
+                        ui.end_row();
+                    }
+                });
+            }
+
+            // ── Priors (penalized ML / MAP) ──
+            if fit.has_prior() {
+                ui.add_space(8.0);
+                section_header(ui, &format!("PRIORS  ({})", fit.prior_summary.len()));
+                if !fit.prior_summary.is_empty() {
+                    params_table(ui, 7, |ui| {
+                        for h in ["PARAM", "PRIOR", "ESTIMATE", "SHIFT (SD)", "PENALTY", "FAMILY", "95% PRIOR INTERVAL"] {
+                            ui.label(egui::RichText::new(h).color(theme::fg2(dark)).size(10.0).strong());
+                        }
+                        ui.end_row();
+                        for r in &fit.prior_summary {
+                            ui.label(egui::RichText::new(&r.name).color(theme::fg(dark)).size(11.0).monospace());
+                            ui.label(egui::RichText::new(fmt_sig4(r.prior_value)).size(11.0));
+                            ui.label(egui::RichText::new(fmt_sig4(r.estimate)).size(11.0));
+                            // Beyond ±2 prior SDs the data are overriding the prior.
+                            let sc = if r.shift_in_prior_sds.abs() > 2.0 { theme::ORANGE } else { theme::fg(dark) };
+                            ui.label(egui::RichText::new(format!("{:+.2}", r.shift_in_prior_sds)).color(sc).size(11.0));
+                            ui.label(egui::RichText::new(fmt_sig4(r.penalty)).size(11.0));
+                            ui.label(egui::RichText::new(&r.family).color(theme::fg2(dark)).size(11.0));
+                            ui.label(egui::RichText::new(format!("{} – {}",
+                                fmt_sig4(r.prior_lower_95), fmt_sig4(r.prior_upper_95)))
+                                .color(theme::fg2(dark)).size(11.0));
+                            ui.end_row();
+                        }
+                    });
+                }
+                ui.add_space(3.0);
+                ui.label(egui::RichText::new(format!(
+                    "OFV {} = data {} + prior penalty {}. AIC/BIC use the data half.",
+                    fmt_f64_4dp(fit.ofv),
+                    fmt_f64_4dp(fit.ofv_cmp()),
+                    fmt_f64_4dp(fit.ofv_prior.unwrap_or(f64::NAN))))
+                    .color(theme::fg3(dark)).size(10.0));
+            }
+
+            // ── Level-block note ──
+            if params.has_level_block() {
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new(
+                    "Level-block model (theta NAME[COL, ...]): the theta count comes from the data; \
+                     each level shows the initial value of its block.")
+                    .color(theme::fg3(dark)).size(10.0));
+            }
 
             // ── ETAbar test ──
             if !fit.etabar.is_empty() {
@@ -3446,9 +3618,13 @@ fn show_covariance_bar(
 
     let fitrx_path = state.workspace.models.get(idx).and_then(|m| m.fitrx_path.clone());
     let running = state.workspace.covariance_running.contains(stem);
+    let level_block = state.workspace.models.get(idx)
+        .is_some_and(|m| m.model.params.has_level_block());
+    // ferx 0.4.0 refuses the covariance recompute for level-block models.
     let can_recompute = state.workspace.settings.ferx_binary.is_some()
         && fitrx_path.is_some()
-        && !running;
+        && !running
+        && !level_block;
 
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Covariance:").color(dim).size(11.0));
@@ -3486,6 +3662,10 @@ fn show_covariance_bar(
                 "Recompute standard errors without re-fitting — overwrites the \
                  saved .fitrx bundle in place",
             )
+            .on_disabled_hover_text(if level_block {
+                "ferx 0.4.0 cannot recompute the covariance step for level-block models \
+                 (theta NAME[COL, ...]). Run the fit with covariance = true instead."
+            } else { "" })
             .clicked()
         {
             state.ui.pending_covariance_confirm = Some((idx, state.ui.covariance_method.clone()));
@@ -3838,7 +4018,28 @@ fn show_info_pill(ui: &mut egui::Ui, state: &mut AppState) {
                         changed = true;
                     }
                     ui.end_row();
+
+                    // Fitted-with version (from fit.json), when the bundle carries it.
+                    if let Some(v) = state.workspace.models[idx].fit.as_ref()
+                        .and_then(|f| f.ferx_version.clone())
+                    {
+                        ui.label(egui::RichText::new("Fitted with:").color(theme::fg2(dark)).size(12.0));
+                        ui.label(egui::RichText::new(format!("ferx {v}")).color(theme::fg(dark)).size(12.0));
+                        ui.end_row();
+                    }
                 });
+
+            // Older-ferx notice (factual; never triggers an automatic refit).
+            if let Some(f) = state.workspace.models[idx].fit.as_ref() {
+                if f.fitted_before((0, 4, 0)) {
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new(format!(
+                        "Fitted with ferx {}. Re-run to pick up 0.4.0 changes: CWRES formula, \
+                         SAEM defaults, block-omega handling, and other engine fixes.",
+                        f.ferx_version.as_deref().unwrap_or("?")))
+                        .color(theme::fg3(dark)).size(11.0));
+                }
+            }
 
             // Notes (multi-line).
             ui.add_space(8.0);
@@ -5053,7 +5254,7 @@ fn show_compare_dialog(ctx: &egui::Context, state: &mut AppState) {
                             let ob: Vec<f64> = (0..fit_b.n_eta).filter_map(|i| fit_b.omega_value(i,i)).collect();
                             compare_param_rows(ui, fg, dark,
                                 &fit_a.omega_names, &fit_b.omega_names,
-                                &oa, &ob, &fit_a.se_omega, &fit_b.se_omega);
+                                &oa, &ob, &fit_a.se_omega_diag_vec(), &fit_b.se_omega_diag_vec());
                         }
 
                         // SIGMA section.
@@ -5071,10 +5272,17 @@ fn show_compare_dialog(ctx: &egui::Context, state: &mut AppState) {
                         // and the Δ columns don't apply; left blank).
                         for _ in 0..7 { ui.label(egui::RichText::new("-- FIT STATISTICS --").color(dim).size(10.0)); }
                         ui.end_row();
-                        for (row_label, val_a, val_b) in [
+                        let mut stat_rows = vec![
                             ("OFV", format!("{:.3}", fit_a.ofv), format!("{:.3}", fit_b.ofv)),
-                            ("AIC", format!("{:.2}", fit_a.aic), format!("{:.2}", fit_b.aic)),
-                        ] {
+                        ];
+                        // A priored fit's OFV is the penalized total; the data half is
+                        // what compares with an unpenalized fit (and what AIC/BIC use).
+                        if fit_a.has_prior() || fit_b.has_prior() {
+                            stat_rows.push(("OFV (data)",
+                                format!("{:.3}", fit_a.ofv_cmp()), format!("{:.3}", fit_b.ofv_cmp())));
+                        }
+                        stat_rows.push(("AIC", format!("{:.2}", fit_a.aic), format!("{:.2}", fit_b.aic)));
+                        for (row_label, val_a, val_b) in stat_rows {
                             ui.label(egui::RichText::new(row_label).color(fg).size(11.0));
                             ui.label(egui::RichText::new(val_a).color(fg).size(11.0));
                             ui.label(""); // RSE% — n/a for OFV/AIC

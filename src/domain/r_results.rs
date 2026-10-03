@@ -320,6 +320,31 @@ pub struct ModelValidateResult {
     pub diagnostics: Vec<ValidateDiagnostic>,
 }
 
+/// Decodes the `<U+XXXX>` escapes R emits for non-ASCII characters when it runs in a
+/// non-UTF-8 locale (`Rscript --vanilla`), e.g. `<U+2014>` -> an em dash. Malformed
+/// escapes are left untouched.
+pub fn decode_r_unicode_escapes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(at) = rest.find("<U+") {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at + 3..];
+        let decoded = tail.find('>').and_then(|end| {
+            let hex = &tail[..end];
+            if hex.is_empty() || hex.len() > 8 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                return None;
+            }
+            u32::from_str_radix(hex, 16).ok().and_then(char::from_u32).map(|c| (c, end))
+        });
+        match decoded {
+            Some((c, end)) => { out.push(c); rest = &tail[end + 1..]; }
+            None => { out.push_str("<U+"); rest = tail; }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// One row of `ferx_model_validate()`'s diagnostics data frame.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ValidateDiagnostic {
@@ -673,5 +698,25 @@ mod tests {
                 .expect("parse");
         assert!(!below_threshold.no_covariates && !below_threshold.no_etas);
         assert!(below_threshold.rows.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod unicode_escape_tests {
+    use super::decode_r_unicode_escapes as dec;
+
+    #[test]
+    fn decodes_em_dash_and_multiple() {
+        assert_eq!(dec("a <U+2014> b"), "a \u{2014} b");
+        assert_eq!(dec("<U+00E9><U+2014>x"), "\u{e9}\u{2014}x");
+    }
+
+    #[test]
+    fn leaves_malformed_and_plain_text_alone() {
+        assert_eq!(dec("a <U+ZZZZ> b"), "a <U+ZZZZ> b");
+        assert_eq!(dec("a <U+2014 b"), "a <U+2014 b");
+        assert_eq!(dec("<U+>"), "<U+>");
+        assert_eq!(dec("plain"), "plain");
+        assert_eq!(dec("x < y > z"), "x < y > z");
     }
 }

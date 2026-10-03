@@ -141,6 +141,15 @@ struct FitWire {
     #[serde(default)] warnings: serde_json::Value,
     #[serde(default)] warnings_structured: Vec<crate::domain::StructuredWarning>,
     #[serde(default)] trace_path: Option<String>,
+
+    // ferx >= 0.4.0.
+    #[serde(default)] ferx_version:      Option<String>,
+    #[serde(default)] omega_is_diagonal: Option<bool>,
+    #[serde(default)] kappa_is_diagonal: Option<bool>,
+    // Prior split — absent (or null) for models without a prior.
+    #[serde(default)] ofv_data:          Option<f64>,
+    #[serde(default)] ofv_prior:         Option<f64>,
+    #[serde(default)] prior_summary:     serde_json::Value,
 }
 
 
@@ -785,25 +794,8 @@ fn wire_to_summary(w: FitWire, mut warnings: Vec<String>) -> FitSummary {
     // Eps shrinkage: scalar when there is one sigma component.
     let eps_shrinkage = json_val_to_f64_vec(&w.shrinkage_eps);
 
-    // Parameter correlation matrix — derived from covariance_matrix when present.
-    let (cov_corr_flat, cov_corr_n, cov_corr_names) =
-        if let Some(ref cm) = w.covariance_matrix {
-            let n = cm.cols;
-            let corr = build_correlation_matrix(&cm.data, n);
-            // Build canonical name list: theta (non-fixed) → omega diagonal → sigma.
-            // Falls back to "P1…Pn" when count doesn't match n_parameters.
-            let mut names: Vec<String> = theta_names.clone();
-            names.extend_from_slice(&omega_names);
-            names.extend(json_val_to_str_vec(
-                w.sigma.get("names").unwrap_or(&serde_json::Value::Null)
-            ));
-            if names.len() != n {
-                names = (1..=n).map(|i| format!("P{i}")).collect();
-            }
-            (corr, n, names)
-        } else {
-            (vec![], 0, vec![])
-        };
+    // Fitted block_sigma correlations (sigma.residual_correlations + .se_ + _fixed).
+    let residual_correlations = parse_residual_correlations(&w.sigma);
 
     // IOV / kappa — present only when the model has kappa parameters.
     let (iov_kappa, iov_kappa_names, iov_n_kappa, iov_se_kappa, iov_shrinkage) =
@@ -817,6 +809,24 @@ fn wire_to_summary(w: FitWire, mut warnings: Vec<String>) -> FitSummary {
              json_val_to_f64_vec(&iov.shrinkage_kappa))
         } else {
             (vec![], vec![], 0, vec![], vec![])
+        };
+
+    // Parameter correlation matrix — derived from covariance_matrix when present.
+    let (cov_corr_flat, cov_corr_n, cov_corr_names) =
+        if let Some(ref cm) = w.covariance_matrix {
+            let n = cm.cols;
+            let corr = build_correlation_matrix(&cm.data, n);
+            let fixed = json_val_to_bool_vec(&w.theta.fixed);
+            let names = covariance_names(
+                &theta_names, &fixed, &omega_names,
+                packed_layout(&se_omega, n_eta, w.omega_is_diagonal),
+                &iov_kappa_names,
+                packed_layout(&iov_se_kappa, iov_n_kappa, w.kappa_is_diagonal),
+                &sigma_names, &residual_correlations, n,
+            );
+            (corr, n, names)
+        } else {
+            (vec![], 0, vec![])
         };
 
     // eta_param_info: array of objects with a "param_type" field.
@@ -878,7 +888,118 @@ fn wire_to_summary(w: FitWire, mut warnings: Vec<String>) -> FitSummary {
         iwres_lag1_r: w.iwres_lag1_r,
         warnings_structured: w.warnings_structured,
         eta_param_types,
+        ferx_version: w.ferx_version.filter(|v| !v.is_empty()),
+        omega_is_diagonal: w.omega_is_diagonal,
+        kappa_is_diagonal: w.kappa_is_diagonal,
+        ofv_data: w.ofv_data,
+        ofv_prior: w.ofv_prior,
+        prior_summary: parse_prior_summary(&w.prior_summary),
+        residual_correlations,
     }
+}
+
+/// True when an SE vector for an `n`-dimensional random-effect matrix is the packed
+/// lower triangle (block layout) rather than one entry per diagonal element.
+fn packed_layout(se: &[f64], n: usize, is_diag: Option<bool>) -> bool {
+    match is_diag {
+        Some(d) => !d && n > 1,
+        None => n > 1 && se.len() == n * (n + 1) / 2,
+    }
+}
+
+fn json_val_to_bool_vec(v: &serde_json::Value) -> Vec<bool> {
+    match v {
+        serde_json::Value::Bool(b) => vec![*b],
+        serde_json::Value::Array(a) => a.iter().filter_map(|x| x.as_bool()).collect(),
+        _ => vec![],
+    }
+}
+
+fn as_f64_or_nan(v: Option<&serde_json::Value>) -> f64 {
+    v.and_then(|x| x.as_f64()).unwrap_or(f64::NAN)
+}
+
+/// `prior_summary`: array of objects (one per priored parameter). A single row may
+/// arrive as a bare object under jsonlite auto_unbox.
+fn parse_prior_summary(v: &serde_json::Value) -> Vec<crate::domain::PriorRow> {
+    let rows: Vec<&serde_json::Value> = match v {
+        serde_json::Value::Array(a) => a.iter().collect(),
+        serde_json::Value::Object(_) => vec![v],
+        _ => vec![],
+    };
+    rows.into_iter().filter_map(|r| {
+        Some(crate::domain::PriorRow {
+            name: r.get("name")?.as_str()?.to_string(),
+            prior_value: as_f64_or_nan(r.get("prior_value")),
+            estimate: as_f64_or_nan(r.get("estimate")),
+            shift_in_prior_sds: as_f64_or_nan(r.get("shift_in_prior_sds")),
+            penalty: as_f64_or_nan(r.get("penalty")),
+            family: r.get("family").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            prior_lower_95: as_f64_or_nan(r.get("prior_lower_95")),
+            prior_upper_95: as_f64_or_nan(r.get("prior_upper_95")),
+        })
+    }).collect()
+}
+
+/// `sigma.residual_correlations` (+ `residual_correlation_fixed`, `se_residual_correlations`).
+fn parse_residual_correlations(sigma: &serde_json::Value) -> Vec<crate::domain::ResidualCorr> {
+    let rows: Vec<&serde_json::Value> = match sigma.get("residual_correlations") {
+        Some(serde_json::Value::Array(a)) => a.iter().collect(),
+        Some(o @ serde_json::Value::Object(_)) => vec![o],
+        _ => return vec![],
+    };
+    let fixed = json_val_to_bool_vec(sigma.get("residual_correlation_fixed").unwrap_or(&serde_json::Value::Null));
+    let se = json_val_to_f64_vec(sigma.get("se_residual_correlations").unwrap_or(&serde_json::Value::Null));
+    rows.into_iter().enumerate().map(|(k, r)| crate::domain::ResidualCorr {
+        sigma_i: r.get("sigma_i").and_then(|x| x.as_u64()).unwrap_or(0) as usize,
+        sigma_j: r.get("sigma_j").and_then(|x| x.as_u64()).unwrap_or(0) as usize,
+        rho: as_f64_or_nan(r.get("rho")),
+        fixed: fixed.get(k).copied().unwrap_or(false),
+        se: se.get(k).copied().unwrap_or(f64::NAN),
+    }).collect()
+}
+
+/// Names for the rows/columns of the covariance matrix, in the engine's packing order:
+/// theta, omega (diagonal, or packed lower triangle column by column for a block),
+/// kappa (same), sigma, then `block_sigma` correlations last. Returns `P1..Pn` when
+/// no candidate list matches the matrix size.
+#[allow(clippy::too_many_arguments)]
+fn covariance_names(
+    theta: &[String], theta_fixed: &[bool],
+    omega: &[String], omega_packed: bool,
+    kappa: &[String], kappa_packed: bool,
+    sigma: &[String], rcorr: &[crate::domain::ResidualCorr],
+    n: usize,
+) -> Vec<String> {
+    fn re_names(names: &[String], packed: bool) -> Vec<String> {
+        if !packed { return names.to_vec(); }
+        let mut out = Vec::new();
+        for c in 0..names.len() {
+            for r in c..names.len() {
+                out.push(if r == c { names[c].clone() }
+                         else { format!("COV({},{})", names[r], names[c]) });
+            }
+        }
+        out
+    }
+    let mut tail: Vec<String> = re_names(omega, omega_packed);
+    tail.extend(re_names(kappa, kappa_packed));
+    tail.extend_from_slice(sigma);
+    for rc in rcorr {
+        let a = sigma.get(rc.sigma_i).map(String::as_str).unwrap_or("?");
+        let b = sigma.get(rc.sigma_j).map(String::as_str).unwrap_or("?");
+        tail.push(format!("RHO({a},{b})"));
+    }
+    // Candidate 1: every theta. Candidate 2: only the estimated (non-fixed) thetas.
+    let mut all = theta.to_vec();
+    all.extend(tail.iter().cloned());
+    if all.len() == n { return all; }
+    let mut free: Vec<String> = theta.iter().enumerate()
+        .filter(|(i, _)| !theta_fixed.get(*i).copied().unwrap_or(false))
+        .map(|(_, t)| t.clone()).collect();
+    free.extend(tail);
+    if free.len() == n { return free; }
+    (1..=n).map(|i| format!("P{i}")).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1032,5 +1153,138 @@ mod tests {
         assert_eq!(fit.omega_value(2, 1), Some(0.2));
         // Symmetric access
         assert_eq!(fit.omega_value(0, 1), Some(0.3));
+    }
+
+    /// Numbers from a real `warfarin_block_omega` bundle written by ferx 0.4.0:
+    /// omega.se is the packed lower triangle, column-major.
+    const BLOCK_OMEGA: &str = r#"{
+        "method": "foce", "converged": true, "ofv": -280.4858,
+        "ferx_version": "0.4.0",
+        "theta": {"names": ["TVCL","TVV","TVKA"], "estimates": [0.133,7.73,0.725],
+                  "se": [0.0067,0.236,0.124], "fixed": [false,false,false]},
+        "omega": {"names": ["ETA_CL","ETA_V","ETA_KA"],
+                  "matrix": {"rows":3,"cols":3,"data":[0.0286,0.0018,0,0.0018,0.0096,0,0,0,0.349]},
+                  "se": [0.0128, 0.0053, 0.0, 0.0043, 0.0, 0.1608]},
+        "sigma": {"names": ["PROP_ERR"], "estimates": [0.0107], "se": [0.00095]},
+        "omega_is_diagonal": false,
+        "covariance_status": "computed",
+        "covariance_matrix": {"rows":10,"cols":10,"data": []}
+    }"#;
+
+    #[test]
+    fn block_omega_diagonal_ses_come_from_packed_layout() {
+        let wire: FitWire = serde_json::from_str(BLOCK_OMEGA).unwrap();
+        let s = wire_to_summary(wire, vec![]);
+        assert_eq!(s.omega_is_diagonal, Some(false));
+        assert_eq!(s.ferx_version.as_deref(), Some("0.4.0"));
+        assert_eq!(s.se_omega_diag_vec(), vec![0.0128, 0.0043, 0.1608]);
+        assert_eq!(s.se_omega_offdiag(1, 0), Some(0.0053));
+        assert_eq!(s.se_omega_offdiag(0, 1), Some(0.0053));
+        assert_eq!(s.se_omega_offdiag(2, 0), Some(0.0));
+    }
+
+    #[test]
+    fn diagonal_omega_se_is_unchanged() {
+        let mut s = FitSummary {
+            n_eta: 3,
+            se_omega: vec![0.1, 0.2, 0.3],
+            omega_is_diagonal: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(s.se_omega_diag_vec(), vec![0.1, 0.2, 0.3]);
+        s.omega_is_diagonal = None; // older bundle: inferred from length
+        assert_eq!(s.se_omega_diag_vec(), vec![0.1, 0.2, 0.3]);
+        assert_eq!(s.se_omega_offdiag(1, 0), None);
+    }
+
+    #[test]
+    fn packed_index_matches_column_major() {
+        // n = 3: (0,0)(1,0)(2,0)(1,1)(2,1)(2,2) -> 0..6
+        assert_eq!(crate::domain::packed_col_major_index(3, 0, 0), 0);
+        assert_eq!(crate::domain::packed_col_major_index(3, 1, 0), 1);
+        assert_eq!(crate::domain::packed_col_major_index(3, 2, 0), 2);
+        assert_eq!(crate::domain::packed_col_major_index(3, 1, 1), 3);
+        assert_eq!(crate::domain::packed_col_major_index(3, 2, 1), 4);
+        assert_eq!(crate::domain::packed_col_major_index(3, 2, 2), 5);
+    }
+
+    #[test]
+    fn covariance_names_cover_block_omega_kappa_and_rho() {
+        let t = vec!["TVCL".to_string(), "TVV".to_string()];
+        let om = vec!["ETA_CL".to_string(), "ETA_V".to_string()];
+        let kp = vec!["KAPPA_CL".to_string()];
+        let sg = vec!["PROP".to_string(), "ADD".to_string()];
+        let rc = vec![crate::domain::ResidualCorr { sigma_i: 1, sigma_j: 0, rho: 0.1, fixed: false, se: 0.1 }];
+        // 2 theta + 3 packed omega + 1 kappa + 2 sigma + 1 rho = 9
+        let n = covariance_names(&t, &[false, false], &om, true, &kp, false, &sg, &rc, 9);
+        assert_eq!(n, vec!["TVCL","TVV","ETA_CL","COV(ETA_V,ETA_CL)","ETA_V","KAPPA_CL","PROP","ADD","RHO(ADD,PROP)"]);
+        // Size mismatch falls back to P1..Pn.
+        let n = covariance_names(&t, &[false, false], &om, true, &kp, false, &sg, &rc, 4);
+        assert_eq!(n, vec!["P1","P2","P3","P4"]);
+        // Fixed thetas dropped from the matrix.
+        let n = covariance_names(&t, &[true, false], &om, false, &[], false, &sg[..1], &[], 4);
+        assert_eq!(n, vec!["TVV","ETA_CL","ETA_V","PROP"]);
+    }
+
+    #[test]
+    fn prior_split_and_residual_correlations_parse() {
+        const J: &str = r#"{
+            "method": "foce", "ofv": -279.1978, "ofv_data": -280.1263, "ofv_prior": 0.9285,
+            "prior_summary": [{"name":"TVCL","prior_value":0.15,"estimate":0.1363,
+                "shift_in_prior_sds":-0.96,"penalty":0.9285,"family":"lognormal",
+                "prior_lower_95":0.1234,"prior_upper_95":0.1824}],
+            "sigma": {"names":["PROP_ERR","ADD_ERR"],"estimates":[0.01,0.0003],"se":[0.001,0.009],
+                "residual_correlations":[{"sigma_i":1,"sigma_j":0,"rho":0.995}],
+                "residual_correlation_fixed":[false],"se_residual_correlations":[29.2]}
+        }"#;
+        let s = wire_to_summary(serde_json::from_str(J).unwrap(), vec![]);
+        assert!(s.has_prior());
+        assert_eq!(s.prior_summary.len(), 1);
+        assert_eq!(s.prior_summary[0].family, "lognormal");
+        assert!((s.ofv_cmp() + 280.1263).abs() < 1e-9);
+        assert_eq!(s.residual_correlations.len(), 1);
+        assert_eq!(s.residual_correlations[0].sigma_i, 1);
+        assert!((s.residual_correlations[0].se - 29.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn unpriored_fit_has_no_prior_and_ofv_cmp_is_ofv() {
+        let s = wire_to_summary(serde_json::from_str(r#"{"ofv": -10.0, "ofv_prior": 0.0, "prior_summary": null}"#).unwrap(), vec![]);
+        assert!(!s.has_prior());
+        assert_eq!(s.ofv_cmp(), -10.0);
+    }
+
+    #[test]
+    fn older_ferx_versions_are_flagged_only_when_known() {
+        let mut s = FitSummary::default();
+        assert!(!s.fitted_before((0, 4, 0)));              // key absent: no notice
+        s.ferx_version = Some("0.3.0".into());
+        assert!(s.fitted_before((0, 4, 0)));
+        s.ferx_version = Some("0.4.0".into());
+        assert!(!s.fitted_before((0, 4, 0)));
+        s.ferx_version = Some("0.4.0.9000".into());
+        assert!(!s.fitted_before((0, 4, 0)));
+    }
+
+    /// Reads real 0.4.0 bundles from `FERX_TEST_BUNDLES` (a directory) when set.
+    #[test]
+    fn real_040_bundles_parse() {
+        let Ok(dir) = std::env::var("FERX_TEST_BUNDLES") else { return };
+        let d = std::path::Path::new(&dir);
+        let b = read_fit_summary(&d.join("warfarin_block_omega.fitrx")).unwrap();
+        assert_eq!(b.se_omega_diag_vec().len(), 3);
+        assert!((b.se_omega_diag(1).unwrap() - 0.0042976782418163535).abs() < 1e-12);
+        assert!((b.se_omega_diag(2).unwrap() - 0.1607532272474605).abs() < 1e-12);
+        assert_eq!(b.cov_corr_names.len(), 10);
+        assert_eq!(b.cov_corr_names[3], "ETA_CL");
+        assert_eq!(b.cov_corr_names[9], "PROP_ERR");
+        let p = read_fit_summary(&d.join("prior.fitrx")).unwrap();
+        assert!(p.has_prior());
+        assert_eq!(p.prior_summary[0].name, "TVCL");
+        let i = read_fit_summary(&d.join("warfarin_iov.fitrx")).unwrap();
+        assert_eq!(i.n_kappa, 1);
+        let r = read_fit_summary(&d.join("bs.fitrx")).unwrap();
+        assert_eq!(r.residual_correlations.len(), 1);
+        assert_eq!(r.cov_corr_names.last().unwrap(), "RHO(ADD_ERR,PROP_ERR)");
     }
 }

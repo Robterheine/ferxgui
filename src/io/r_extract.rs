@@ -107,8 +107,15 @@ pub fn compute_model_validate(model_path: &Path, data_path: Option<&Path>) -> Re
         path_as_str(model_path)?,
         data_arg,
     ])?;
-    serde_json::from_str(&json)
-        .map_err(|e| format!("model_validate JSON parse error: {e}\nR output: {}", &json[..json.len().min(500)]))
+    let mut res: ModelValidateResult = serde_json::from_str(&json)
+        .map_err(|e| format!("model_validate JSON parse error: {e}\nR output: {}", &json[..json.len().min(500)]))?;
+    // The engine's messages contain non-ASCII (em dashes); R escapes them as <U+XXXX>
+    // in the non-UTF-8 locale the script runs under.
+    for d in &mut res.diagnostics {
+        d.message = crate::domain::decode_r_unicode_escapes(&d.message);
+        d.suggestion = d.suggestion.take().map(|s| crate::domain::decode_r_unicode_escapes(&s));
+    }
+    Ok(res)
 }
 
 /// Simulation-based NPDE/NPD diagnostics. Args: <fitrx_path> [nsim] [seed]
@@ -2291,5 +2298,19 @@ cat("ok")
 
         let _ = std::fs::remove_file(&out_path);
         let _ = std::fs::remove_file(&fitrx_path);
+    }
+}
+
+#[cfg(test)]
+mod validate_live_tests {
+    /// Runs the real R bridge when `FERX_TEST_BAD_MODEL` points at a model with an
+    /// out-of-bounds theta init (whose engine message contains an em dash).
+    #[test]
+    fn validate_decodes_em_dash_live() {
+        let Ok(p) = std::env::var("FERX_TEST_BAD_MODEL") else { return };
+        let r = super::compute_model_validate(std::path::Path::new(&p), None).unwrap();
+        assert!(!r.diagnostics.is_empty());
+        assert!(r.diagnostics.iter().all(|d| !d.message.contains("<U+")), "{:?}", r.diagnostics);
+        assert!(r.diagnostics.iter().any(|d| d.message.contains('\u{2014}')), "{:?}", r.diagnostics);
     }
 }

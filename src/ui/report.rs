@@ -105,6 +105,9 @@ fn show_run_summary(
         .spacing([20.0, 4.0])
         .show(ui, |ui| {
             kv(ui, "OFV",   &fmt_f64_3dp(fit.ofv),   dark);
+            if fit.has_prior() {
+                kv(ui, "OFV (data)", &fmt_f64_3dp(fit.ofv_cmp()), dark);
+            }
             kv(ui, "AIC",   &fmt_f64_1dp(fit.aic),   dark);
             kv(ui, "BIC",   &fmt_f64_1dp(fit.bic),   dark);
             kv(ui, "Observations", &fit.n_obs.to_string(), dark);
@@ -206,7 +209,7 @@ fn show_omega_section(ui: &mut egui::Ui, fit: &FitSummary, dark: bool) {
             let name = fit.omega_names.get(i).cloned()
                 .unwrap_or_else(|| format!("OMEGA({},{})", i + 1, i + 1));
             let est  = fit.omega_value(i, i).unwrap_or(f64::NAN);
-            let se   = fit.se_omega.get(i).copied().unwrap_or(f64::NAN);
+            let se   = fit.se_omega_diag(i).unwrap_or(f64::NAN);
             let shrink = fit.eta_shrinkage.get(i).copied();
             param_row_omega(ui, &name, est, se, shrink, dark);
         }
@@ -224,7 +227,7 @@ fn show_kappa_section(ui: &mut egui::Ui, fit: &FitSummary, dark: bool) {
             let name = fit.kappa_names.get(i).cloned()
                 .unwrap_or_else(|| format!("KAPPA{}", i + 1));
             let est = fit.kappa_value(i, i).unwrap_or(f64::NAN);
-            let se  = fit.se_kappa.get(i).copied().unwrap_or(f64::NAN);
+            let se  = fit.se_kappa_diag(i).unwrap_or(f64::NAN);
             param_row_fixed(ui, &name, est, se, false, dark);
         }
     });
@@ -569,6 +572,9 @@ fn generate_html(
 
     b.push_str("<section><h2>Run Summary</h2><table class=\"kv\">\n");
     b.push_str(&html_kv("OFV",          &fmt_f64_3dp(fit.ofv)));
+    if fit.has_prior() {
+        b.push_str(&html_kv("OFV (data)", &fmt_f64_3dp(fit.ofv_cmp())));
+    }
     b.push_str(&html_kv("AIC",          &fmt_f64_1dp(fit.aic)));
     b.push_str(&html_kv("BIC",          &fmt_f64_1dp(fit.bic)));
     b.push_str(&html_kv("Method",       &method));
@@ -615,7 +621,7 @@ fn generate_html(
             let name = fit.omega_names.get(i).cloned()
                 .unwrap_or_else(|| format!("OMEGA({},{})", i + 1, i + 1));
             let est    = fit.omega_value(i, i).unwrap_or(f64::NAN);
-            let se     = fit.se_omega.get(i).copied().unwrap_or(f64::NAN);
+            let se     = fit.se_omega_diag(i).unwrap_or(f64::NAN);
             let shrink = fit.eta_shrinkage.get(i).copied();
             b.push_str(&html_param_row_omega(&name, est, se, shrink));
         }
@@ -633,7 +639,7 @@ fn generate_html(
             let name = fit.kappa_names.get(i).cloned()
                 .unwrap_or_else(|| format!("KAPPA{}", i + 1));
             let est = fit.kappa_value(i, i).unwrap_or(f64::NAN);
-            let se  = fit.se_kappa.get(i).copied().unwrap_or(f64::NAN);
+            let se  = fit.se_kappa_diag(i).unwrap_or(f64::NAN);
             b.push_str(&html_param_row_fixed(&name, est, se, false));
         }
         b.push_str("</table></section>\n");

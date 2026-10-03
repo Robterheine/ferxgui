@@ -40,6 +40,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     let stem    = state.workspace.models[model_idx].model.stem.clone();
     let running = state.workspace.sir_running.contains(&stem);
     let has_res = state.workspace.sir_results.contains_key(&stem);
+    // ferx 0.4.0 refuses SIR on `theta NAME[COL, ...]` level-block models.
+    let level_block = state.workspace.models[model_idx].model.params.has_level_block();
 
     egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
         // Which model this SIR run belongs to — mirrors the Evaluation tab
@@ -81,11 +83,14 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     if ui.add_enabled(
-                        !running,
+                        !running && !level_block,
                         egui::Button::new(egui::RichText::new("▶  Run SIR").size(13.0))
                             .fill(theme::ACCENT)
                             .min_size(egui::vec2(110.0, 30.0)),
-                    ).clicked() {
+                    ).on_disabled_hover_text(if level_block {
+                        "ferx 0.4.0 does not support SIR for level-block models \
+                         (theta NAME[COL, ...]). Use the covariance step of the fit instead."
+                    } else { "" }).clicked() {
                         state.workspace.sir_results.remove(&stem);
                         state.workspace.sir_error.remove(&stem);
                         state.workspace.sir_running.insert(stem.clone());
@@ -231,9 +236,11 @@ fn show_ci_comparison(
     fit:  &crate::domain::FitSummary,
     dark: bool,
 ) {
+    let omega_est = omega_diag_vec(fit);
+    let omega_se  = fit.se_omega_diag_vec();
     for (section_title, cis, ests, ses) in [
         ("THETA",         sir.theta.as_slice(), fit.theta.as_slice(),  fit.se_theta.as_slice()),
-        ("OMEGA (diag)",  sir.omega.as_slice(), omega_diag_vec(fit).leak(), fit.se_omega.as_slice()),
+        ("OMEGA (diag)",  sir.omega.as_slice(), omega_est.as_slice(), omega_se.as_slice()),
         ("SIGMA",         sir.sigma.as_slice(), fit.sigma.as_slice(),  fit.se_sigma.as_slice()),
     ] {
         if cis.is_empty() { continue; }
@@ -576,7 +583,7 @@ fn find_estimate_se(fit: &crate::domain::FitSummary, name: &str) -> (Option<f64>
         return (fit.theta.get(i).copied(), fit.se_theta.get(i).copied());
     }
     if let Some(i) = fit.omega_names.iter().position(|n| n == name) {
-        return (fit.omega_value(i, i), fit.se_omega.get(i).copied());
+        return (fit.omega_value(i, i), fit.se_omega_diag(i));
     }
     if let Some(i) = fit.sigma_names.iter().position(|n| n == name) {
         return (fit.sigma.get(i).copied(), fit.se_sigma.get(i).copied());

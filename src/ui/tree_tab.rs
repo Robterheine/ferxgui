@@ -140,7 +140,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
 
     // Best OFV across all converged models.
     let best_ofv: Option<f64> = state.workspace.models.iter()
-        .filter_map(|m| m.fit.as_ref().filter(|f| f.converged).map(|f| f.ofv))
+        .filter_map(|m| m.fit.as_ref().filter(|f| f.converged).map(|f| f.ofv_cmp()))
         .reduce(f64::min);
 
     // Split: tree canvas on the left, info panel on the right.
@@ -279,7 +279,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                 let (cf, pf) = (state.workspace.models[mi].fit.as_ref(),
                                 state.workspace.models[pi].fit.as_ref());
                 if let (Some(cf), Some(pf)) = (cf, pf) {
-                    let delta = cf.ofv - pf.ofv;
+                    let delta = cf.ofv_cmp() - pf.ofv_cmp();
                     let d_str = format!("{delta:+.1}");
                     let d_col = if delta < -3.84 { theme::GREEN }
                                 else if delta > 0.5 { theme::ORANGE }
@@ -386,7 +386,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
             if let Some(fit) = &entry.fit {
                 let mut ofv_str = format!("{:.2}", fit.ofv);
                 if let Some(best) = best_ofv {
-                    let d = fit.ofv - best;
+                    let d = fit.ofv_cmp() - best;
                     let suffix = if d.abs() < 0.01 { "  ★".to_string() } else { format!("  Δ{d:+.1}") };
                     ofv_str += &suffix;
                 }
@@ -542,7 +542,7 @@ fn show_info_panel(
                     .find(|m| &m.model.stem == parent_stem)
                 {
                     if let Some(pf) = &parent_entry.fit {
-                        let d   = f.ofv - pf.ofv;
+                        let d   = f.ofv_cmp() - pf.ofv_cmp();
                         let col = if d < -3.84 { theme::GREEN } else if d > 0.5 { theme::RED } else { dim };
                         info_row(ui, "ΔOFV vs parent", &format!("{d:+.3}"), col, dark);
                     }

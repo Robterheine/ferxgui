@@ -66,7 +66,7 @@ FeRx NLME runs entirely inside R. FeRx GUI calls `Rscript` for all modelling ope
 | Software | Minimum version | Notes |
 |---|---|---|
 | **R** | 4.2 | [r-project.org](https://www.r-project.org/) |
-| **ferx** R package | 0.3.0 | Compiles a Rust backend on install — see [Installing R packages](#installing-r-packages) |
+| **ferx** R package | 0.3.0 (0.4.0 recommended) | Compiles a Rust backend on install — see [Installing R packages](#installing-r-packages) |
 | **vpc** R package | 1.0 | Required for VPC tab |
 | **ggplot2** R package | 3.0 | Required for R ggplot export |
 | **jsonlite** R package | — | Usually installed with R |
@@ -274,6 +274,32 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 ---
 
 ## Changelog
+
+### v0.9.17 (2026-10-04) — ferx 0.4.0 compatibility: block-omega SEs corrected, validate before run, priors / MAP support
+
+Written against ferx-r 0.4.0. Nothing in the R calls ferxgui makes broke, but 0.4.0 changes several results and exposed display bugs; each item below was checked against bundles fitted with 0.4.0 via `Rscript`. The minimum supported ferx stays 0.3.0; 0.4.0 is recommended.
+
+**Fixed: wrong omega standard errors for block-omega fits**
+- For a `block_omega` fit, `fit.json` stores `omega.se` as the packed lower triangle (column-major), not one SE per diagonal entry. ferxgui indexed it as the diagonal everywhere (Parameters pill, Compare, SIR, report), so on the bundled `warfarin_block_omega` ETA_KA showed SE 0.0 (true 0.1608) and ETA_V 0.0053 (true 0.0043). Now layout-aware (`omega_is_diagonal`, with a length-based fallback for older bundles). The off-diagonal covariance tables gain an SE column, for omega and kappa.
+- Covariance-matrix parameter names are no longer `P1..Pn` for block-omega, IOV and `block_sigma` models.
+
+**Fixed: `[initial_values]` was shown as live** — ferx rejects the block (`E_DEPRECATED_BLOCK`); the Parameters pill no longer displays overridden "initial" values the engine never used.
+
+**Fixed: validate messages showed a literal `<U+2014>`** — decoded to the character.
+
+**Fixed: model-file parsing** — `theta ... prior(...)` no longer corrupts the theta bounds; `block_omega` / `block_sigma` names and initial values line up with the fit; `//` is a comment marker; `(sd)` tails parse.
+
+**Added: validate before run** — Run validates the model first unless the current file contents were already validated. Errors hold the run behind a "Run anyway" prompt; if R itself cannot validate, the run proceeds. "+ Queue" is not gated.
+
+**Added: priors / MAP** — a PRIORS table (prior value, estimate, shift in prior SDs, penalty, family, 95% prior interval), OFV split into data and penalty, and `[priors] from_fit` recognised. ΔOFV (model list, tree, Compare) now compares the data half of the objective, since a priored fit's OFV is the penalized total; Compare gains an "OFV (data)" row.
+
+**Added: `block_sigma` correlations** shown under SIGMA.
+
+**Added: fitted-with version** — the Info pill shows the ferx version that produced a fit and, for fits older than 0.4.0, a note that re-running picks up 0.4.0 changes (CWRES, SAEM defaults, block-omega handling). Nothing is refit automatically.
+
+**Added: level-block (MBMA) models** — initial values match by block name; Run SIR and Recompute SEs are disabled with an explanation, since ferx 0.4.0 refuses both.
+
+**Added: editor highlighting** for `power`, `ode_template`, `prior`, `block_sigma`, `block_kappa`, `[priors]`/`from_fit`, and the SAEM/IMP `[fit_options]` keys.
 
 ### v0.9.16 (2026-08-31) — ferx-r 0.3.0 support: model validation, NPDE, adaptive dosing, standalone covariance recompute
 

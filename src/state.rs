@@ -928,6 +928,9 @@ pub struct WorkspaceState {
     /// Error message from the last failed validation per model stem,
     /// mirroring `check_init_error`.
     pub model_validate_error: HashMap<String, String>,
+    /// Hash of the model source each stem was last validated against; a result
+    /// is only "current" while the file still hashes to this value.
+    pub model_validated_hash: HashMap<String, u64>,
     /// Cached SIR results keyed by model stem.
     pub sir_results: HashMap<String, crate::domain::SirResult>,
     /// Stems for which a SIR run is currently in flight.
@@ -1052,6 +1055,7 @@ impl WorkspaceState {
             model_validate_results: HashMap::new(),
             model_validate_running: HashSet::new(),
             model_validate_error:   HashMap::new(),
+            model_validated_hash:   HashMap::new(),
             sir_results:        HashMap::new(),
             sir_running:        HashSet::new(),
             sir_started_at:     HashMap::new(),
@@ -1134,6 +1138,14 @@ impl RunLog {
     }
 }
 
+/// Stable-within-a-session hash of a model's source text.
+pub fn source_hash(src: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    src.hash(&mut h);
+    h.finish()
+}
+
 pub struct RunState {
     /// In-flight fits, keyed by model stem. Never more than one entry per
     /// stem — the same model can't run twice concurrently (it would clobber
@@ -1145,6 +1157,11 @@ pub struct RunState {
     /// Sequential run queue — items are started as slots free up (see
     /// `crate::ui::models_tab::advance_queue`).
     pub run_queue: VecDeque<QueuedRun>,
+    /// Runs waiting for the pre-run `ferx_model_validate()` to finish, by stem.
+    pub pending_validate: HashMap<String, QueuedRun>,
+    /// Runs held back because validation found errors; the user decides
+    /// ("Run anyway" / dismiss) from the Run controls.
+    pub validate_blocked: HashMap<String, QueuedRun>,
 }
 
 impl RunState {
@@ -1157,6 +1174,8 @@ impl RunState {
             run_logs: HashMap::new(),
             run_history,
             run_queue: VecDeque::new(),
+            pending_validate: HashMap::new(),
+            validate_blocked: HashMap::new(),
         }
     }
 
@@ -1581,7 +1600,23 @@ impl AppState {
             ModelValidateComplete { stem, result } => {
                 self.workspace.model_validate_running.remove(&stem);
                 self.workspace.model_validate_error.remove(&stem);
-                self.workspace.model_validate_results.insert(stem, *result);
+                if let Some(m) = self.workspace.models.iter().find(|m| m.model.stem == stem) {
+                    self.workspace.model_validated_hash
+                        .insert(stem.clone(), source_hash(&m.model.source));
+                }
+                let has_errors = !result.ok
+                    || result.diagnostics.iter().any(|d| d.severity == "error");
+                self.workspace.model_validate_results.insert(stem.clone(), *result);
+                // A run was waiting on this validation: start it, or hold it for the user.
+                if let Some(queued) = self.run.pending_validate.remove(&stem) {
+                    if has_errors {
+                        self.ui.status_message =
+                            format!("{stem}: validation found errors — run not started");
+                        self.run.validate_blocked.insert(stem, queued);
+                    } else {
+                        crate::ui::models_tab::do_launch_queued(self, queued);
+                    }
+                }
             }
             NpdeComplete { stem, result } => {
                 self.workspace.npde_running.remove(&stem);
@@ -1686,6 +1721,13 @@ impl AppState {
                 if let Some(stem) = context.strip_prefix("model_validate ") {
                     self.workspace.model_validate_running.remove(stem);
                     self.workspace.model_validate_error.insert(stem.to_string(), message.clone());
+                    // The check itself could not run (R problem, not a model problem):
+                    // never block the run on that.
+                    if let Some(queued) = self.run.pending_validate.remove(stem) {
+                        self.ui.status_message =
+                            format!("{stem}: validation unavailable — starting run anyway");
+                        crate::ui::models_tab::do_launch_queued(self, queued);
+                    }
                 }
                 if let Some(stem) = context.strip_prefix("npde ") {
                     self.workspace.npde_running.remove(stem);
@@ -1785,7 +1827,7 @@ impl AppState {
             .reference_model
             .and_then(|i| self.workspace.models.get(i))
             .and_then(|m| m.fit.as_ref())
-            .map(|f| f.ofv)
+            .map(|f| f.ofv_cmp())
             .unwrap_or(f64::NAN)
     }
 }

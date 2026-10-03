@@ -274,6 +274,10 @@ impl eframe::App for FerxApp {
         self.state.process_worker_messages();
         // Auto-advance the sequential run queue if no run is active.
         crate::ui::models_tab::advance_queue(&mut self.state);
+        // A run waiting on its pre-run validation completes off-thread; keep polling.
+        if !self.state.run.pending_validate.is_empty() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(300));
+        }
         // Lazily trigger R model inspection for the currently selected model.
         trigger_r_inspect(&mut self.state, ctx);
         // Fire the vpc package version check once at startup so the result is

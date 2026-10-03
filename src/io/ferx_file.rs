@@ -10,12 +10,12 @@
 ///     theta TVCL(0.134, 0.001, 10.0)   # name(init, lower, upper)
 ///     omega ETA_CL ~ 0.07               # name ~ variance
 ///     sigma PROP_ERR ~ 0.01
+///     theta TVCL(0.134, 0.001, 10.0) prior(0.15, rse = 10%)   # inline prior (MAP)
 ///
-///   [initial_values]                    # overrides the defaults in [parameters]
-///     theta = [0.2, 10.0, 1.5]
-///     omega = [0.09, 0.04, 0.30]
-///     sigma = [0.02]
-use crate::domain::ParsedParams;
+/// `#` and `//` both start a comment. `[initial_values]` is no longer valid
+/// (ferx rejects it with E_DEPRECATED_BLOCK); the section name is still
+/// recognised so section tracking stays correct, but it is not applied.
+use crate::domain::{DeclaredPrior, ParsedParams};
 
 // ---------------------------------------------------------------------------
 // Public
@@ -30,10 +30,10 @@ pub fn parse_params(source: &str) -> ParsedParams {
     let mut current_section: Option<&str> = None;
     for line in source.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with('#') || trimmed.is_empty() {
+        if is_comment_line(trimmed) || trimmed.is_empty() {
             // First non-empty comment becomes the description.
-            if p.description.is_empty() && trimmed.starts_with('#') {
-                let desc = trimmed.trim_start_matches('#').trim();
+            if p.description.is_empty() && is_comment_line(trimmed) {
+                let desc = trimmed.trim_start_matches(['#', '/']).trim();
                 if !desc.is_empty() {
                     p.description = desc.to_owned();
                 }
@@ -51,7 +51,7 @@ pub fn parse_params(source: &str) -> ParsedParams {
         }
         match current_section {
             Some("parameters") => parse_parameter_line(trimmed, &mut p),
-            Some("initial_values") => parse_initial_values_line(trimmed, &mut p),
+            Some("priors") => parse_priors_line(trimmed, &mut p),
             _ => {}
         }
     }
@@ -81,7 +81,7 @@ pub fn parse_fit_options(source: &str) -> FitOptions {
     let mut in_section = false;
     for line in source.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with('#') || trimmed.is_empty() {
+        if is_comment_line(trimmed) || trimmed.is_empty() {
             continue;
         }
         if let Some(sec) = section_name(trimmed) {
@@ -93,7 +93,7 @@ pub fn parse_fit_options(source: &str) -> FitOptions {
         }
         let Some((key, val)) = trimmed.split_once('=') else { continue; };
         // Strip any inline comment from the value.
-        let val = val.split('#').next().unwrap_or("").trim();
+        let val = strip_inline_comment(val).trim();
         match key.trim() {
             "method"   if !val.is_empty() => opts.method = Some(normalise_method_chain(val)),
             "gradient" if !val.is_empty() => opts.gradient = Some(val.to_string()),
@@ -139,7 +139,7 @@ pub fn parse_data_path(source: &str) -> Option<String> {
     let mut path = None;
     for line in source.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with('#') || trimmed.is_empty() {
+        if is_comment_line(trimmed) || trimmed.is_empty() {
             continue;
         }
         if let Some(sec) = section_name(trimmed) {
@@ -150,7 +150,7 @@ pub fn parse_data_path(source: &str) -> Option<String> {
             continue;
         }
         let Some((key, val)) = trimmed.split_once('=') else { continue; };
-        let val = val.split('#').next().unwrap_or("").trim();
+        let val = strip_inline_comment(val).trim();
         if key.trim() == "path" && !val.is_empty() {
             path = Some(val.to_string());
         }
@@ -185,7 +185,9 @@ fn section_name(line: &str) -> Option<&'static str> {
         "structural_model" => Some("structural_model"),
         "error_model" => Some("error_model"),
         "fit_options" => Some("fit_options"),
+        // Rejected by ferx (E_DEPRECATED_BLOCK); recognised only for section tracking.
         "initial_values" => Some("initial_values"),
+        "priors" => Some("priors"),
         "odes" => Some("odes"),
         "simulation" => Some("simulation"),
         "scaling" => Some("scaling"),
@@ -213,90 +215,141 @@ fn section_name(line: &str) -> Option<&'static str> {
 // ---------------------------------------------------------------------------
 
 fn parse_parameter_line(line: &str, p: &mut ParsedParams) {
-    // Strip inline comment.
     let line = strip_inline_comment(line);
     let tokens: Vec<&str> = line.splitn(2, char::is_whitespace).collect();
     if tokens.len() < 2 {
         return;
     }
+    let rest = tokens[1].trim();
     match tokens[0] {
-        "theta" => parse_theta_param(tokens[1].trim(), p),
-        "omega" => parse_variance_param(tokens[1].trim(), &mut p.omega_names, &mut p.omega_init),
-        "sigma" => parse_variance_param(tokens[1].trim(), &mut p.sigma_names, &mut p.sigma_init),
+        "theta" => parse_theta_param(rest, p),
+        "omega" => parse_variance_param(rest, true, p),
+        "sigma" => parse_variance_param(rest, false, p),
+        "block_omega" => parse_block_variance(rest, true, p),
+        "block_sigma" => parse_block_variance(rest, false, p),
         _ => {}
     }
 }
 
-/// Parse `TVCL(0.134, 0.001, 10.0)` or `TVCL(0.134)` or just `TVCL`.
+/// Index of the matching `)` for the `(` at byte `open` (balanced), if any.
+fn matching_paren(s: &str, open: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    for (i, c) in s[open..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => { depth -= 1; if depth == 0 { return Some(open + i); } }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Splits a trailing `prior(value, rse = X%)` off `s`. Returns the text with the
+/// declaration removed, plus `(value, rse_pct)` when one was found.
+fn split_prior(s: &str) -> (String, Option<(f64, f64)>) {
+    let Some(at) = s.find("prior(").or_else(|| s.find("prior (")) else {
+        return (s.to_string(), None);
+    };
+    let open = at + s[at..].find('(').unwrap_or(0);
+    let close = matching_paren(s, open).unwrap_or(s.len().saturating_sub(1));
+    let inner = &s[open + 1..close.max(open + 1)];
+    let mut value = f64::NAN;
+    let mut rse = f64::NAN;
+    for (k, part) in inner.split(',').enumerate() {
+        let part = part.trim();
+        if let Some((key, v)) = part.split_once('=') {
+            if key.trim() == "rse" {
+                rse = v.trim().trim_end_matches('%').trim().parse().unwrap_or(f64::NAN);
+            }
+        } else if k == 0 {
+            value = part.parse().unwrap_or(f64::NAN);
+        }
+    }
+    let mut rest = s[..at].to_string();
+    if close + 1 < s.len() { rest.push_str(&s[close + 1..]); }
+    (rest, Some((value, rse)))
+}
+
+/// Parse `TVCL(0.134, 0.001, 10.0)`, `TVCL(0.134)`, `TVCL`, any of those followed by
+/// `prior(0.15, rse = 10%)`, and the level-block form `NAME[COL, ...](init, lo, hi)`.
 fn parse_theta_param(rest: &str, p: &mut ParsedParams) {
-    if let Some(paren) = rest.find('(') {
-        let name = rest[..paren].trim().to_owned();
-        let inside = rest[paren + 1..].trim_end_matches(')');
-        let vals: Vec<f64> = inside
-            .split(',')
-            .filter_map(|s| s.trim().parse::<f64>().ok())
-            .collect();
-        p.theta_names.push(name);
-        p.theta_init.push(*vals.first().unwrap_or(&f64::NAN));
-        p.theta_lower.push(*vals.get(1).unwrap_or(&f64::NEG_INFINITY));
-        p.theta_upper.push(*vals.get(2).unwrap_or(&f64::INFINITY));
+    let (rest, prior) = split_prior(rest);
+    let rest = rest.trim();
+    let name_end = rest.find(|c: char| c == '(' || c == '[' || c.is_whitespace()).unwrap_or(rest.len());
+    let name = rest[..name_end].to_owned();
+    if name.is_empty() { return; }
+    let mut tail = rest[name_end..].trim_start();
+
+    // Level block: NAME[STUDY, TIME]  (or the counted form NAME[N]).
+    if tail.starts_with('[') {
+        if let Some(close) = tail.find(']') {
+            p.theta_level_blocks.push(name.clone());
+            tail = tail[close + 1..].trim_start();
+        }
+    }
+
+    let vals: Vec<f64> = if tail.starts_with('(') {
+        let close = matching_paren(tail, 0).unwrap_or(tail.len());
+        tail[1..close.max(1)].split(',').filter_map(|s| s.trim().parse::<f64>().ok()).collect()
     } else {
-        p.theta_names.push(rest.trim().to_owned());
-        p.theta_init.push(f64::NAN);
-        p.theta_lower.push(f64::NEG_INFINITY);
-        p.theta_upper.push(f64::INFINITY);
+        vec![]
+    };
+    p.theta_names.push(name.clone());
+    p.theta_init.push(*vals.first().unwrap_or(&f64::NAN));
+    p.theta_lower.push(*vals.get(1).unwrap_or(&f64::NEG_INFINITY));
+    p.theta_upper.push(*vals.get(2).unwrap_or(&f64::INFINITY));
+    if let Some((value, rse_pct)) = prior {
+        p.priors.push(DeclaredPrior { name, value, rse_pct });
     }
 }
 
-/// Parse `ETA_CL ~ 0.07` (variance after `~`).
-fn parse_variance_param(rest: &str, names: &mut Vec<String>, inits: &mut Vec<f64>) {
-    if let Some(tilde) = rest.find('~') {
-        let name = rest[..tilde].trim().to_owned();
-        let val: f64 = rest[tilde + 1..].trim().parse().unwrap_or(f64::NAN);
-        names.push(name);
-        inits.push(val);
-    } else {
-        names.push(rest.trim().to_owned());
-        inits.push(f64::NAN);
+/// Parse `ETA_CL ~ 0.07` (variance after `~`), tolerating `(sd)` / `FIX` tails and a
+/// trailing `prior(...)`.
+fn parse_variance_param(rest: &str, is_omega: bool, p: &mut ParsedParams) {
+    let (rest, prior) = split_prior(rest);
+    let (name, init) = match rest.find('~') {
+        Some(tilde) => {
+            let val = rest[tilde + 1..].split_whitespace().next().unwrap_or("");
+            (rest[..tilde].trim().to_owned(), val.parse().unwrap_or(f64::NAN))
+        }
+        None => (rest.trim().to_owned(), f64::NAN),
+    };
+    if name.is_empty() { return; }
+    if let Some((value, rse_pct)) = prior {
+        p.priors.push(DeclaredPrior { name: name.clone(), value, rse_pct });
+    }
+    let (names, inits) = if is_omega { (&mut p.omega_names, &mut p.omega_init) }
+                         else { (&mut p.sigma_names, &mut p.sigma_init) };
+    names.push(name);
+    inits.push(init);
+}
+
+/// Parse `block_omega (ETA_CL, ETA_V) = [0.07, 0.02, 0.02]`. The values are the lower
+/// triangle row by row; the diagonal entries become the per-name initial variances so
+/// the names line up with the fit's omega order.
+fn parse_block_variance(rest: &str, is_omega: bool, p: &mut ParsedParams) {
+    let Some(open) = rest.find('(') else { return };
+    let Some(close) = matching_paren(rest, open) else { return };
+    let names: Vec<String> = rest[open + 1..close].split(',')
+        .map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()).collect();
+    let vals = rest[close + 1..].split_once('=')
+        .map(|(_, v)| parse_bracket_list(v)).unwrap_or_default();
+    let (nn, ii) = if is_omega { (&mut p.omega_names, &mut p.omega_init) }
+                   else { (&mut p.sigma_names, &mut p.sigma_init) };
+    for (k, name) in names.into_iter().enumerate() {
+        nn.push(name);
+        ii.push(vals.get(k * (k + 1) / 2 + k).copied().unwrap_or(f64::NAN));
     }
 }
 
-// ---------------------------------------------------------------------------
-// [initial_values] parsing
-// ---------------------------------------------------------------------------
-
-fn parse_initial_values_line(line: &str, p: &mut ParsedParams) {
-    // Expect: `theta = [0.2, 10.0, 1.5]`  or  `omega = [0.09]`
+/// `[priors]` section: `from_fit = "path/to/model.fitrx"`.
+fn parse_priors_line(line: &str, p: &mut ParsedParams) {
     let line = strip_inline_comment(line);
-    let parts: Vec<&str> = line.splitn(2, '=').collect();
-    if parts.len() < 2 {
-        return;
-    }
-    let key = parts[0].trim();
-    let vals = parse_bracket_list(parts[1]);
-    match key {
-        "theta" => {
-            for (i, v) in vals.iter().enumerate() {
-                if let Some(slot) = p.theta_init.get_mut(i) {
-                    *slot = *v;
-                }
-            }
+    if let Some((key, val)) = line.split_once('=') {
+        if key.trim() == "from_fit" {
+            let v = val.trim().trim_matches('"').trim_matches('\'').trim();
+            if !v.is_empty() { p.priors_from_fit = Some(v.to_owned()); }
         }
-        "omega" => {
-            for (i, v) in vals.iter().enumerate() {
-                if let Some(slot) = p.omega_init.get_mut(i) {
-                    *slot = *v;
-                }
-            }
-        }
-        "sigma" => {
-            for (i, v) in vals.iter().enumerate() {
-                if let Some(slot) = p.sigma_init.get_mut(i) {
-                    *slot = *v;
-                }
-            }
-        }
-        _ => {}
     }
 }
 
@@ -309,12 +362,17 @@ fn parse_bracket_list(s: &str) -> Vec<f64> {
         .collect()
 }
 
+/// True for a full-line comment (`#` or `//`).
+fn is_comment_line(trimmed: &str) -> bool {
+    trimmed.starts_with('#') || trimmed.starts_with("//")
+}
+
+/// Cuts a line at the first `#` or `//` comment marker.
 fn strip_inline_comment(line: &str) -> &str {
-    if let Some(pos) = line.find('#') {
-        &line[..pos]
-    } else {
-        line
-    }
+    let mut cut = line.len();
+    if let Some(i) = line.find('#') { cut = cut.min(i); }
+    if let Some(i) = line.find("//") { cut = cut.min(i); }
+    &line[..cut]
 }
 
 // ---------------------------------------------------------------------------
@@ -333,7 +391,7 @@ pub enum TokenKind {
     OptionKey,
     /// A number literal
     Number,
-    /// `# …` to end of line
+    /// `# …` or `// …` to end of line
     Comment,
     /// Everything else
     Plain,
@@ -347,7 +405,7 @@ pub fn tokenise_line(line: &str) -> Vec<(usize, usize, TokenKind)> {
     let indent = line.len() - trimmed.len();
 
     // Whole-line comment.
-    if trimmed.starts_with('#') {
+    if is_comment_line(trimmed) {
         out.push((indent, line.len(), TokenKind::Comment));
         return out;
     }
@@ -365,7 +423,7 @@ pub fn tokenise_line(line: &str) -> Vec<(usize, usize, TokenKind)> {
     let mut i = 0usize;
     while i < bytes.len() {
         // Inline comment.
-        if bytes[i] == b'#' {
+        if bytes[i] == b'#' || (bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'/')) {
             out.push((i, line.len(), TokenKind::Comment));
             break;
         }
@@ -398,17 +456,21 @@ pub fn tokenise_line(line: &str) -> Vec<(usize, usize, TokenKind)> {
 
 fn classify_word(w: &str) -> TokenKind {
     match w {
-        "theta" | "omega" | "sigma" | "block_omega" | "kappa" => TokenKind::ParamKeyword,
+        "theta" | "omega" | "sigma" | "block_omega" | "block_sigma" | "kappa"
+        | "block_kappa" | "prior" => TokenKind::ParamKeyword,
         "one_cpt_oral" | "one_cpt_iv_bolus" | "one_cpt_infusion"
         | "two_cpt_oral" | "two_cpt_iv_bolus" | "two_cpt_infusion"
         | "three_cpt_oral" | "three_cpt_iv_bolus" | "three_cpt_infusion"
-        | "pk" | "ode" => TokenKind::BuiltinFunction,
+        | "pk" | "ode" | "ode_template" | "power" => TokenKind::BuiltinFunction,
         "method" | "maxiter" | "covariance" | "gradient" | "threads"
         | "output" | "optimizer" | "interaction" | "lloq"
         | "lagtime" | "alag" | "obs_scale" | "sir" | "bloq_method"
         | "reconverge_gradient_interval" | "stagnation_guard" | "optimizer_trace"
         // ferx-core 0.3.0: [fit_options] ode_method, [binary_model] keys.
-        | "ode_method" | "cmt" | "logit" => TokenKind::OptionKey,
+        | "ode_method" | "cmt" | "logit"
+        // ferx-core 0.4.0: SAEM/IMP [fit_options] keys and the [priors] key.
+        | "scale_adaptation" | "scale_deadband" | "mstep_solver" | "mstep_draws"
+        | "mstep_damping" | "n_mh_steps" | "from_fit" => TokenKind::OptionKey,
         _ => TokenKind::Plain,
     }
 }
@@ -431,11 +493,6 @@ mod tests {
   omega ETA_CL ~ 0.07
   omega ETA_V  ~ 0.02
   sigma PROP_ERR ~ 0.01
-
-[initial_values]
-  theta = [0.2, 10.0, 1.5]
-  omega = [0.09, 0.04]
-  sigma = [0.02]
 "#;
 
     #[test]
@@ -460,7 +517,7 @@ mod tests {
 
     #[test]
     fn new_dsl_sections_are_recognised() {
-        for name in ["event_model", "adaptive_dosing", "initial_conditions", "covariates", "binary_model"] {
+        for name in ["event_model", "adaptive_dosing", "initial_conditions", "covariates", "binary_model", "priors"] {
             assert_eq!(section_name(&format!("[{name}]")), Some(name));
         }
     }
@@ -548,7 +605,7 @@ mod tests {
     fn parses_theta_names_and_inits() {
         let p = parse_params(WARFARIN);
         assert_eq!(p.theta_names, vec!["TVCL", "TVV", "TVKA"]);
-        assert!((p.theta_init[0] - 0.2).abs() < 1e-9, "init_values override expected");
+        assert!((p.theta_init[0] - 0.134).abs() < 1e-9);
         assert!((p.theta_lower[0] - 0.001).abs() < 1e-9);
         assert!((p.theta_upper[0] - 10.0).abs() < 1e-9);
     }
@@ -557,9 +614,9 @@ mod tests {
     fn parses_omega_and_sigma() {
         let p = parse_params(WARFARIN);
         assert_eq!(p.omega_names, vec!["ETA_CL", "ETA_V"]);
-        assert!((p.omega_init[0] - 0.09).abs() < 1e-9);
+        assert!((p.omega_init[0] - 0.07).abs() < 1e-9);
         assert_eq!(p.sigma_names, vec!["PROP_ERR"]);
-        assert!((p.sigma_init[0] - 0.02).abs() < 1e-9);
+        assert!((p.sigma_init[0] - 0.01).abs() < 1e-9);
     }
 
     #[test]
@@ -581,5 +638,81 @@ mod tests {
         let kinds: Vec<_> = toks.iter().map(|(_, _, k)| k.clone()).collect();
         assert!(kinds.contains(&TokenKind::ParamKeyword));
         assert!(kinds.contains(&TokenKind::Number));
+    }
+
+    #[test]
+    fn initial_values_block_is_not_applied() {
+        // ferx rejects [initial_values] (E_DEPRECATED_BLOCK); the GUI must keep showing
+        // the [parameters] inits, which are what the engine would have used.
+        let src = format!("{WARFARIN}\n[initial_values]\n  theta = [0.2, 10.0, 1.5]\n  omega = [0.09, 0.04]\n  sigma = [0.02]\n");
+        let p = parse_params(&src);
+        assert!((p.theta_init[0] - 0.134).abs() < 1e-9);
+        assert!((p.omega_init[0] - 0.07).abs() < 1e-9);
+        assert!((p.sigma_init[0] - 0.01).abs() < 1e-9);
+    }
+
+    #[test]
+    fn slash_slash_is_a_comment() {
+        let p = parse_params("[parameters]\n  theta TVCL(1, 0, 5) // clearance note\n  // theta GONE(1, 0, 5)\n  omega ETA_CL ~ 0.1 // iiv\n");
+        assert_eq!(p.theta_names, vec!["TVCL"]);
+        assert_eq!(p.theta_upper, vec![5.0]);
+        assert_eq!(p.omega_init, vec![0.1]);
+        let toks = tokenise_line("  theta X(1, 0, 5) // note");
+        assert_eq!(toks.last().unwrap().2, TokenKind::Comment);
+        assert_eq!(tokenise_line("// whole line")[0].2, TokenKind::Comment);
+    }
+
+    #[test]
+    fn theta_prior_does_not_break_bounds() {
+        let p = parse_params("[parameters]\n  theta TVCL(0.134, 0.001, 10.0) prior(0.15, rse = 10%)\n  theta TVV(8, 0.1, 500)\n");
+        assert_eq!(p.theta_names, vec!["TVCL", "TVV"]);
+        assert!((p.theta_upper[0] - 10.0).abs() < 1e-9);
+        assert_eq!(p.priors, vec![DeclaredPrior { name: "TVCL".into(), value: 0.15, rse_pct: 10.0 }]);
+    }
+
+    #[test]
+    fn omega_and_sigma_priors_and_sd_tail() {
+        let p = parse_params("[parameters]\n  omega ETA_CL ~ 0.07 prior(0.1, rse = 30%)\n  sigma PROP ~ 0.01 (sd)\n");
+        assert_eq!(p.omega_init, vec![0.07]);
+        assert_eq!(p.sigma_init, vec![0.01]);
+        assert_eq!(p.priors.len(), 1);
+        assert_eq!(p.priors[0].name, "ETA_CL");
+    }
+
+    #[test]
+    fn block_omega_names_and_diagonals_align_with_fit_order() {
+        let p = parse_params("[parameters]\n  block_omega (ETA_CL, ETA_V) = [0.07, 0.02, 0.03]\n  omega ETA_KA ~ 0.40\n");
+        assert_eq!(p.omega_names, vec!["ETA_CL", "ETA_V", "ETA_KA"]);
+        assert_eq!(p.omega_init, vec![0.07, 0.03, 0.40]);
+    }
+
+    #[test]
+    fn level_block_theta_is_matched_by_base_name() {
+        let p = parse_params("[parameters]\n  theta PLACEBO[STUDY, TIME](0.0, -5, 5)\n  theta E0(1, 0, 10)\n");
+        assert_eq!(p.theta_names, vec!["PLACEBO", "E0"]);
+        assert!(p.has_level_block());
+        assert_eq!(p.theta_init_for("PLACEBO[STUDY=1,TIME=1]", 0), 0.0);
+        assert_eq!(p.theta_init_for("E0", 5), 1.0);
+        assert!(p.theta_init_for("UNKNOWN", 0).is_nan());
+    }
+
+    #[test]
+    fn priors_from_fit_is_read() {
+        let p = parse_params("[priors]\n  from_fit = \"base.fitrx\"  # earlier study\n");
+        assert_eq!(p.priors_from_fit.as_deref(), Some("base.fitrx"));
+    }
+
+    #[test]
+    fn tokenise_new_040_tokens() {
+        for (line, kind) in [
+            ("  scale_adaptation = robbins_monro", TokenKind::OptionKey),
+            ("  n_mh_steps = 10", TokenKind::OptionKey),
+            ("  from_fit = \"a.fitrx\"", TokenKind::OptionKey),
+            ("  ode_template two_cpt_oral(cl=CL)", TokenKind::BuiltinFunction),
+            ("  DV ~ power(PROP_ERR, 0.7)", TokenKind::BuiltinFunction),
+            ("  block_sigma (A, B) = [1, 0, 1]", TokenKind::ParamKeyword),
+        ] {
+            assert!(tokenise_line(line).iter().any(|t| t.2 == kind), "{line}");
+        }
     }
 }
