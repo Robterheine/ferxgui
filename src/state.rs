@@ -1433,7 +1433,10 @@ impl AppState {
                 if self.ui.export_tables_error.as_ref().is_some_and(|(s, _)| *s == stem) {
                     self.ui.export_tables_error = None;
                 }
-                self.ui.status_message = if success {
+                self.ui.status_message = if success && !record.directory.join(format!("{stem}.fitrx")).exists() {
+                    // R exited cleanly but the bundle is not beside the model file.
+                    format!("Run finished but no {stem}.fitrx was written in {}", record.directory.display())
+                } else if success {
                     format!("Run completed: {stem}")
                 } else {
                     format!("Run failed (exit {exit_code}): {stem}")

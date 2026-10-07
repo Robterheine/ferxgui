@@ -211,6 +211,15 @@ pub enum FitrxError {
     MissingEntry(String),
 }
 
+/// Where a run's `.fitrx` bundle is written: next to the model file, same stem
+/// (`models/warfarin.ferx` -> `models/warfarin.fitrx`). Always absolute, so the path
+/// handed to R never depends on the working directory, and it is exactly the file the
+/// directory scanner pairs with the model.
+pub fn bundle_path_for(model_path: &Path) -> PathBuf {
+    let abs = std::path::absolute(model_path).unwrap_or_else(|_| model_path.to_path_buf());
+    abs.with_extension("fitrx")
+}
+
 /// Reads the `FitSummary` from a `.fitrx` bundle at `path`.
 pub fn read_fit_summary(path: &Path) -> Result<FitSummary, FitrxError> {
     let file = std::fs::File::open(path)?;
@@ -1286,5 +1295,15 @@ mod tests {
         let r = read_fit_summary(&d.join("bs.fitrx")).unwrap();
         assert_eq!(r.residual_correlations.len(), 1);
         assert_eq!(r.cov_corr_names.last().unwrap(), "RHO(ADD_ERR,PROP_ERR)");
+    }
+
+    #[test]
+    fn bundle_is_written_next_to_the_model_with_the_same_stem() {
+        let p = bundle_path_for(Path::new("/proj/models/warfarin.ferx"));
+        assert_eq!(p, PathBuf::from("/proj/models/warfarin.fitrx"));
+        // Dotted stems keep everything before the final extension.
+        assert_eq!(bundle_path_for(Path::new("/p/m.v2.ferx")), PathBuf::from("/p/m.v2.fitrx"));
+        // A relative model path still yields an absolute bundle path.
+        assert!(bundle_path_for(Path::new("rel/m.ferx")).is_absolute());
     }
 }

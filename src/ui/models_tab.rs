@@ -2954,6 +2954,10 @@ pub fn do_launch_queued(state: &mut AppState, queued: crate::domain::QueuedRun) 
         }
     };
 
+    // Absolute from here on: the bundle, log and working directory must not depend
+    // on the process's own cwd.
+    let mut queued = queued;
+    queued.model_path = std::path::absolute(&queued.model_path).unwrap_or(queued.model_path);
     let cwd = queued.model_path
         .parent()
         .unwrap_or(std::path::Path::new("."))
@@ -2979,7 +2983,7 @@ pub fn do_launch_queued(state: &mut AppState, queued: crate::domain::QueuedRun) 
     };
 
     // Output bundle next to the model so the scanner pairs it with the model.
-    let out_fitrx = cwd.join(format!("{}.fitrx", queued.stem));
+    let out_fitrx = crate::io::fitrx::bundle_path_for(&queued.model_path);
 
     // Rscript --vanilla run_ferx.R <model> <data> <method> <covariance> <out.fitrx>
     //   [gradient] [settings_json] [threads] [optimizer_trace]
