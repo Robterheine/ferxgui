@@ -53,7 +53,8 @@ chk <- ferx_check_init(model_path, data_path, method = "focei")
 
 s   <- chk$summary
 
-finite_or_null <- function(x) if (is.finite(x)) x else NULL
+# NA_real_, not NULL: a NULL inside a list serialises as {} (a map), not null.
+finite_or_null <- function(x) if (is.finite(x)) x else NA_real_
 
 out <- list(
   n_iter    = as.integer(s$n_iter),
@@ -1027,8 +1028,8 @@ if (is.null(result) || !is.data.frame(result) || nrow(result) == 0) {
     list(
       eta       = as.character(result$eta[i]),
       covariate = as.character(result$covariate[i]),
-      r         = if (is.na(r_v))   NULL else as.numeric(r_v),
-      p_val     = if (is.na(p_v))   NULL else as.numeric(p_v),
+      r         = if (is.na(r_v))   NA_real_ else as.numeric(r_v),
+      p_val     = if (is.na(p_v))   NA_real_ else as.numeric(p_v),
       flag      = flg
     )
   })
@@ -1075,8 +1076,8 @@ if (no_covariates || no_etas) {
         parameter = as.character(result$parameter[i]),
         covariate = as.character(result$covariate[i]),
         cov_type  = as.character(result$type[i]),
-        ebe       = if (is.na(ebe_v)) NULL else as.numeric(ebe_v),
-        eta       = if (is.na(eta_v)) NULL else as.numeric(eta_v)
+        ebe       = if (is.na(ebe_v)) NA_real_ else as.numeric(ebe_v),
+        eta       = if (is.na(eta_v)) NA_real_ else as.numeric(eta_v)
       )
     })
     cat(toJSON(list(rows = rows, no_covariates = FALSE, no_etas = FALSE),

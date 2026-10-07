@@ -485,10 +485,10 @@ pub struct EtaCovRow {
     pub eta:       String,
     pub covariate: String,
     /// Pearson r; NaN when fewer than 3 finite pairs.
-    #[serde(default = "nan")]
+    #[serde(default = "nan", deserialize_with = "lenient_f64")]
     pub r:         f64,
     /// Two-sided p-value; NaN when not computable.
-    #[serde(default = "nan")]
+    #[serde(default = "nan", deserialize_with = "lenient_f64")]
     pub p_val:     f64,
     /// True when |r| ≥ 0.3.
     #[serde(default)]
@@ -496,6 +496,13 @@ pub struct EtaCovRow {
 }
 
 fn nan() -> f64 { f64::NAN }
+
+/// A number that may arrive as `null` (R `NA`) or as `{}` (an R `NULL` inside a list,
+/// which jsonlite writes as an empty object): both mean "not computable".
+fn lenient_f64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(v.as_f64().unwrap_or(f64::NAN))
+}
 
 /// Full result from the `eta_cov.R` background script.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -528,12 +535,12 @@ pub struct CovScreenRow {
     #[serde(default)]
     pub cov_type:  String,
     /// Association with the raw individual parameter estimate; NaN when not computable.
-    #[serde(default = "nan")]
+    #[serde(default = "nan", deserialize_with = "lenient_f64")]
     pub ebe:       f64,
     /// Association with the parameter's random effect (Pearson r for
     /// continuous covariates, correlation ratio η ∈ [0,1] for categorical);
     /// NaN when not computable.
-    #[serde(default = "nan")]
+    #[serde(default = "nan", deserialize_with = "lenient_f64")]
     pub eta:       f64,
 }
 
@@ -718,5 +725,34 @@ mod unicode_escape_tests {
         assert_eq!(dec("<U+>"), "<U+>");
         assert_eq!(dec("plain"), "plain");
         assert_eq!(dec("x < y > z"), "x < y > z");
+    }
+}
+
+#[cfg(test)]
+mod lenient_number_tests {
+    use super::{CovScreenRow, EtaCovResult};
+
+    #[test]
+    fn eta_cov_rows_accept_null_and_empty_object_for_missing_numbers() {
+        // The shape from the reported failure: an R NULL inside a list arrives as `{}`.
+        let j = r#"{"rows":[
+            {"eta":"ETA_MTT","covariate":"STD","r":-0.485,"p_val":0,"flag":true},
+            {"eta":"ETA_FP","covariate":"X","r":{},"p_val":{},"flag":false},
+            {"eta":"ETA_FP","covariate":"Y","r":null,"p_val":null,"flag":false}
+        ],"data_unavailable":false}"#;
+        let r: EtaCovResult = serde_json::from_str(j).unwrap();
+        assert_eq!(r.rows.len(), 3);
+        assert_eq!(r.rows[0].r, -0.485);
+        assert!(r.rows[1].r.is_nan() && r.rows[1].p_val.is_nan());
+        assert!(r.rows[2].r.is_nan() && r.rows[2].p_val.is_nan());
+    }
+
+    #[test]
+    fn cov_screen_rows_accept_missing_numbers() {
+        let j = r#"{"parameter":"CL","covariate":"WT","cov_type":"continuous","ebe":{},"eta":null}"#;
+        let r: CovScreenRow = serde_json::from_str(j).unwrap();
+        assert!(r.ebe.is_nan() && r.eta.is_nan());
+        let ok: CovScreenRow = serde_json::from_str(r#"{"parameter":"CL","covariate":"WT","ebe":0.4,"eta":-0.2}"#).unwrap();
+        assert_eq!((ok.ebe, ok.eta), (0.4, -0.2));
     }
 }
