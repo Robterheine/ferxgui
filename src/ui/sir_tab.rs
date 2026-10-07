@@ -338,17 +338,33 @@ pub(crate) fn correlation_heatmap(
                     rect.min + egui::vec2(col as f32 * cell, 0.0),
                     egui::vec2(cell - 1.0, cell - 1.0),
                 );
-                let fill = corr_color(r);
+                // A held parameter (FIXed theta, covariance pinned at 0) has no
+                // correlation: grey "n/a" cell instead of a colour.
+                let held = !r.is_finite();
+                let fill = if held {
+                    if dark { egui::Color32::from_gray(52) } else { egui::Color32::from_gray(225) }
+                } else {
+                    corr_color(r)
+                };
                 ui.painter().rect_filled(cell_rect, 2.0, fill);
                 if cell >= 36.0 {
+                    let (txt, col) = if held {
+                        ("n/a".to_string(), crate::app::theme::fg3(dark))
+                    } else {
+                        (format!("{r:.2}"), contrast_text(fill))
+                    };
                     ui.painter().text(cell_rect.center(),
-                        egui::Align2::CENTER_CENTER, format!("{r:.2}"),
-                        egui::FontId::proportional(9.0), contrast_text(fill));
+                        egui::Align2::CENTER_CENTER, txt,
+                        egui::FontId::proportional(9.0), col);
                 }
                 let rn = names.get(row).map(|s| s.as_str()).unwrap_or("?");
                 let cn = names.get(col).map(|s| s.as_str()).unwrap_or("?");
                 ui.allocate_rect(cell_rect, egui::Sense::hover())
-                    .on_hover_text(format!("{rn} ~ {cn}:  r = {r:.4}"));
+                    .on_hover_text(if held {
+                        format!("{rn} ~ {cn}:  not estimated (fixed or held parameter)")
+                    } else {
+                        format!("{rn} ~ {cn}:  r = {r:.4}")
+                    });
             }
         });
     }
@@ -360,7 +376,7 @@ pub(crate) fn correlation_heatmap(
             ui.painter().rect_filled(rect, 2.0, corr_color(val));
             ui.label(egui::RichText::new(label).color(crate::app::theme::fg3(dark)).size(9.0));
         }
-        ui.label(egui::RichText::new("← red = negative,  white = zero,  blue = positive")
+        ui.label(egui::RichText::new("← red = negative,  white = zero,  blue = positive,  grey = fixed / not estimated")
             .color(crate::app::theme::fg3(dark)).size(9.0));
     });
 }

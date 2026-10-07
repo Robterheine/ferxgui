@@ -806,6 +806,11 @@ fn html_corr_matrix(names: &[String], flat: &[f64], n: usize) -> String {
         out.push_str(&format!("<tr><th class=\"mono\">{}</th>", html_escape(rname)));
         for col in 0..n {
             let r = flat.get(row * n + col).copied().unwrap_or(0.0);
+            if !r.is_finite() {
+                // Held parameter: no correlation to report.
+                out.push_str("<td style=\"background:#e0e0e0;color:#777\">n/a</td>");
+                continue;
+            }
             let (bg_r, bg_g, bg_b) = corr_rgb(r);
             let lum = (0.299 * bg_r as f32 + 0.587 * bg_g as f32 + 0.114 * bg_b as f32) / 255.0;
             let text_col = if lum < 0.35 { "#fff" } else { "#111" };

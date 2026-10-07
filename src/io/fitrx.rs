@@ -688,14 +688,29 @@ fn json_val_to_str_vec(v: &serde_json::Value) -> Vec<String> {
 
 /// Convert an N×N covariance matrix (row-major) to its correlation matrix.
 /// Returns an empty Vec when the input is unusable.
+///
+/// A parameter with zero (or non-finite) variance is *held*: a FIXed theta, or a covariance
+/// pinned at zero. It has no correlation with anything, so its row and column are `NaN`
+/// (the heatmap draws them as "n/a") while every other pair keeps its value. Previously one
+/// held parameter discarded the whole matrix. Empty only when the data itself is unusable.
 fn build_correlation_matrix(data: &[f64], n: usize) -> Vec<f64> {
     if n == 0 || data.len() < n * n { return vec![]; }
     let std_devs: Vec<f64> = (0..n).map(|i| data[i * n + i].sqrt()).collect();
-    if std_devs.iter().any(|&s| !s.is_finite() || s <= 0.0) { return vec![]; }
+    let ok = |s: f64| s.is_finite() && s > 0.0;
+    if !std_devs.iter().any(|&s| ok(s)) { return vec![]; }
     (0..n * n).map(|k| {
         let i = k / n; let j = k % n;
-        data[k] / (std_devs[i] * std_devs[j])
+        if ok(std_devs[i]) && ok(std_devs[j]) {
+            data[k] / (std_devs[i] * std_devs[j])
+        } else {
+            f64::NAN
+        }
     }).collect()
+}
+
+/// The free (non-held) indices of a correlation matrix, i.e. those with a finite diagonal.
+fn free_indices(corr: &[f64], n: usize) -> Vec<usize> {
+    (0..n).filter(|&i| corr[i * n + i].is_finite()).collect()
 }
 
 /// Compute the condition number of a covariance matrix (largest / smallest
@@ -705,9 +720,15 @@ fn build_correlation_matrix(data: &[f64], n: usize) -> Vec<f64> {
 /// Works without any linear-algebra dependency; accurate for n ≤ ~20.
 fn condition_number_from_covariance(data: &[f64], n: usize) -> Option<f64> {
     // Build the correlation matrix first; reuse the shared helper.
-    let corr = build_correlation_matrix(data, n);
-    if corr.is_empty() { return None; }
-    let mut a = corr;
+    let full = build_correlation_matrix(data, n);
+    if full.is_empty() { return None; }
+    // Held parameters carry no information: take the eigenvalues of the free block only.
+    let free = free_indices(&full, n);
+    let m = free.len();
+    if m < 2 { return None; }
+    let mut a: Vec<f64> = free.iter().flat_map(|&i| free.iter().map(move |&j| (i, j)))
+        .map(|(i, j)| full[i * n + j]).collect();
+    let n = m;
 
     // Jacobi eigenvalue algorithm for real symmetric matrices.
     // Sweeps until the largest off-diagonal element is < 1e-10.
@@ -1321,5 +1342,46 @@ mod tests {
         assert_eq!(bundle_path_for(Path::new("/p/m.v2.ferx")), PathBuf::from("/p/m.v2.fitrx"));
         // A relative model path still yields an absolute bundle path.
         assert!(bundle_path_for(Path::new("rel/m.ferx")).is_absolute());
+    }
+
+    #[test]
+    fn a_held_parameter_blanks_its_own_row_not_the_whole_matrix() {
+        // Variance-covariance of 3 parameters where the middle one is fixed (variance 0),
+        // the shape of a real bundle with a FIXed theta (13x13 with one zero on the diagonal).
+        let data = [
+            4.0, 0.0, 1.2,
+            0.0, 0.0, 0.0,
+            1.2, 0.0, 9.0,
+        ];
+        let c = build_correlation_matrix(&data, 3);
+        assert_eq!(c.len(), 9);
+        assert!((c[0] - 1.0).abs() < 1e-12 && (c[8] - 1.0).abs() < 1e-12);
+        assert!((c[2] - 1.2 / 6.0).abs() < 1e-12, "free pair keeps its correlation");
+        assert!(c[1].is_nan() && c[3].is_nan() && c[4].is_nan() && c[5].is_nan() && c[7].is_nan());
+        // Condition number comes from the free 2x2 block only: (1+r)/(1-r).
+        let r = 0.2_f64;
+        let cn = condition_number_from_covariance(&data, 3).unwrap();
+        assert!((cn - (1.0 + r) / (1.0 - r)).abs() < 1e-6, "{cn}");
+    }
+
+    #[test]
+    fn all_held_or_malformed_data_still_gives_no_matrix() {
+        assert!(build_correlation_matrix(&[0.0, 0.0, 0.0, 0.0], 2).is_empty());
+        assert!(build_correlation_matrix(&[1.0], 2).is_empty());
+    }
+
+    /// With `FERX_TEST_FLEXPROVE` pointing at a bundle that has a FIXed theta: its matrix
+    /// must survive, with the fixed parameter's row and column blank.
+    #[test]
+    fn real_bundle_with_a_fixed_theta_keeps_its_correlation_matrix() {
+        let Ok(p) = std::env::var("FERX_TEST_FLEXPROVE") else { return };
+        let s = read_fit_summary(std::path::Path::new(&p)).unwrap();
+        assert_eq!(s.cov_corr_n, 13);
+        assert_eq!(s.cov_corr_flat.len(), 169);
+        assert_eq!(s.cov_corr_names.len(), 13);
+        let fixed = 4; // 5th theta is FIXed in this model
+        assert!(s.cov_corr_flat[fixed * 13 + fixed].is_nan());
+        assert!((s.cov_corr_flat[0] - 1.0).abs() < 1e-9);
+        assert!(s.cov_corr_flat.iter().filter(|v| v.is_finite()).count() > 100);
     }
 }
