@@ -179,6 +179,8 @@ pub struct FerxApp {
     state: AppState,
     /// Frames rendered so far; popups wait until the font atlas has been warmed.
     frames: u32,
+    /// Keeps the GPU font texture in step with egui's font atlas (see `FontSync`).
+    font_sync: FontSync,
 }
 
 impl FerxApp {
@@ -234,8 +236,70 @@ impl FerxApp {
             });
         }
 
-        Self { state, frames: 0 }
+        Self { state, frames: 0, font_sync: FontSync::new() }
     }
+}
+
+/// How often the whole font atlas is re-uploaded as a safety net.
+const FONT_RESYNC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Self-healing for a GPU font texture that has drifted out of step with egui's own atlas.
+///
+/// egui hands each font-atlas upload out exactly once. If a backend drops one (eframe 0.31's
+/// glow paths with several windows can; see egui PR #8250), the GPU texture stays behind and
+/// *all* text turns into squashed, scrambled glyphs until the atlas is next rebuilt. Re-sending
+/// the complete atlas replaces the GPU texture at the right size and heals it. This does that:
+/// for a few frames after the atlas size or the set of open popups changes (the moments an
+/// upload can go missing), and every `FONT_RESYNC_INTERVAL` otherwise. It runs from the main
+/// window's own pass, where the upload is applied with its paint.
+struct FontSync {
+    last_size: [usize; 2],
+    last_popups: [bool; 4],
+    last_upload: std::time::Instant,
+    pending: u8,
+}
+
+impl FontSync {
+    fn new() -> Self {
+        Self {
+            last_size: [0, 0],
+            last_popups: [false; 4],
+            last_upload: std::time::Instant::now(),
+            pending: 0,
+        }
+    }
+
+    /// Whether a full re-upload is due this frame.
+    fn due(&mut self, atlas_size: [usize; 2], popups: [bool; 4], now: std::time::Instant) -> bool {
+        if atlas_size != self.last_size {
+            self.last_size = atlas_size;
+            self.pending = 3;
+        }
+        if popups != self.last_popups {
+            self.last_popups = popups;
+            self.pending = 3;
+        }
+        let due = self.pending > 0 || now.duration_since(self.last_upload) >= FONT_RESYNC_INTERVAL;
+        self.pending = self.pending.saturating_sub(1);
+        if due { self.last_upload = now; }
+        due
+    }
+
+    /// Queues a complete font-atlas upload for this pass, if one is due.
+    fn resync(&mut self, ctx: &egui::Context, popups: [bool; 4]) {
+        let size = ctx.fonts(|f| f.font_image_size());
+        if self.due(size, popups, std::time::Instant::now()) {
+            upload_full_font_atlas(ctx);
+        }
+    }
+}
+
+/// Queues a full (not partial) upload of egui's current font atlas for this pass. A full
+/// delta recreates the GPU texture at the atlas's size, so any earlier drift is gone.
+fn upload_full_font_atlas(ctx: &egui::Context) {
+    let image = ctx.fonts(|f| f.image());
+    let delta = egui::epaint::ImageDelta::full(image, egui::TextureOptions::LINEAR);
+    ctx.tex_manager().write().set(egui::TextureId::default(), delta);
 }
 
 /// Rasterises every glyph the popup windows draw, at every font size they draw it,
@@ -378,6 +442,16 @@ impl eframe::App for FerxApp {
             render_settings_popup(ctx, &mut self.state);
         }
         self.frames = self.frames.saturating_add(1);
+
+        // Last thing in the pass, after every nested popup pass has finished, so this
+        // main-window pass is the one that carries the upload to the GPU.
+        let popups = [
+            self.state.ui.run_popup_open,
+            self.state.ui.sir_popup_open,
+            self.state.ui.about_open,
+            self.state.ui.settings_open,
+        ];
+        self.font_sync.resync(ctx, popups);
 
         // Request repaint while a run is active to keep log streaming live.
         if !self.state.run.active_runs.is_empty() {
@@ -1951,5 +2025,56 @@ mod warm_popup_glyph_tests {
         let first = lit_pixels(&ctx);
         let _ = ctx.run(Default::default(), warm_popup_glyphs);
         assert_eq!(first, lit_pixels(&ctx));
+    }
+}
+
+#[cfg(test)]
+mod font_sync_tests {
+    use super::{upload_full_font_atlas, FontSync, FONT_RESYNC_INTERVAL};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn resyncs_after_atlas_growth_then_settles_then_heartbeats() {
+        let t0 = Instant::now();
+        let mut s = FontSync::new();
+        s.last_upload = t0;
+        let calm = [false; 4];
+        // First sight of an atlas size counts as a change: three frames of re-uploads.
+        assert!(s.due([16384, 64], calm, t0));
+        assert!(s.due([16384, 64], calm, t0));
+        assert!(s.due([16384, 64], calm, t0));
+        assert!(!s.due([16384, 64], calm, t0), "quiet once settled");
+        assert!(!s.due([16384, 64], calm, t0 + Duration::from_secs(1)));
+        // The atlas grows: more re-uploads.
+        assert!(s.due([16384, 128], calm, t0 + Duration::from_secs(1)));
+        // A popup opens: more re-uploads.
+        let open = [true, false, false, false];
+        for _ in 0..3 { assert!(s.due([16384, 128], open, t0 + Duration::from_secs(1))); }
+        assert!(!s.due([16384, 128], open, t0 + Duration::from_secs(1)));
+        // Slow heartbeat even with nothing changing.
+        assert!(s.due([16384, 128], open, t0 + Duration::from_secs(1) + FONT_RESYNC_INTERVAL));
+    }
+
+    /// The upload must be a *full* texture update at exactly the atlas's current size,
+    /// which is what recreates a stale GPU texture.
+    #[test]
+    fn upload_is_a_full_delta_at_the_atlas_size() {
+        let ctx = egui::Context::default();
+        let out = ctx.run(Default::default(), |ctx| {
+            // Grow the atlas past its initial height so a size mismatch would be visible.
+            ctx.fonts(|f| {
+                for size in [10.0, 11.0, 12.0, 13.0, 16.0, 18.0] {
+                    f.layout_no_wrap("The quick brown fox 0123456789".into(),
+                        egui::FontId::proportional(size), egui::Color32::WHITE);
+                }
+            });
+            upload_full_font_atlas(ctx);
+        });
+        let size = ctx.fonts(|f| f.font_image_size());
+        let font_deltas: Vec<_> = out.textures_delta.set.iter()
+            .filter(|(id, _)| *id == egui::TextureId::default()).collect();
+        let last = &font_deltas.last().expect("a font texture upload").1;
+        assert!(last.pos.is_none(), "must be a full update, not a partial one");
+        assert_eq!([last.image.width(), last.image.height()], size);
     }
 }
