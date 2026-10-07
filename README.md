@@ -275,6 +275,12 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.9.22 (2026-10-07) — fixed the missing parameter correlation matrix for models with a fixed parameter
+
+**Fixed: "Correlation data not available" on the Param Corr tab despite a successful covariance step**
+- Reported on a real model with a FIXed theta. The covariance matrix (13 x 13, condition number 35.6) was in the bundle, but a fixed parameter has zero variance, and the correlation builder discarded the whole matrix as soon as it met a zero on the diagonal — the tab then showed an empty heatmap. This affected every model with a fixed or held parameter.
+- Now only the held parameter's own row and column are blank: every other pair keeps its correlation. The heatmap draws them as grey "n/a" cells (hover: "not estimated (fixed or held parameter)"), the legend explains grey, and the HTML report does the same. The fallback condition-number calculation now uses the free parameters only. Verified on a copy of the real bundle (13 x 13, 13 names, blank 5th row/column) and with tests.
+
 ### v0.9.21 (2026-10-07) — fixed the ETA-covariate scan failing on pairs with no computable correlation
 
 **Fixed: "ETA-covariate scan failed — invalid type: map, expected f64"**
