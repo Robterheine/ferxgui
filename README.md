@@ -275,6 +275,21 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.9.20 (2026-10-07) — Evaluation GOF: filter and colour by any variable; back-transform DV
+
+**Added: filter the GOF plots by any variable**
+- A second toolbar row under the Evaluation section tabs (GOF only) with a **+ Filter** menu. Variables are grouped as prediction columns, declared covariates and **original dataset columns** (CMT, MDV, WT, OCC, SEX, ...). Filters are removable chips and combine with AND. Few distinct values or text gives a checklist of levels (with "(missing)"); continuous variables get a range; a column that allows both can be switched between them. A counter shows "n = X of Y obs", and all four plots, their axis limits and LOESS use only the rows that remain.
+- `predictions.csv` only carries a few columns, so the original dataset is joined back on: its observation records are matched to the prediction rows in order on (ID, TIME, DV), which copes with dose rows, excluded rows, duplicate times, BLOQ and covariate datasets (verified on real 0.4.0 fits of warfarin_iov, warfarin_block_omega, warfarin_bloq and two_cpt_oral_cov). The dataset is found from the path recorded in the bundle, next to the bundle, or the model's `[data]` path; if it is missing or has changed since the fit, the badge says why and **Locate dataset...** lets you pick it. Variables with a single value are listed greyed out with a reason (e.g. `CMT (all 1)`) instead of disappearing.
+
+**Added: colour the GOF plots by a variable**
+- **Color by:** categorical variables get one colour and one marker shape per level (colour-blind-safe Okabe-Ito palette); continuous variables use six quantile bins on a sequential scale. One shared legend; clicking a category hides or shows it (it edits that variable's filter). LOESS stays a single overall line, with an optional "LOESS per group".
+- **Export figure** honours the filters and colour: only the kept rows are written, points are coloured, and the legend is collected under the figure (ggplot and base-R paths).
+
+**Added: DV scale (back-transform) for GOF and Individual Fits**
+- A **DV scale** drop-down: As fitted, exp(ln), or 10^(log10). It back-transforms DV, PRED and IPRED for models fitted to log-transformed data (CWRES/IWRES are unchanged), including axis limits, titles, the Individual Fits axis label and the exported figure. It combines with the existing "Log scale" checkbox.
+
+Filters, colour and DV scale apply to the GOF section only (Individual Fits uses the DV scale), are remembered per model for the session, and are not stored in the bundle. The dataset join reads the file on the UI thread, with a 200 MB cap.
+
 ### v0.9.19 (2026-10-07) — `.fitrx` bundles always land beside the model file
 
 **Changed: the bundle path is absolute and derived from the model path**
