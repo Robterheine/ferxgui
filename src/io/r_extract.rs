@@ -845,6 +845,8 @@ cat(toJSON(result, auto_unbox = TRUE, na = "null"))
 
 /// GOF export script.
 /// Args: <data_csv> <output_path> <format> <width_mm> <cwres_x_1> <cwres_x_2> <loess> <ci_lines>
+///       [color_name] [loess_per_group] [color_continuous] [color_levels joined by "|||"] [y_transform]
+/// When a colour variable is given, the CSV carries a COLOR_GROUP column (the group label).
 const GOF_EXPORT_R: &str = r#"
 args <- commandArgs(trailingOnly = TRUE)
 data_path      <- args[1]
@@ -855,8 +857,21 @@ cwres_x_1      <- args[5]
 cwres_x_2      <- args[6]
 include_loess  <- tolower(args[7]) == "true"
 include_ci     <- tolower(args[8]) == "true"
+color_name     <- if (length(args) >= 9) args[9] else ""
+per_group      <- length(args) >= 10 && tolower(args[10]) == "true"
+color_cont     <- length(args) >= 11 && tolower(args[11]) == "true"
+color_levels   <- if (length(args) >= 12 && nchar(args[12]) > 0) strsplit(args[12], "|||", fixed = TRUE)[[1]] else character()
+y_transform    <- if (length(args) >= 13) args[13] else "none"   # "none" | "exp" | "pow10": DV/PRED/IPRED already back-transformed
+ylab <- function(s) switch(y_transform, exp = paste0("exp(", s, ")"), pow10 = paste0("10^", s), s)
 
-data     <- read.csv(data_path)
+data     <- read.csv(data_path, check.names = FALSE)
+use_color <- nzchar(color_name) && "COLOR_GROUP" %in% names(data)
+okabe <- c('#0072B2', '#E69F00', '#009E73', '#D55E00', '#56B4E9', '#CC79A7', '#F0E442', '#999999')
+if (use_color) {
+  data$COLOR_GROUP <- factor(as.character(data$COLOR_GROUP), levels = color_levels)
+  color_values <- setNames(rep(okabe, length.out = length(color_levels)), color_levels)
+  if ("(missing)" %in% color_levels) color_values["(missing)"] <- "grey50"
+}
 height_mm <- width_mm           # square layout
 w_in      <- width_mm  / 25.4
 h_in      <- height_mm / 25.4
@@ -882,10 +897,13 @@ if (use_gg) {
           strip.background = element_blank(),
           plot.margin = unit(c(2,2,2,2), "mm"))
 
-  loess_lyr <- if (include_loess)
-    geom_smooth(method = "loess", se = FALSE, color = "darkorange2",
-                linewidth = 0.9, formula = y ~ x)
-  else NULL
+  loess_lyr <- if (!include_loess) NULL
+    else if (use_color && per_group)
+      geom_smooth(aes(group = COLOR_GROUP), method = "loess", se = FALSE,
+                  linewidth = 0.9, formula = y ~ x)
+    else
+      geom_smooth(aes(group = 1, colour = NULL), method = "loess", se = FALSE,
+                  color = "darkorange2", linewidth = 0.9, formula = y ~ x)
 
   ci_lyrs <- if (include_ci)
     list(geom_hline(yintercept =  2, linetype = "dashed", color = "gray50", linewidth = 0.5),
@@ -894,7 +912,8 @@ if (use_gg) {
 
   mk_pts <- function(xv, yv) {
     df <- data[is.finite(data[[xv]]) & is.finite(data[[yv]]), ]
-    aes_map <- aes_string(x = xv, y = yv)
+    aes_map <- if (use_color) aes_string(x = xv, y = yv, colour = "COLOR_GROUP")
+               else aes_string(x = xv, y = yv)
     list(df = df, aes = aes_map)
   }
   d1 <- mk_pts("PRED",  "DV");  d2 <- mk_pts("IPRED", "DV")
@@ -903,12 +922,17 @@ if (use_gg) {
   identity_line <- geom_abline(slope = 1, intercept = 0, color = "gray50", linewidth = 0.8)
   zero_line     <- geom_hline(yintercept = 0,             color = "gray50", linewidth = 0.8)
 
-  p1 <- ggplot(d1$df, d1$aes) + geom_point(alpha = 0.4, size = 1) + identity_line + loess_lyr + th + labs(x = "PRED",  y = "DV")
-  p2 <- ggplot(d2$df, d2$aes) + geom_point(alpha = 0.4, size = 1) + identity_line + loess_lyr + th + labs(x = "IPRED", y = "DV")
+  p1 <- ggplot(d1$df, d1$aes) + geom_point(alpha = 0.4, size = 1) + identity_line + loess_lyr + th + labs(x = ylab("PRED"),  y = ylab("DV"))
+  p2 <- ggplot(d2$df, d2$aes) + geom_point(alpha = 0.4, size = 1) + identity_line + loess_lyr + th + labs(x = ylab("IPRED"), y = ylab("DV"))
   p3 <- ggplot(d3$df, d3$aes) + geom_point(alpha = 0.4, size = 1) + zero_line + ci_lyrs + loess_lyr + th + labs(x = x1, y = "CWRES")
   p4 <- ggplot(d4$df, d4$aes) + geom_point(alpha = 0.4, size = 1) + zero_line + ci_lyrs + loess_lyr + th + labs(x = x2, y = "CWRES")
 
   fig <- (p1 | p2) / (p3 | p4)
+  if (use_color) {
+    colour_scale <- if (color_cont) scale_colour_viridis_d(name = color_name, end = 0.9, drop = FALSE)
+                    else scale_colour_manual(name = color_name, values = color_values, drop = FALSE)
+    fig <- (fig + plot_layout(guides = "collect")) & colour_scale & theme(legend.position = "bottom")
+  }
   dev_str <- switch(format_str, "pdf" = "pdf", "svg" = "svg", "png")
   suppressMessages(
     ggsave(output_path, fig, width = width_mm, height = height_mm,
@@ -928,8 +952,12 @@ if (use_gg) {
 
   mk_gof <- function(xv, yv, xlab, ylab, refline = "identity") {
     df <- data[is.finite(data[[xv]]) & is.finite(data[[yv]]), ]
+    pt_col <- if (use_color) {
+      pal <- if (color_cont) hcl.colors(length(color_levels), "viridis") else color_values
+      pal[as.integer(df$COLOR_GROUP)]
+    } else rgb(0, 0, 0, 0.4)
     plot(df[[xv]], df[[yv]], xlab = xlab, ylab = ylab,
-         pch = 16, cex = 0.5, col = rgb(0, 0, 0, 0.4))
+         pch = 16, cex = 0.5, col = pt_col)
     if (refline == "identity") abline(0, 1, col = "gray50", lwd = 1.5)
     else                       abline(h = 0, col = "gray50", lwd = 1.5)
     if (include_ci && refline != "identity") {
@@ -946,8 +974,13 @@ if (use_gg) {
       }
     }
   }
-  mk_gof("PRED",  "DV",     "PRED",  "DV")
-  mk_gof("IPRED", "DV",     "IPRED", "DV")
+  mk_gof("PRED",  "DV",     ylab("PRED"),  ylab("DV"))
+  if (use_color) {
+    leg_col <- if (color_cont) hcl.colors(length(color_levels), "viridis") else color_values
+    legend("topleft", legend = color_levels, col = leg_col, pch = 16, cex = 0.6,
+           title = color_name, bty = "n")
+  }
+  mk_gof("IPRED", "DV",     ylab("IPRED"), ylab("DV"))
   mk_gof(x1,      "CWRES",  x1,      "CWRES", refline = "zero")
   mk_gof(x2,      "CWRES",  x2,      "CWRES", refline = "zero")
   par(op)
@@ -1643,7 +1676,10 @@ pub fn export_gof(
     cwres_x_2:     &str,
     loess:         bool,
     ci_lines:      bool,
+    color:         Option<&GofExportColor>,
+    y_transform:   &str,
 ) -> Result<String, String> {
+    let levels_joined = color.map(|c| c.levels.join("|||")).unwrap_or_default();
     let out = run_script(GOF_EXPORT_R, &[
         path_as_str(data_csv)?,
         path_as_str(output_path)?,
@@ -1653,8 +1689,23 @@ pub fn export_gof(
         cwres_x_2,
         if loess    { "true" } else { "false" },
         if ci_lines { "true" } else { "false" },
+        color.map(|c| c.name.as_str()).unwrap_or(""),
+        if color.is_some_and(|c| c.per_group_loess) { "true" } else { "false" },
+        if color.is_some_and(|c| c.continuous) { "true" } else { "false" },
+        &levels_joined,
+        y_transform,
     ])?;
     Ok(out.trim().to_string())
+}
+
+/// Colour settings for an exported GOF figure. The export CSV then carries a
+/// `COLOR_GROUP` column holding each row's group label.
+pub struct GofExportColor {
+    pub name: String,
+    /// Group labels in legend order.
+    pub levels: Vec<String>,
+    pub continuous: bool,
+    pub per_group_loess: bool,
 }
 
 /// Create a `.ferx` model file from a built-in template.

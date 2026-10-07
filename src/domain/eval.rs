@@ -58,6 +58,9 @@ pub struct EvalData {
     pub rows: Vec<PredRow>,
     /// Unique subject IDs in order of first appearance.
     pub subject_ids: Vec<String>,
+    /// Extra `predictions.csv` columns beyond the core ones (OCC, N_OBS, TAFD, ...), as
+    /// raw strings, one value per row. Empty for bundles without any.
+    pub extras: Vec<(String, Vec<String>)>,
 }
 
 impl EvalData {
@@ -68,7 +71,7 @@ impl EvalData {
                 subject_ids.push(r.id.clone());
             }
         }
-        Self { rows, subject_ids }
+        Self { rows, subject_ids, extras: Vec::new() }
     }
 
     /// Rows belonging to a given subject.

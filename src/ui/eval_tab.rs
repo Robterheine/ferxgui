@@ -108,6 +108,24 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
             }
         }
 
+        // Back-transform for models fitted to log-transformed data.
+        if matches!(state.ui.active_eval_section, EvalSection::Gof | EvalSection::IndividualFits) {
+            ui.add_space(12.0);
+            ui.label(egui::RichText::new("DV scale:").color(theme::fg2(dark)).size(11.0));
+            egui::ComboBox::from_id_salt("eval_y_transform")
+                .selected_text(state.ui.eval_y_transform.label())
+                .width(84.0)
+                .show_ui(ui, |ui| {
+                    for t in crate::domain::YTransform::ALL {
+                        ui.selectable_value(&mut state.ui.eval_y_transform, t, t.label());
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "Back-transform DV, PRED and IPRED for a model fitted to log-transformed data \
+                     (exp for ln, 10^x for log10). CWRES and IWRES are unchanged.");
+        }
+
         if state.ui.active_eval_section == EvalSection::Gof {
             // Log-scale toggle.
             ui.add_space(12.0);
@@ -216,14 +234,20 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
             .and_then(|p| crate::io::fitrx::read_covtab(p).ok().flatten());
         state.ui.eval_conddist = fitrx.as_deref()
             .and_then(|p| crate::io::fitrx::read_conddist(p).ok().flatten());
-        state.ui.eval_loaded_stem = Some(stem);
+        state.ui.eval_loaded_stem = Some(stem.clone());
         state.ui.eval_loaded_fitrx_mtime = current_mtime;
+        rebuild_eval_vars(state, model_idx, &stem);
         state.ui.eval_subject_idx = 0;
         state.ui.eval_conddist_eta_idx = 0;
     }
 
     // ── Export dialog (floats above everything) ───────────────────────────
     show_export_dialog(ui.ctx(), state, model_idx);
+
+    // ── GOF filter / colour controls ──────────────────────────────────────
+    if state.ui.active_eval_section == EvalSection::Gof && state.ui.eval_data.is_some() {
+        super::eval_filter::show_gof_controls(ui, state, dark);
+    }
 
     // ── Route to section ──────────────────────────────────────────────────
     match state.ui.active_eval_section {
@@ -450,7 +474,44 @@ mod gof_x_value_tests {
     }
 }
 
+/// Rebuilds the filterable-variable table for the loaded fit: prediction columns, declared
+/// covariates, and the original dataset joined onto the prediction rows.
+fn rebuild_eval_vars(state: &mut AppState, model_idx: usize, stem: &str) {
+    use crate::domain::{DatasetStatus, VarTable};
+    let Some(eval) = state.ui.eval_data.as_ref() else {
+        state.ui.eval_vars = None;
+        state.ui.eval_dataset_status = DatasetStatus::Unknown;
+        return;
+    };
+    let entry = &state.workspace.models[model_idx];
+    let recorded = entry.fit.as_ref().and_then(|f| f.data_path.clone());
+    let path = crate::io::dataset::resolve_dataset_path(
+        state.ui.eval_dataset_override.get(stem).map(|p| p.as_path()),
+        recorded.as_deref(),
+        entry.fitrx_path.as_deref(),
+        entry.model.data_path.as_deref(),
+        entry.model.path.parent(),
+    );
+    let (status, cols) = match path {
+        None => (match recorded {
+            Some(r) => DatasetStatus::NotFound(r),
+            None => DatasetStatus::NoPath,
+        }, None),
+        Some(p) => {
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            match crate::io::dataset::load_aligned(&p, eval) {
+                Ok(c) => (DatasetStatus::Aligned { name, rows: eval.rows.len() }, Some(c)),
+                Err(e) => (DatasetStatus::Failed(e), None),
+            }
+        }
+    };
+    let table = VarTable::build(eval, state.ui.eval_covtab.as_ref(), cols.as_deref());
+    state.ui.eval_vars = Some(table);
+    state.ui.eval_dataset_status = status;
+}
+
 fn show_gof(ui: &mut egui::Ui, state: &AppState, _idx: usize, dark: bool) {
+    use super::eval_filter::GofView;
     let data = match &state.ui.eval_data {
         Some(d) if !d.rows.is_empty() => d,
         _ => { no_predictions(ui, dark); return; }
@@ -466,73 +527,84 @@ fn show_gof(ui: &mut egui::Ui, state: &AppState, _idx: usize, dark: bool) {
     let ref_col = if dark { egui::Color32::from_gray(120) } else { egui::Color32::from_gray(160) };
     let loess_col = theme::ORANGE;
 
-    let [dv_lo, dv_hi] = data.dv_pred_range();
+    // Filter + colour settings for this model (defaults: everything, one colour).
+    let stem = state.ui.eval_loaded_stem.clone().unwrap_or_default();
+    let gv = match state.ui.eval_views.get(&stem) {
+        Some(v) => GofView::from_settings(v, state.ui.eval_vars.as_ref(), data.rows.len(), dark),
+        None    => GofView::plain(data.rows.len(), dark),
+    };
+    if gv.n_kept() == 0 {
+        ui.add_space(20.0);
+        ui.label(egui::RichText::new("No observations match the current filters.")
+            .color(theme::fg3(dark)).size(13.0));
+        return;
+    }
+    let kept = |i: usize| gv.is_kept(i);
+    let tr = state.ui.eval_y_transform;
+    let t = |v: f64| tr.apply(v);
+
+    // Axis range over the rows that are shown, so a filtered plot zooms to what is left.
+    let (mut dv_lo, mut dv_hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for (i, r) in data.rows.iter().enumerate().filter(|(i, _)| kept(*i)) {
+        let _ = i;
+        for v in [t(r.dv), t(r.pred), t(r.ipred)] {
+            if v.is_finite() { dv_lo = dv_lo.min(v); dv_hi = dv_hi.max(v); }
+        }
+    }
+    if dv_lo.is_infinite() { dv_lo = 0.0; dv_hi = 1.0; }
     let pad   = (dv_hi - dv_lo) * 0.05;
     let ax_lo = if log { (dv_lo - pad).max(1e-6) } else { dv_lo - pad };
     let ax_hi = dv_hi + pad;
 
-    // Collect scatter data.
-    let pts_dv_pred:  Vec<[f64;2]> = data.rows.iter()
-        .filter(|r| r.pred.is_finite() && r.dv.is_finite())
-        .map(|r| [r.pred, r.dv]).collect();
-    let pts_dv_ipred: Vec<[f64;2]> = data.rows.iter()
-        .filter(|r| r.ipred.is_finite() && r.dv.is_finite())
-        .map(|r| [r.ipred, r.dv]).collect();
+    let rows = || data.rows.iter().enumerate();
+    let ser_dv_pred = gv.series(
+        rows().filter(|(_, r)| t(r.pred).is_finite() && t(r.dv).is_finite()).map(|(i, r)| (i, [t(r.pred), t(r.dv)])), pt_col);
+    let ser_dv_ipred = gv.series(
+        rows().filter(|(_, r)| t(r.ipred).is_finite() && t(r.dv).is_finite()).map(|(i, r)| (i, [t(r.ipred), t(r.dv)])), pt_col);
 
-    // CWRES X column.
+    // CWRES panels (x columns independently configured).
     let covtab = state.ui.eval_covtab.as_ref();
-    let cwres_x: Vec<[f64;2]> = data.rows.iter()
-        .filter(|r| r.cwres.is_finite())
-        .map(|r| [gof_x_value(r, &state.ui.eval_cwres_x_col, covtab), r.cwres])
-        .filter(|p| p[0].is_finite())
-        .collect();
+    let col1 = state.ui.eval_cwres_x_col.clone();
+    let col2 = state.ui.eval_cwres_x_col_2.clone();
+    let cwres_pts = |col: &str| -> Vec<(usize, [f64; 2])> {
+        rows().filter(|(_, r)| r.cwres.is_finite())
+            .map(|(i, r)| (i, [gof_x_value(r, col, covtab), r.cwres]))
+            .filter(|(_, p)| p[0].is_finite())
+            .collect()
+    };
+    let ser_cw1 = gv.series(cwres_pts(&col1).into_iter(), pt_col);
+    let ser_cw2 = gv.series(cwres_pts(&col2).into_iter(), pt_col);
 
-    let cwres_abs = data.rows.iter()
-        .filter_map(|r| r.cwres.is_finite().then_some(r.cwres.abs()))
-        .fold(0.0f64, f64::max);
+    let cwres_abs = rows().filter(|(i, r)| kept(*i) && r.cwres.is_finite())
+        .map(|(_, r)| r.cwres.abs()).fold(0.0f64, f64::max);
     let cw_pad = (cwres_abs * 1.15).max(3.0);
-
-    let x_lo_cw = cwres_x.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min);
-    let x_hi_cw = cwres_x.iter().map(|p| p[0]).fold(f64::NEG_INFINITY, f64::max);
+    let x_range = |ser: &[super::eval_filter::Series]| -> (f64, f64) {
+        let pts = ser.iter().flat_map(|s| s.points.iter());
+        (pts.clone().map(|p| p[0]).fold(f64::INFINITY, f64::min),
+         pts.map(|p| p[0]).fold(f64::NEG_INFINITY, f64::max))
+    };
+    let (x_lo_cw, x_hi_cw)   = x_range(&ser_cw1);
+    let (x_lo_cw2, x_hi_cw2) = x_range(&ser_cw2);
+    let per_group = gv.per_group_loess;
 
     // Row 1.
     ui.horizontal(|ui| {
-        scatter_with_loess(ui, "gof_dv_pred",  "DV vs PRED",
-            state.ui.eval_cwres_x_col.as_str(), "DV",
-            half_w, half_h, &pts_dv_pred,
-            pt_col, ref_col, loess_col, log,
-            PlotKind::Identity { lo: ax_lo, hi: ax_hi });
+        scatter_grouped(ui, "gof_dv_pred", &format!("{} vs {}", tr.wrap("DV"), tr.wrap("PRED")), half_w, half_h, &ser_dv_pred,
+            ref_col, loess_col, log, PlotKind::Identity { lo: ax_lo, hi: ax_hi }, per_group);
         ui.add_space(4.0);
-        scatter_with_loess(ui, "gof_dv_ipred", "DV vs IPRED",
-            state.ui.eval_cwres_x_col.as_str(), "DV",
-            half_w, half_h, &pts_dv_ipred,
-            pt_col, ref_col, loess_col, log,
-            PlotKind::Identity { lo: ax_lo, hi: ax_hi });
+        scatter_grouped(ui, "gof_dv_ipred", &format!("{} vs {}", tr.wrap("DV"), tr.wrap("IPRED")), half_w, half_h, &ser_dv_ipred,
+            ref_col, loess_col, log, PlotKind::Identity { lo: ax_lo, hi: ax_hi }, per_group);
     });
     ui.add_space(4.0);
-    // Row 2 — CWRES (both axes independently configured).
-    let col1 = state.ui.eval_cwres_x_col.clone();
-    let col2 = state.ui.eval_cwres_x_col_2.clone();
-
-    let cwres_2: Vec<[f64;2]> = data.rows.iter()
-        .map(|r| [gof_x_value(r, &col2, covtab), r.cwres])
-        .filter(|p| p[0].is_finite() && p[1].is_finite())
-        .collect();
-    let x_lo_cw2 = cwres_2.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min);
-    let x_hi_cw2 = cwres_2.iter().map(|p| p[0]).fold(f64::NEG_INFINITY, f64::max);
-
+    // Row 2 — CWRES.
     ui.horizontal(|ui| {
-        scatter_with_loess(ui, "gof_cwres_x1",
-            &format!("CWRES vs {col1}"), &col1, "CWRES",
-            half_w, half_h, &cwres_x,
-            pt_col, ref_col, loess_col, false,
-            PlotKind::Residual { x_lo: x_lo_cw, x_hi: x_hi_cw, y_pad: cw_pad, bands: vec![2.0] });
+        scatter_grouped(ui, "gof_cwres_x1", &format!("CWRES vs {col1}"), half_w, half_h, &ser_cw1,
+            ref_col, loess_col, false,
+            PlotKind::Residual { x_lo: x_lo_cw, x_hi: x_hi_cw, y_pad: cw_pad, bands: vec![2.0] }, per_group);
         ui.add_space(4.0);
-        scatter_with_loess(ui, "gof_cwres_x2",
-            &format!("CWRES vs {col2}"), &col2, "CWRES",
-            half_w, half_h, &cwres_2,
-            pt_col, ref_col, loess_col, false,
-            PlotKind::Residual { x_lo: x_lo_cw2, x_hi: x_hi_cw2, y_pad: cw_pad, bands: vec![2.0] });
+        scatter_grouped(ui, "gof_cwres_x2", &format!("CWRES vs {col2}"), half_w, half_h, &ser_cw2,
+            ref_col, loess_col, false,
+            PlotKind::Residual { x_lo: x_lo_cw2, x_hi: x_hi_cw2, y_pad: cw_pad, bands: vec![2.0] }, per_group);
     });
 }
 
@@ -545,6 +617,7 @@ pub(crate) enum PlotKind {
     Residual { x_lo: f64, x_hi: f64, y_pad: f64, bands: Vec<f64> },
 }
 
+/// Single-colour scatter with a LOESS trend (used by the compare dialog).
 pub(crate) fn scatter_with_loess(
     ui:        &mut egui::Ui,
     id:        &str,
@@ -559,17 +632,38 @@ pub(crate) fn scatter_with_loess(
     log:       bool,
     kind:      PlotKind,
 ) {
+    let series = [super::eval_filter::Series {
+        label: String::new(), color: pt_color, shape: egui_plot::MarkerShape::Circle,
+        points: points.to_vec(),
+    }];
+    scatter_grouped(ui, id, title, w, h, &series, ref_color, loess_col, log, kind, false);
+}
+
+/// Scatter plot with one coloured series per group and a LOESS trend: a single line over
+/// all points, or one per group (skipping groups too small to smooth).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn scatter_grouped(
+    ui:        &mut egui::Ui,
+    id:        &str,
+    title:     &str,
+    w: f32, h: f32,
+    series:    &[super::eval_filter::Series],
+    ref_color: egui::Color32,
+    loess_col: egui::Color32,
+    log:       bool,
+    kind:      PlotKind,
+    per_group_loess: bool,
+) {
     let dark = ui.visuals().dark_mode;
     let title_col = theme::fg2(dark);
 
     // Apply log10 transform when requested; drop non-positive values.
-    let work_pts: Vec<[f64; 2]> = if log {
-        points.iter()
-            .filter(|p| p[0] > 0.0 && p[1] > 0.0)
-            .map(|p| [p[0].log10(), p[1].log10()])
-            .collect()
-    } else {
-        points.to_vec()
+    let tf = |pts: &[[f64; 2]]| -> Vec<[f64; 2]> {
+        if log {
+            pts.iter().filter(|p| p[0] > 0.0 && p[1] > 0.0).map(|p| [p[0].log10(), p[1].log10()]).collect()
+        } else {
+            pts.to_vec()
+        }
     };
     let kind = if log {
         match kind {
@@ -582,10 +676,26 @@ pub(crate) fn scatter_with_loess(
     } else {
         kind
     };
-    let pts_nonempty = !work_pts.is_empty();
 
-    // Compute LOESS before entering the Plot closure (avoids borrow issues).
-    let loess_pts = loess(&work_pts, 0.35);
+    let work: Vec<(String, egui::Color32, egui_plot::MarkerShape, Vec<[f64; 2]>)> = series.iter()
+        .map(|s| (s.label.clone(), s.color, s.shape, tf(&s.points)))
+        .filter(|(_, _, _, p)| !p.is_empty())
+        .collect();
+
+    // LOESS before entering the Plot closure (avoids borrow issues).
+    let mut loess_lines: Vec<(egui::Color32, Vec<[f64; 2]>)> = Vec::new();
+    if per_group_loess && work.len() > 1 {
+        for (_, c, _, p) in &work {
+            if p.len() >= 8 {
+                let l = loess(p, 0.5);
+                if l.len() > 1 { loess_lines.push((*c, l)); }
+            }
+        }
+    } else {
+        let all: Vec<[f64; 2]> = work.iter().flat_map(|(_, _, _, p)| p.iter().copied()).collect();
+        let l = loess(&all, 0.35);
+        if l.len() > 1 { loess_lines.push((loess_col, l)); }
+    }
 
     ui.vertical(|ui| {
         ui.label(egui::RichText::new(title).size(11.0).color(title_col).strong());
@@ -593,16 +703,19 @@ pub(crate) fn scatter_with_loess(
             .width(w).height(h - 18.0)
             .data_aspect(match &kind { PlotKind::Identity { .. } => 1.0, _ => 0.0 })
             .show_grid(true)
-            .label_formatter(|_, v| format!("x={:.3}  y={:.3}", v.x, v.y))
+            .label_formatter(|name, v| if name.is_empty() || name == "LOESS" {
+                format!("x={:.3}  y={:.3}", v.x, v.y)
+            } else {
+                format!("{name}\nx={:.3}  y={:.3}", v.x, v.y)
+            })
             .show(ui, |p| {
-                if pts_nonempty {
-                    p.points(Points::new(PlotPoints::new(work_pts))
-                        .radius(2.2).color(pt_color));
+                for (label, color, shape, pts) in work {
+                    let pts = Points::new(PlotPoints::new(pts)).radius(2.4).color(color).shape(shape);
+                    p.points(if label.is_empty() { pts } else { pts.name(label) });
                 }
-                // LOESS trendline.
-                if loess_pts.len() > 1 {
-                    p.line(Line::new(PlotPoints::new(loess_pts))
-                        .color(loess_col).width(2.0).name("LOESS"));
+                // LOESS trendline(s).
+                for (color, line) in loess_lines {
+                    p.line(Line::new(PlotPoints::new(line)).color(color).width(2.0).name("LOESS"));
                 }
                 // Reference lines.
                 match kind {
@@ -1032,6 +1145,7 @@ fn show_individual_fits(ui: &mut egui::Ui, state: &mut AppState, _idx: usize, da
     let pw    = avail.x / cols as f32 - 6.0;
     let ph    = (avail.y / rows as f32 - 28.0).max(80.0);
 
+    let tr = state.ui.eval_y_transform;
     let pt_col   = if dark { egui::Color32::from_rgb(221,224,238) } else { egui::Color32::from_gray(30) };
     let ipred_col = egui::Color32::from_rgb(76, 138, 255);
     let pred_col  = egui::Color32::from_rgba_unmultiplied(62,201,122,160);
@@ -1052,13 +1166,13 @@ fn show_individual_fits(ui: &mut egui::Ui, state: &mut AppState, _idx: usize, da
                 };
 
                 let obs_pts: Vec<[f64;2]> = rows_for.iter()
-                    .filter(|r| r.dv.is_finite()).map(|r| [r.time, r.dv]).collect();
+                    .filter(|r| tr.apply(r.dv).is_finite()).map(|r| [r.time, tr.apply(r.dv)]).collect();
                 let mut ipred_s = rows_for.iter()
-                    .filter(|r| r.ipred.is_finite() && r.time.is_finite())
-                    .map(|r| [r.time, r.ipred]).collect::<Vec<_>>();
+                    .filter(|r| tr.apply(r.ipred).is_finite() && r.time.is_finite())
+                    .map(|r| [r.time, tr.apply(r.ipred)]).collect::<Vec<_>>();
                 let mut pred_s  = rows_for.iter()
-                    .filter(|r| r.pred.is_finite() && r.time.is_finite())
-                    .map(|r| [r.time, r.pred]).collect::<Vec<_>>();
+                    .filter(|r| tr.apply(r.pred).is_finite() && r.time.is_finite())
+                    .map(|r| [r.time, tr.apply(r.pred)]).collect::<Vec<_>>();
                 ipred_s.sort_by(|a,b| a[0].partial_cmp(&b[0]).unwrap_or(std::cmp::Ordering::Equal));
                 pred_s.sort_by( |a,b| a[0].partial_cmp(&b[0]).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -1068,13 +1182,13 @@ fn show_individual_fits(ui: &mut egui::Ui, state: &mut AppState, _idx: usize, da
                         .size(11.0).color(dim));
                     Plot::new(format!("indfit_{si}"))
                         .width(pw).height(ph)
-                        .x_axis_label("TIME").y_axis_label("DV")
+                        .x_axis_label("TIME").y_axis_label(tr.wrap("DV"))
                         .show_grid(true)
                         .legend(egui_plot::Legend::default())
                         .show(ui, |p| {
                             if !obs_pts.is_empty() {
                                 p.points(Points::new(PlotPoints::new(obs_pts))
-                                    .radius(4.0).color(pt_col).name("DV (obs)"));
+                                    .radius(4.0).color(pt_col).name(format!("{} (obs)", tr.wrap("DV"))));
                             }
                             if !ipred_s.is_empty() {
                                 p.line(Line::new(PlotPoints::new(ipred_s))
@@ -1288,7 +1402,8 @@ fn show_export_dialog(ctx: &egui::Context, state: &mut AppState, model_idx: usiz
             .save_file();
 
         if let Some(out_path) = save_path {
-            // Write predictions CSV to a temp file.
+            // Write predictions CSV to a temp file. Only the rows the on-screen filters
+            // keep are exported, with the colour group as an extra column.
             let pred_rows = match &state.ui.eval_data {
                 Some(d) => d.rows.clone(),
                 None    => return,
@@ -1302,6 +1417,27 @@ fn show_export_dialog(ctx: &egui::Context, state: &mut AppState, model_idx: usiz
             };
             let col1 = state.ui.eval_cwres_x_col.clone();
             let col2 = state.ui.eval_cwres_x_col_2.clone();
+
+            let view_key = state.ui.eval_loaded_stem.clone().unwrap_or_default();
+            let view = state.ui.eval_views.get(&view_key);
+            let gv = match view {
+                Some(v) => super::eval_filter::GofView::from_settings(
+                    v, state.ui.eval_vars.as_ref(), pred_rows.len(), false),
+                None => super::eval_filter::GofView::plain(pred_rows.len(), false),
+            };
+            if gv.n_kept() == 0 {
+                state.ui.status_message = "Export skipped: no observations match the current filters".to_string();
+                return;
+            }
+            let export_color = match (&gv.grouping, view.and_then(|v| v.color_by.clone())) {
+                (Some(g), Some(name)) => Some(crate::io::r_extract::GofExportColor {
+                    name,
+                    levels: g.labels.clone(),
+                    continuous: g.continuous,
+                    per_group_loess: gv.per_group_loess,
+                }),
+                _ => None,
+            };
 
             // Any covariate the on-screen plot can show as an x-axis must
             // also reach the exported CSV, or the R script's column-name
@@ -1320,12 +1456,15 @@ fn show_export_dialog(ctx: &egui::Context, state: &mut AppState, model_idx: usiz
                 let mut header: Vec<&str> =
                     vec!["ID", "TIME", "DV", "PRED", "IPRED", "CWRES", "IWRES", "TAD"];
                 header.extend(&extra_cov_cols);
+                if export_color.is_some() { header.push("COLOR_GROUP"); }
                 let _ = wtr.write_record(&header);
-                for r in &pred_rows {
+                for (i, r) in pred_rows.iter().enumerate() {
+                    if !gv.is_kept(i) { continue; }
+                    let ty = state.ui.eval_y_transform;
                     let mut record: Vec<String> = vec![
                         r.id.clone(),
-                        r.time.to_string(),  r.dv.to_string(),
-                        r.pred.to_string(),  r.ipred.to_string(),
+                        r.time.to_string(),  ty.apply(r.dv).to_string(),
+                        ty.apply(r.pred).to_string(),  ty.apply(r.ipred).to_string(),
                         r.cwres.to_string(), r.iwres.to_string(),
                         r.tad.to_string(),
                     ];
@@ -1334,11 +1473,16 @@ fn show_export_dialog(ctx: &egui::Context, state: &mut AppState, model_idx: usiz
                             .unwrap_or(f64::NAN);
                         record.push(v.to_string());
                     }
+                    if let Some(g) = &gv.grouping {
+                        let k = g.group.get(i).copied().unwrap_or(crate::domain::NO_GROUP) as usize;
+                        record.push(g.labels.get(k).cloned().unwrap_or_default());
+                    }
                     let _ = wtr.write_record(&record);
                 }
                 let _ = wtr.flush();
             }
 
+            let y_token     = state.ui.eval_y_transform.token();
             let tx          = state.worker_tx.clone();
             let ctx_cl      = ctx.clone();
             let format      = state.ui.eval_export_format.clone();
@@ -1352,7 +1496,7 @@ fn show_export_dialog(ctx: &egui::Context, state: &mut AppState, model_idx: usiz
             std::thread::spawn(move || {
                 let result = crate::io::r_extract::export_gof(
                     &tmp_csv, &out_path, &format, width,
-                    &col1, &col2, loess, ci);
+                    &col1, &col2, loess, ci, export_color.as_ref(), y_token);
                 let _ = std::fs::remove_file(&tmp_csv);
                 match result {
                     Ok(path) => {

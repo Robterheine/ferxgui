@@ -144,6 +144,7 @@ struct FitWire {
 
     // ferx >= 0.4.0.
     #[serde(default)] ferx_version:      Option<String>,
+    #[serde(default)] data_path:         Option<String>,
     #[serde(default)] omega_is_diagonal: Option<bool>,
     #[serde(default)] kappa_is_diagonal: Option<bool>,
     // Prior split — absent (or null) for models without a prior.
@@ -286,10 +287,22 @@ pub fn read_predictions(fitrx_path: &Path) -> Result<Option<EvalData>, FitrxErro
     let col_ebeofv = col("EBE_OFV");
     let col_tad    = col("TAD");
 
+    // Columns beyond the core set are kept as raw strings so the Evaluation tab can
+    // filter / colour by them (OCC, N_OBS, TAFD, any column ferx adds later).
+    const CORE: [&str; 9] = ["ID", "TIME", "DV", "PRED", "IPRED", "CWRES", "IWRES", "EBE_OFV", "TAD"];
+    let extra_cols: Vec<(usize, String)> = headers.iter().enumerate()
+        .filter(|(_, h)| !CORE.iter().any(|c| c.eq_ignore_ascii_case(h)))
+        .map(|(i, h)| (i, h.to_string()))
+        .collect();
+    let mut extra_vals: Vec<Vec<String>> = vec![Vec::new(); extra_cols.len()];
+
     let mut rows = Vec::new();
     for result in rdr.records() {
         let rec = result.map_err(|e| FitrxError::Io(
             std::io::Error::other(e)))?;
+        for (k, (c, _)) in extra_cols.iter().enumerate() {
+            extra_vals[k].push(rec.get(*c).unwrap_or("").to_string());
+        }
         rows.push(PredRow {
             id:      col_id.and_then(|c| rec.get(c)).unwrap_or("").to_string(),
             time:    parse(&rec, col_time),
@@ -303,7 +316,9 @@ pub fn read_predictions(fitrx_path: &Path) -> Result<Option<EvalData>, FitrxErro
         });
     }
 
-    Ok(Some(EvalData::from_rows(rows)))
+    let mut data = EvalData::from_rows(rows);
+    data.extras = extra_cols.into_iter().map(|(_, h)| h).zip(extra_vals).collect();
+    Ok(Some(data))
 }
 
 /// Read `ebes.csv` from a `.fitrx` bundle — per-subject EBEs and iOFV.
@@ -898,6 +913,7 @@ fn wire_to_summary(w: FitWire, mut warnings: Vec<String>) -> FitSummary {
         warnings_structured: w.warnings_structured,
         eta_param_types,
         ferx_version: w.ferx_version.filter(|v| !v.is_empty()),
+        data_path: w.data_path.filter(|v| !v.is_empty()),
         omega_is_diagonal: w.omega_is_diagonal,
         kappa_is_diagonal: w.kappa_is_diagonal,
         ofv_data: w.ofv_data,

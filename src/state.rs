@@ -475,10 +475,21 @@ pub struct UiState {
     /// predates this column) — covariates just don't appear as GOF x-axis
     /// options in that case.
     pub eval_covtab: Option<crate::domain::CovTabData>,
+    /// Filterable / colourable variables for the loaded fit (predictions, covariates,
+    /// dataset columns), aligned with `eval_data.rows`.
+    pub eval_vars: Option<crate::domain::VarTable>,
+    /// How joining the original dataset onto the predictions went.
+    pub eval_dataset_status: crate::domain::DatasetStatus,
+    /// GOF filter / colour settings, remembered per model stem for the session.
+    pub eval_views: HashMap<String, crate::domain::EvalView>,
+    /// Dataset file the user picked by hand for a model stem ("Locate dataset…").
+    pub eval_dataset_override: HashMap<String, PathBuf>,
     /// Index into `eval_data.subject_ids` for the Individual Fits view.
     pub eval_subject_idx: usize,
     /// Whether the DV/PRED axes use log scale.
     pub eval_log_scale: bool,
+    /// Back-transform DV / PRED / IPRED for display (log-transformed models).
+    pub eval_y_transform: crate::domain::YTransform,
     /// Convergence tab: show the running-minimum OFV for FOCE/FOCEI rows
     /// instead of the raw per-evaluation trace (which includes rejected
     /// line-search trial steps). Mirrors ferx-r's own `plot(fit)` default.
@@ -746,8 +757,13 @@ impl Default for UiState {
             eval_data: None,
             eval_ebes: None,
             eval_covtab: None,
+            eval_vars: None,
+            eval_dataset_status: Default::default(),
+            eval_views: HashMap::new(),
+            eval_dataset_override: HashMap::new(),
             eval_subject_idx: 0,
             eval_log_scale: false,
+            eval_y_transform: Default::default(),
             eval_monotonic_ofv: true,
             eval_subjects_per_page: 9,
             eval_cwres_x_col:    "TIME".to_string(),

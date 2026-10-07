@@ -1,4 +1,5 @@
 pub mod eval;
+mod eval_vars;
 pub mod fit;
 pub mod model;
 pub mod r_results;
@@ -6,6 +7,7 @@ pub mod run_record;
 pub mod sim_types;
 
 pub use eval::*;
+pub use eval_vars::*;
 pub use fit::*;
 pub use model::*;
 pub use r_results::*;

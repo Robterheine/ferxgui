@@ -1,3 +1,4 @@
+pub mod eval_filter;
 pub mod eval_tab;
 pub mod files_tab;
 pub mod sim_tab;

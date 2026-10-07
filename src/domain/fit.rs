@@ -154,6 +154,10 @@ pub struct FitSummary {
     #[serde(default)]
     pub prior_summary: Vec<PriorRow>,
 
+    /// Dataset path recorded in the bundle (`data_path` in fit.json).
+    #[serde(default)]
+    pub data_path: Option<String>,
+
     /// Estimated `block_sigma` correlations (ferx >= 0.4.0).
     #[serde(default)]
     pub residual_correlations: Vec<ResidualCorr>,
