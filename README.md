@@ -275,6 +275,13 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.9.23 (2026-10-07) — self-healing safeguard for scrambled text
+
+**Fixed (safeguard): all text turning into squashed, scrambled glyphs after a while**
+- Reported again after v0.9.18: the main window as well as the Run popup showed squashed, scrambled text, which matches egui's "drunk text" bug (egui PR #8250): the GPU copy of the font texture drifts out of step with egui's own atlas when an upload is dropped, so every glyph is read from the wrong place. On eframe 0.31 with several OS windows I could not pin down which path drops the upload.
+- The app now re-sends the complete font atlas to the GPU as a full texture update from the main window's own pass: for three frames after the atlas size or the set of open popups changes, and every 2 seconds otherwise. A drift should therefore clear within about 2 seconds, and immediately after a popup opens (about 0.5 ms per upload). The v0.9.18 glyph warm-up is kept.
+- Not verified on a real display (the failure needs a GPU). If text still stays scrambled for more than a few seconds, the next step is embedding the popups in the main window, or upgrading to egui/eframe 0.35+ (which contains the upstream fix).
+
 ### v0.9.22 (2026-10-07) — fixed the missing parameter correlation matrix for models with a fixed parameter
 
 **Fixed: "Correlation data not available" on the Param Corr tab despite a successful covariance step**
