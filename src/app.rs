@@ -177,6 +177,8 @@ mod theme_contrast_tests {
 
 pub struct FerxApp {
     state: AppState,
+    /// Frames rendered so far; popups wait until the font atlas has been warmed.
+    frames: u32,
 }
 
 impl FerxApp {
@@ -232,12 +234,43 @@ impl FerxApp {
             });
         }
 
-        Self { state }
+        Self { state, frames: 0 }
     }
+}
+
+/// Rasterises every glyph the popup windows draw, at every font size they draw it,
+/// from the main window's own pass.
+///
+/// egui only pre-rasterises printable ASCII for the five `TextStyle` fonts. Any other
+/// (family, size) is first rasterised on demand, and for the popups that happens inside
+/// their nested viewport pass. Glyphs added there were not reliably reaching the GPU font
+/// texture on eframe 0.31 (glow), so e.g. the Run popup's monospace 10/11 pt and 10 pt
+/// text rendered as scrambled glyph fragments while 11/13 pt proportional text (which
+/// *is* pre-rasterised) stayed fine. Warming them here moves that work out of the nested
+/// pass. A cached layout is a hash lookup, so calling this every frame is cheap, and it
+/// re-warms automatically whenever egui rebuilds its fonts (e.g. a DPI change).
+fn warm_popup_glyphs(ctx: &egui::Context) {
+    use egui::FontId;
+    // Printable ASCII, plus every non-ASCII character used in the popups' own labels.
+    const GLYPHS: &str = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`\
+        abcdefghijklmnopqrstuvwxyz{|}~°·×—…→↓⚠✔✖";
+    // Sizes used by render_{run,sir,about,settings}_popup; fractional sizes included.
+    const PROPORTIONAL: [f32; 6] = [10.0, 10.5, 11.0, 12.0, 13.0, 18.0];
+    const MONOSPACE: [f32; 3] = [10.0, 11.0, 12.0];
+    ctx.fonts(|fonts| {
+        let color = egui::Color32::WHITE;
+        for size in PROPORTIONAL {
+            fonts.layout_no_wrap(GLYPHS.to_owned(), FontId::proportional(size), color);
+        }
+        for size in MONOSPACE {
+            fonts.layout_no_wrap(GLYPHS.to_owned(), FontId::monospace(size), color);
+        }
+    });
 }
 
 impl eframe::App for FerxApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        warm_popup_glyphs(ctx);
         // Collect incoming screenshot (requested last frame for tree export).
         if self.state.ui.tree_export_awaiting {
             let canvas_rect = self.state.ui.tree_canvas_rect;
@@ -335,10 +368,16 @@ impl eframe::App for FerxApp {
         render_status_bar(ctx, &self.state);
         render_sidebar(ctx, &mut self.state);
         render_body(ctx, &mut self.state);
-        render_run_popup(ctx, &mut self.state);
-        render_sir_popup(ctx, &mut self.state);
-        render_about_popup(ctx, &mut self.state);
-        render_settings_popup(ctx, &mut self.state);
+        // Popups are separate OS windows whose passes run nested inside this one.
+        // Hold them back for the first frame so `warm_popup_glyphs` has been
+        // uploaded by this window's own pass before any popup can exist.
+        if self.frames > 0 {
+            render_run_popup(ctx, &mut self.state);
+            render_sir_popup(ctx, &mut self.state);
+            render_about_popup(ctx, &mut self.state);
+            render_settings_popup(ctx, &mut self.state);
+        }
+        self.frames = self.frames.saturating_add(1);
 
         // Request repaint while a run is active to keep log streaming live.
         if !self.state.run.active_runs.is_empty() {
@@ -1043,6 +1082,46 @@ fn display_run(state: &AppState) -> Option<&crate::domain::ActiveRun> {
     state.run.active_runs.values().max_by_key(|r| r.started_at)
 }
 
+/// Number of most-recent log lines the Run popup lays out.
+const RUN_POPUP_TAIL_LINES: usize = 400;
+
+/// Returns the last `max_lines` lines of `text` and how many earlier lines were cut.
+fn log_tail(text: &str, max_lines: usize) -> (&str, usize) {
+    let total = text.bytes().filter(|&b| b == b'\n').count() + 1;
+    if total <= max_lines {
+        return (text, 0);
+    }
+    let mut cut = text.len();
+    let mut seen = 0usize;
+    for (i, b) in text.bytes().enumerate().rev() {
+        if b == b'\n' {
+            seen += 1;
+            if seen == max_lines {
+                cut = i + 1;
+                break;
+            }
+        }
+    }
+    (&text[cut..], total - max_lines)
+}
+
+#[cfg(test)]
+mod log_tail_tests {
+    use super::log_tail;
+
+    #[test]
+    fn short_text_is_untouched() {
+        assert_eq!(log_tail("a\nb\nc", 5), ("a\nb\nc", 0));
+    }
+
+    #[test]
+    fn long_text_keeps_the_last_lines() {
+        let (t, hidden) = log_tail("1\n2\n3\n4\n5", 2);
+        assert_eq!(t, "4\n5");
+        assert_eq!(hidden, 3);
+    }
+}
+
 fn render_run_popup(ctx: &egui::Context, state: &mut AppState) {
     use crate::workers::messages::CancelMode;
 
@@ -1224,9 +1303,20 @@ fn render_run_popup(ctx: &egui::Context, state: &mut AppState) {
                             ui.add_space(8.0);
                             ui.label(egui::RichText::new("Run output will appear here").color(hint).size(12.0));
                         } else {
+                            // Lay out only the tail: one galley over the whole 5,000-line
+                            // buffer is ~500k glyphs re-tessellated every frame, which is
+                            // what made the popup's text turn to garbage late in long runs.
+                            let (tail, hidden) = log_tail(&log_text, RUN_POPUP_TAIL_LINES);
+                            if hidden > 0 {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "… {hidden} earlier lines not shown (full output in the log file)"))
+                                        .color(dim_fg).size(10.0),
+                                );
+                            }
                             ui.add(
                                 egui::Label::new(
-                                    egui::RichText::new(&log_text)
+                                    egui::RichText::new(tail)
                                         .font(egui::FontId::monospace(11.0))
                                         .color(log_fg),
                                 ).wrap(),
@@ -1829,4 +1919,37 @@ fn trigger_r_inspect(state: &mut AppState, ctx: &egui::Context) {
         }
         ctx.request_repaint();
     });
+}
+
+#[cfg(test)]
+mod warm_popup_glyph_tests {
+    use super::warm_popup_glyphs;
+
+    fn lit_pixels(ctx: &egui::Context) -> usize {
+        ctx.fonts(|f| f.image().pixels.iter().filter(|&&p| p > 0.0).count())
+    }
+
+    /// The warm-up must put glyphs for the popup-only font sizes into the atlas
+    /// during a pass of its own, so they are never first rasterised in a nested one.
+    #[test]
+    fn warming_rasterises_popup_only_sizes() {
+        let plain = egui::Context::default();
+        let _ = plain.run(Default::default(), |_| {});
+        let baseline = lit_pixels(&plain);
+
+        let warmed = egui::Context::default();
+        let _ = warmed.run(Default::default(), warm_popup_glyphs);
+        let after = lit_pixels(&warmed);
+
+        assert!(after > baseline + 2_000, "baseline {baseline}, warmed {after}");
+    }
+
+    #[test]
+    fn warming_again_is_a_cache_hit_and_adds_nothing() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(Default::default(), warm_popup_glyphs);
+        let first = lit_pixels(&ctx);
+        let _ = ctx.run(Default::default(), warm_popup_glyphs);
+        assert_eq!(first, lit_pixels(&ctx));
+    }
 }
