@@ -275,6 +275,16 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.9.18 (2026-10-07) — fixed scrambled text in the Run popup
+
+**Fixed: Run popup text turning into scrambled glyph fragments**
+- Reported after a long run: the popup's status, log path and log body rendered as garbage while buttons and the "Running" label stayed fine. The pattern was exact: egui only pre-rasterises printable ASCII at the five `TextStyle` font sizes, so the popup's monospace 10/11 pt and 10 pt text was first rasterised inside the popup's own pass, which runs nested inside the main window's pass. Glyphs added there were not reliably reaching the GPU font texture on eframe 0.31 (glow), the same failure class as egui PR #8250 (fixed upstream in 0.35).
+- The main window now rasterises every glyph the popups use, at every size they use, from its own pass (`warm_popup_glyphs`: printable ASCII plus `° · × — … → ↓ ⚠ ✔ ✖`), and popups wait one frame at startup so that upload has happened first. The popups remain separate OS windows. The warm-up is a cache lookup after the first call and re-runs automatically when egui rebuilds its fonts.
+- Not verified on a real display (the failure needs a GPU); the root cause inside eframe is inferred, not proven. A full fix would be upgrading to egui/eframe 0.36 (a larger migration) — characters outside the warmed set can still be rasterised inside a popup.
+
+**Changed: the Run popup shows the last 400 log lines**
+- It laid out the whole 5,000-line buffer as one label every frame. Older lines are summarised ("… N earlier lines not shown") and remain in the log file.
+
 ### v0.9.17 (2026-10-04) — ferx 0.4.0 compatibility: block-omega SEs corrected, validate before run, priors / MAP support
 
 Written against ferx-r 0.4.0. Nothing in the R calls ferxgui makes broke, but 0.4.0 changes several results and exposed display bugs; each item below was checked against bundles fitted with 0.4.0 via `Rscript`. The minimum supported ferx stays 0.3.0; 0.4.0 is recommended.
