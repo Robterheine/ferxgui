@@ -275,6 +275,16 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.9.19 (2026-10-07) — `.fitrx` bundles always land beside the model file
+
+**Changed: the bundle path is absolute and derived from the model path**
+- A run's `.fitrx` has always been written to `<model folder>/<stem>.fitrx` (verified via `Rscript` with the app's own run script: only that file is created, and it is the file the scanner pairs with the model). The path handed to R is now built once from the model's absolute path (`bundle_path_for`), so it can no longer depend on the app's working directory if a model path is ever relative.
+
+**Added: a run that exits cleanly but leaves no bundle is reported**
+- If R finishes successfully and `<stem>.fitrx` does not exist in the model's folder, the status bar says so ("Run finished but no <stem>.fitrx was written in …") instead of "Run completed".
+
+Re-running a model still overwrites that model's existing `.fitrx`.
+
 ### v0.9.18 (2026-10-07) — fixed scrambled text in the Run popup
 
 **Fixed: Run popup text turning into scrambled glyph fragments**
