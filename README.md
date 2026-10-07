@@ -275,6 +275,12 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.9.21 (2026-10-07) — fixed the ETA-covariate scan failing on pairs with no computable correlation
+
+**Fixed: "ETA-covariate scan failed — invalid type: map, expected f64"**
+- Reported on a real model. When a pair has no computable correlation (a constant or all-missing column, e.g. against `ofv_contribution`), the R script returned `NULL` for `r` / `p_val`. jsonlite writes a `NULL` inside a list as `{}` (an object), which the Rust parser rejected, failing the whole scan — not just that row. The scripts now send `NA_real_` (a real `null`), and the Rust side reads a number, `null` or `{}` as "not computable" (NaN).
+- The same pattern was in the **Declared Covariates** screen (`ebe` / `eta`), which also could not read a plain `null`, and in **Check inits** (`ofv_*`). All three are fixed. Verified via `Rscript` on real fits (`"ebe":null` where it previously broke) and with tests of the exact failing shapes.
+
 ### v0.9.20 (2026-10-07) — Evaluation GOF: filter and colour by any variable; back-transform DV
 
 **Added: filter the GOF plots by any variable**
