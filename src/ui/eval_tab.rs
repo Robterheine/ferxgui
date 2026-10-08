@@ -108,72 +108,10 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
             }
         }
 
-        // Back-transform for models fitted to log-transformed data.
-        if matches!(state.ui.active_eval_section, EvalSection::Gof | EvalSection::IndividualFits) {
+        // Individual Fits: back-transform control sits in the tab row (GOF has its own options row).
+        if state.ui.active_eval_section == EvalSection::IndividualFits {
             ui.add_space(12.0);
-            ui.label(egui::RichText::new("DV scale:").color(theme::fg2(dark)).size(11.0));
-            egui::ComboBox::from_id_salt("eval_y_transform")
-                .selected_text(state.ui.eval_y_transform.label())
-                .width(84.0)
-                .show_ui(ui, |ui| {
-                    for t in crate::domain::YTransform::ALL {
-                        ui.selectable_value(&mut state.ui.eval_y_transform, t, t.label());
-                    }
-                })
-                .response
-                .on_hover_text(
-                    "Back-transform DV, PRED and IPRED for a model fitted to log-transformed data \
-                     (exp for ln, 10^x for log10). CWRES and IWRES are unchanged.");
-        }
-
-        if state.ui.active_eval_section == EvalSection::Gof {
-            // Log-scale toggle.
-            ui.add_space(12.0);
-            ui.checkbox(&mut state.ui.eval_log_scale, "Log scale");
-
-            // Independent CWRES x-axis pickers. Options are the fixed
-            // prediction-level columns plus whatever covariates the model
-            // itself declares (from covtab.csv — absent for models with no
-            // `[covariates]` block).
-            let dim = theme::fg2(dark);
-            let cov_names: &[String] = state.ui.eval_covtab.as_ref()
-                .map(|c| c.covariate_names.as_slice())
-                .unwrap_or(&[]);
-            let x_opts: Vec<&str> = ["TIME", "PRED", "IPRED", "TAD"].into_iter()
-                .chain(cov_names.iter().map(String::as_str))
-                .collect();
-            ui.add_space(10.0);
-            ui.label(egui::RichText::new("CWRES₁ x:").color(dim).size(11.0));
-            egui::ComboBox::from_id_salt("cwres_x1_combo")
-                .selected_text(&state.ui.eval_cwres_x_col)
-                .width(70.0)
-                .show_ui(ui, |ui| {
-                    for opt in &x_opts {
-                        ui.selectable_value(&mut state.ui.eval_cwres_x_col, opt.to_string(), *opt);
-                    }
-                });
-            ui.add_space(6.0);
-            ui.label(egui::RichText::new("CWRES₂ x:").color(dim).size(11.0));
-            egui::ComboBox::from_id_salt("cwres_x2_combo")
-                .selected_text(&state.ui.eval_cwres_x_col_2)
-                .width(70.0)
-                .show_ui(ui, |ui| {
-                    for opt in &x_opts {
-                        ui.selectable_value(&mut state.ui.eval_cwres_x_col_2, opt.to_string(), *opt);
-                    }
-                });
-
-            // Export button (right-aligned).
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add_enabled(
-                    !state.ui.eval_exporting,
-                    egui::Button::new(egui::RichText::new("⬇ Export figure…").size(11.0))
-                        .fill(theme::card_fill(dark))
-                        .min_size(egui::vec2(0.0, 22.0)),
-                ).clicked() {
-                    state.ui.eval_export_dialog = true;
-                }
-            });
+            dv_scale_combo(ui, state, dark);
         }
 
         // Subjects per page selector (Individual Fits only).
@@ -205,6 +143,12 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         }
     });
     ui.separator();
+
+    // GOF plot options get their own row (wraps on narrow windows) so nothing is clipped.
+    if state.ui.active_eval_section == EvalSection::Gof {
+        ui.horizontal_wrapped(|ui| show_gof_options(ui, state, dark));
+        ui.add_space(2.0);
+    }
 
     // ── Lazy-load predictions + ebes ─────────────────────────────────────
     // Staleness must be checked on every model switch — even to a model
@@ -259,6 +203,72 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         EvalSection::ParamCorr      => show_param_corr(ui, state, model_idx, dark),
         EvalSection::CondDist       => show_cond_dist(ui, state, model_idx, dark),
         EvalSection::Npde           => show_npde(ui, state, model_idx, dark),
+    }
+}
+
+/// "DV scale" back-transform drop-down (GOF options row and Individual Fits tab row).
+fn dv_scale_combo(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
+    ui.label(egui::RichText::new("DV scale:").color(theme::fg2(dark)).size(11.0));
+    egui::ComboBox::from_id_salt("eval_y_transform")
+        .selected_text(state.ui.eval_y_transform.label())
+        .width(84.0)
+        .show_ui(ui, |ui| {
+            for t in crate::domain::YTransform::ALL {
+                ui.selectable_value(&mut state.ui.eval_y_transform, t, t.label());
+            }
+        })
+        .response
+        .on_hover_text(
+            "Back-transform DV, PRED and IPRED for a model fitted to log-transformed data \
+             (exp for ln, 10^x for log10). CWRES and IWRES are unchanged.");
+}
+
+/// GOF plot options: DV scale, log axes, the two CWRES x-axes and the figure export.
+fn show_gof_options(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
+    let dim = theme::fg2(dark);
+    dv_scale_combo(ui, state, dark);
+
+    ui.add_space(10.0);
+    ui.checkbox(&mut state.ui.eval_log_scale, "Log scale");
+
+    // Independent CWRES x-axis pickers. Options are the fixed prediction-level
+    // columns plus whatever covariates the model itself declares (from
+    // covtab.csv, absent for models with no `[covariates]` block).
+    let cov_names: Vec<String> = state.ui.eval_covtab.as_ref()
+        .map(|c| c.covariate_names.clone())
+        .unwrap_or_default();
+    let x_opts: Vec<&str> = ["TIME", "PRED", "IPRED", "TAD"].into_iter()
+        .chain(cov_names.iter().map(String::as_str))
+        .collect();
+    ui.add_space(10.0);
+    ui.label(egui::RichText::new("CWRES₁ x:").color(dim).size(11.0));
+    egui::ComboBox::from_id_salt("cwres_x1_combo")
+        .selected_text(&state.ui.eval_cwres_x_col)
+        .width(70.0)
+        .show_ui(ui, |ui| {
+            for opt in &x_opts {
+                ui.selectable_value(&mut state.ui.eval_cwres_x_col, opt.to_string(), *opt);
+            }
+        });
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new("CWRES₂ x:").color(dim).size(11.0));
+    egui::ComboBox::from_id_salt("cwres_x2_combo")
+        .selected_text(&state.ui.eval_cwres_x_col_2)
+        .width(70.0)
+        .show_ui(ui, |ui| {
+            for opt in &x_opts {
+                ui.selectable_value(&mut state.ui.eval_cwres_x_col_2, opt.to_string(), *opt);
+            }
+        });
+
+    ui.add_space(14.0);
+    if ui.add_enabled(
+        !state.ui.eval_exporting,
+        egui::Button::new(egui::RichText::new("⬇ Export figure…").size(11.0))
+            .fill(theme::card_fill(dark))
+            .min_size(egui::vec2(0.0, 22.0)),
+    ).clicked() {
+        state.ui.eval_export_dialog = true;
     }
 }
 
@@ -2504,4 +2514,41 @@ fn no_predictions(ui: &mut egui::Ui, dark: bool) {
                 .color(dim).size(12.0));
         });
     });
+}
+
+#[cfg(test)]
+mod gof_options_layout_tests {
+    use super::show_gof_options;
+    use crate::state::AppState;
+    use egui_kittest::kittest::Queryable;
+    use egui_kittest::Harness;
+
+    /// Every control on the GOF options row must fit inside the window width, wrapping to
+    /// another line when it is narrow, instead of being clipped or overlapped.
+    fn export_button_right_edge(width: f32) -> (f32, f32) {
+        let mut st = AppState::new();
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(width, 120.0))
+            .build_ui(move |ui| {
+                ui.horizontal_wrapped(|ui| show_gof_options(ui, &mut st, true));
+            });
+        h.run();
+        let export = h.get_by_label_contains("Export figure").raw_bounds().expect("bounds");
+        let dv = h.get_by_label_contains("DV scale").raw_bounds().expect("bounds");
+        assert!(export.x0 >= 0.0);
+        (export.x1 as f32, (export.y0 - dv.y0) as f32)
+    }
+
+    #[test]
+    fn export_button_stays_inside_a_normal_window() {
+        let (right, _) = export_button_right_edge(1000.0);
+        assert!(right <= 1000.0, "export button ends at {right}");
+    }
+
+    #[test]
+    fn export_button_wraps_instead_of_overflowing_a_narrow_window() {
+        let (right, drop) = export_button_right_edge(520.0);
+        assert!(right <= 520.0, "export button ends at {right}");
+        assert!(drop > 0.0, "it should have wrapped onto a lower line");
+    }
 }
