@@ -275,6 +275,16 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.9.25 (2026-10-08) — Files tab: .fitrx bundle inspector; fixed shrinkage shown 100x too small
+
+**Added: click a `.fitrx` in the Files tab to inspect it** (it used to show "No preview")
+- **Overview:** provenance (ferx and bundle-format version, creation time, model name, model and dataset paths with their SHA-256 prefixes), reproducibility checks (the bundled `model.ferx` against the file on disk; a **Verify data file** button that hashes the dataset and compares it with the hash recorded at fit time), the run (method chain, converged, iterations, wall time, threads, inner/outer gradient method), fit statistics (OFV, AIC, BIC, n_obs, n_subjects, parameter breakdown), covariance (status, condition number, eigenvalue range, max |correlation|), diagnostics (Durbin-Watson, IWRES lag-1, shrinkage, EBE problems, stalled-at-init, estimate near boundary), data (columns, covariates, record and exclusion counts) and the warnings.
+- **Parameters:** THETA (init, estimate, SE, RSE %, fixed), OMEGA (variance, SD, SE, shrinkage, off-diagonal pairs with correlation and SE), KAPPA, SIGMA with `block_sigma` correlations, and priors. **Model:** the bundled source, highlighted, with Copy. **Contents:** every archive entry with size, compressed size and description; click one to preview it (CSVs as a table with the row count, JSON pretty-printed) or **Save entry as…**. **fit.json:** the whole file as a collapsible tree with a key filter and Copy.
+- A file that is not a readable zip shows the reason instead of a blank pane. Adds a small `sha2` dependency. Verified on a real 0.4.0 bundle (both recorded hashes match the files) and with headless render tests of every section.
+
+**Fixed (affects displayed numbers): shrinkage shown 100 times too small**
+- ferx writes ETA, EPS and kappa shrinkage as a fraction (0.316 = 31.6%) in every version through 0.4.0 — checked on 0.2.0, 0.3.0 and 0.4.0 bundles, where the values match the percentages in the bundles' own warnings. ferxgui displayed those numbers as if they were already percentages, so a 32% shrinkage appeared as "0.3%" in grey instead of orange/red. This affected the model list, the Parameters pill, the report and the tree. The values are now converted to percent when the bundle is read.
+
 ### v0.9.24 (2026-10-08) — fixed the Export figure button overlapping the GOF toolbar
 
 **Fixed: "Export figure" sitting on top of the CWRES₂ picker**
