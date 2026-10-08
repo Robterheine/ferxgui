@@ -275,6 +275,12 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.9.24 (2026-10-08) — fixed the Export figure button overlapping the GOF toolbar
+
+**Fixed: "Export figure" sitting on top of the CWRES₂ picker**
+- Reported with a screenshot. The tab row also held DV scale, Log scale and both CWRES x-axis pickers, and v0.9.20's DV scale control pushed it past the window width: the CWRES₂ picker was clipped and the right-aligned Export button overlapped it.
+- The GOF plot options (DV scale, Log scale, CWRES₁ x, CWRES₂ x, Export figure) now have their own row under the tabs, which wraps onto a second line on a narrow window instead of clipping. The filter / colour row follows. Individual Fits keeps DV scale in its tab row. Covered by headless layout tests at 1000 px and 520 px.
+
 ### v0.9.23 (2026-10-07) — self-healing safeguard for scrambled text
 
 **Fixed (safeguard): all text turning into squashed, scrambled glyphs after a while**
