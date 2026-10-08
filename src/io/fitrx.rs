@@ -813,7 +813,10 @@ fn wire_to_summary(w: FitWire, mut warnings: Vec<String>) -> FitSummary {
     let se_theta        = json_val_to_f64_vec(&w.theta.se);
     let omega_names     = json_val_to_str_vec(&w.omega.names);
     let se_omega        = json_val_to_f64_vec(&w.omega.se);
-    let eta_shrinkage   = json_val_to_f64_vec(&w.omega.shrinkage);
+    // ferx writes shrinkage as a fraction (0.316 = 31.6%), in every version through 0.4.0;
+    // FitSummary and every display work in percent.
+    let to_pct = |v: Vec<f64>| -> Vec<f64> { v.into_iter().map(|x| x * 100.0).collect() };
+    let eta_shrinkage   = to_pct(json_val_to_f64_vec(&w.omega.shrinkage));
 
     // Merge warnings from fit.json (itself scalar-or-array, same collapse
     // risk) and warnings.txt (deduplicate).
@@ -837,7 +840,7 @@ fn wire_to_summary(w: FitWire, mut warnings: Vec<String>) -> FitSummary {
     let se_sigma    = json_val_to_f64_vec(w.sigma.get("se").unwrap_or(&serde_json::Value::Null));
 
     // Eps shrinkage: scalar when there is one sigma component.
-    let eps_shrinkage = json_val_to_f64_vec(&w.shrinkage_eps);
+    let eps_shrinkage = to_pct(json_val_to_f64_vec(&w.shrinkage_eps));
 
     // Fitted block_sigma correlations (sigma.residual_correlations + .se_ + _fixed).
     let residual_correlations = parse_residual_correlations(&w.sigma);
@@ -851,7 +854,7 @@ fn wire_to_summary(w: FitWire, mut warnings: Vec<String>) -> FitSummary {
              json_val_to_str_vec(&iov.kappa_names),
              n,
              json_val_to_f64_vec(&iov.se_kappa),
-             json_val_to_f64_vec(&iov.shrinkage_kappa))
+             to_pct(json_val_to_f64_vec(&iov.shrinkage_kappa)))
         } else {
             (vec![], vec![], 0, vec![], vec![])
         };
@@ -1129,9 +1132,9 @@ mod tests {
             "ofv": -280.36,
             "theta": {"estimates": 0.134, "names": "TVCL", "se": 0.0012, "fixed": false},
             "omega": {"matrix": {"data": [0.07], "cols": 1}, "names": "ETA_CL",
-                      "se": 0.02, "shrinkage": 12.5},
+                      "se": 0.02, "shrinkage": 0.125},
             "sigma": {"estimates": 0.05, "names": "PROP", "se": 0.004},
-            "iov": {"kappa_names": "OCC1", "se_kappa": 0.01, "shrinkage_kappa": 5.0,
+            "iov": {"kappa_names": "OCC1", "se_kappa": 0.01, "shrinkage_kappa": 0.05,
                     "omega_iov": {"rows": 1, "cols": 1, "data": [0.02]}},
             "warnings": "Negative IWRES autocorrelation detected.",
             "covariance_status": "computed"
@@ -1383,5 +1386,18 @@ mod tests {
         assert!(s.cov_corr_flat[fixed * 13 + fixed].is_nan());
         assert!((s.cov_corr_flat[0] - 1.0).abs() < 1e-9);
         assert!(s.cov_corr_flat.iter().filter(|v| v.is_finite()).count() > 100);
+    }
+
+    #[test]
+    fn shrinkage_is_converted_from_ferx_fractions_to_percent() {
+        // Values from a real 0.4.0 bundle: ETA_EMAX 0.3156 is the "32%" in its own warning.
+        const J: &str = r#"{"omega":{"names":["A","B"],"matrix":{"rows":2,"cols":2,"data":[0.1,0,0,0.1]},
+            "shrinkage":[0.201,0.3156]},"shrinkage_eps":0.1117,
+            "iov":{"kappa_names":"K","shrinkage_kappa":0.374,"omega_iov":{"rows":1,"cols":1,"data":[0.02]}}}"#;
+        let s = wire_to_summary(serde_json::from_str(J).unwrap(), vec![]);
+        assert!((s.eta_shrinkage[1] - 31.56).abs() < 1e-9);
+        assert!((s.eta_shrinkage[0] - 20.1).abs() < 1e-9);
+        assert!((s.eps_shrinkage[0] - 11.17).abs() < 1e-9);
+        assert!((s.kappa_shrinkage[0] - 37.4).abs() < 1e-9);
     }
 }

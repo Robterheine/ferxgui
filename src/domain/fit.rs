@@ -50,7 +50,7 @@ pub struct FitSummary {
     /// Standard errors for the diagonal kappa entries.
     #[serde(default)]
     pub se_kappa: Vec<f64>,
-    /// Shrinkage % per kappa.
+    /// Shrinkage per kappa, in percent (ferx writes a fraction; scaled when read).
     #[serde(default)]
     pub kappa_shrinkage: Vec<f64>,
 

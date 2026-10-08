@@ -35,7 +35,7 @@ const PILLS: &[&str] = &["ferx", "fitrx", "csv", "r", "log", "json", "txt"];
 
 /// Extensions treated as binary — shown as "no preview" placeholder.
 const BINARY_EXTS: &[&str] = &[
-    "fitrx", "png", "jpg", "jpeg", "gif", "bmp", "tiff", "tif", "ico",
+    "png", "jpg", "jpeg", "gif", "bmp", "tiff", "tif", "ico",
     "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
     "zip", "tar", "gz", "bz2", "xz", "7z", "rar",
     "so", "dylib", "dll", "exe", "mp3", "mp4", "wav", "avi", "mov",
@@ -303,6 +303,7 @@ fn show_preview(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
             FilesViewMode::Text   => show_text_view(ui, state, dark),
             FilesViewMode::Table  => show_table_view(ui, state, dark),
             FilesViewMode::Plot   => show_plot_view(ui, state, dark),
+            FilesViewMode::Bundle => super::bundle_view::show(ui, state, dark),
         }
     });
 }
@@ -813,6 +814,18 @@ fn load_file(state: &mut AppState, path: PathBuf) {
     state.ui.files_selected      = Some(path.clone());
 
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+
+    state.ui.files_bundle = None;
+    state.ui.files_bundle_error = None;
+    if ext == "fitrx" {
+        // A fitted bundle is a zip: show the inspector instead of a "no preview" placeholder.
+        match crate::io::bundle::inspect(&path) {
+            Ok(info) => state.ui.files_bundle = Some(super::bundle_view::BundleViewState::new(info)),
+            Err(e) => state.ui.files_bundle_error = Some(e),
+        }
+        state.ui.files_view_mode = FilesViewMode::Bundle;
+        return;
+    }
 
     if BINARY_EXTS.contains(&ext.as_str()) {
         state.ui.files_view_mode = FilesViewMode::Binary;

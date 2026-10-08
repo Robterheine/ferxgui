@@ -26,6 +26,9 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # CSV
 csv = "1.3"
 
+# SHA-256 (verify the data / model hashes recorded in a .fitrx)
+sha2 = "0.10"
+
 # Parallel computation (LOESS, quantile ribbons)
 rayon = "1.10"
 

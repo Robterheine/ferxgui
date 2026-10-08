@@ -126,6 +126,8 @@ pub enum FilesViewMode {
     Table,
     Plot,
     Binary,
+    /// A `.fitrx` bundle inspector.
+    Bundle,
 }
 
 /// Sub-sections in the Evaluation tab (outer segmented control).
@@ -681,6 +683,10 @@ pub struct UiState {
     pub files_pending_nav:    Option<PathBuf>,
     /// Which preview pane is visible.
     pub files_view_mode:      FilesViewMode,
+    /// The `.fitrx` bundle open in the inspector (Bundle view mode).
+    pub files_bundle:         Option<crate::ui::bundle_view::BundleViewState>,
+    /// Why the selected bundle could not be opened.
+    pub files_bundle_error:   Option<String>,
     // Text view
     pub files_text:           String,
     pub files_text_dirty:     bool,
@@ -841,6 +847,8 @@ impl Default for UiState {
             files_selected:       None,
             files_pending_nav:    None,
             files_view_mode:      FilesViewMode::Empty,
+            files_bundle:         None,
+            files_bundle_error:   None,
             files_text:           String::new(),
             files_text_dirty:     false,
             files_text_is_ferx:   false,
