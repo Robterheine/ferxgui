@@ -320,8 +320,13 @@ fn show_diagnostics_section(ui: &mut egui::Ui, fit: &FitSummary, dark: bool) {
                 shrinkage_row(ui, &name, "EPS", s, dark);
             }
         });
+        ui.label(egui::RichText::new(SHRINK_NOTE).color(theme::fg3(dark)).size(9.5).italics());
     }
 }
+
+/// Where the colour thresholds come from; shown beside every shrinkage table.
+const SHRINK_NOTE: &str = "Colours: green below 20 %, amber 20–40 %, red above. EBE-based diagnostics \
+    become unreliable beyond roughly 30 % shrinkage (Savić & Karlsson, AAPS J 2009).";
 
 fn show_param_corr_section(ui: &mut egui::Ui, fit: &FitSummary, dark: bool) {
     section_header(ui, "Parameter Correlations", dark);
@@ -715,6 +720,7 @@ fn generate_html(
             b.push_str(&html_shrinkage_row(&name, "EPS", fit.eps_shrinkage[i]));
         }
         b.push_str("</table>\n");
+        b.push_str(&format!("<p class=\"note\">{SHRINK_NOTE}</p>\n"));
     }
     b.push_str("</section>\n");
 

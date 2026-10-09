@@ -98,6 +98,10 @@ fn show_top_bar(ui: &mut egui::Ui, state: &mut AppState) {
                 if ui.small_button("Rescan").clicked() {
                     state.trigger_scan();
                 }
+                ui.checkbox(&mut state.ui.lrt_nested, "Reference is nested")
+                    .on_hover_text("Declare the reference model a nested simpler version of the compared \
+                                    models. Only then is ΔOFV coloured by a likelihood-ratio test (df = \
+                                    parameter difference, same data required).");
                 ui.add(
                     egui::Label::new(
                         egui::RichText::new(&path_str).color(label_fg).size(11.0),
@@ -325,6 +329,8 @@ struct ModelRow {
     run_status: RunStatus,
     ofv: f64,
     delta_ofv: f64,
+    /// Hover text and LRT verdict against the reference model (None without a reference).
+    comparison: Option<crate::domain::Comparison>,
     cov_ok: Option<bool>,
     aic: f64,
     cn: f64,
@@ -342,6 +348,8 @@ struct ModelRow {
 
 fn build_rows(state: &AppState) -> Vec<ModelRow> {
     let ref_ofv = state.reference_ofv();
+    let ref_fit = state.ui.reference_model
+        .and_then(|i| state.workspace.models.get(i)).and_then(|m| m.fit.as_ref());
     let filter = state.ui.model_filter.to_lowercase();
     state
         .workspace
@@ -370,6 +378,11 @@ fn build_rows(state: &AppState) -> Vec<ModelRow> {
                 run_status: e.run_status(),
                 ofv: fit.map(|f| f.ofv).unwrap_or(f64::NAN),
                 delta_ofv: e.delta_ofv(ref_ofv),
+                comparison: match (fit, ref_fit) {
+                    (Some(f), Some(r)) if state.ui.reference_model != Some(idx) =>
+                        Some(crate::domain::Comparison::new(f, r)),
+                    _ => None,
+                },
                 cov_ok: fit.map(|f| f.covariance_ok),
                 aic: fit.map(|f| f.aic).unwrap_or(f64::NAN),
                 cn: fit.map(|f| f.cov_condition_number).unwrap_or(f64::NAN),
@@ -703,16 +716,17 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
                         // ΔOFV
                         interactive_col(&mut tr, &mut row_resp, &mut row_left_clicked, |ui| {
                             let txt = fmt_f64_2dp(row.delta_ofv);
-                            let color = if row.delta_ofv.is_nan() {
-                                theme::fg3(dark)
-                            } else if row.delta_ofv <= -3.84 {
-                                theme::GREEN
-                            } else if row.delta_ofv > 0.0 {
-                                theme::RED
-                            } else {
-                                theme::fg(dark)
+                            // Uncoloured unless the user declared nesting: a colour implies a
+                            // significance test that only holds for nested models on the same data.
+                            let nested = state.ui.lrt_nested;
+                            let color = match row.comparison.as_ref().map(|c| c.verdict(nested)) {
+                                _ if row.delta_ofv.is_nan() => theme::fg3(dark),
+                                Some(crate::domain::Verdict::Better { .. }) => theme::GREEN,
+                                Some(crate::domain::Verdict::NotBetter { .. }) if row.delta_ofv > 0.0 => theme::RED,
+                                _ => theme::fg(dark),
                             };
-                            ui.label(egui::RichText::new(txt).color(color).size(12.0));
+                            let resp = ui.label(egui::RichText::new(txt).color(color).size(12.0));
+                            if let Some(c) = &row.comparison { resp.on_hover_text(c.tooltip(nested)); }
                         });
 
                         // COV

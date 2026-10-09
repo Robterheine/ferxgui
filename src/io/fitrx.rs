@@ -235,7 +235,15 @@ pub fn read_fit_summary(path: &Path) -> Result<FitSummary, FitrxError> {
     let mut zip = zip::ZipArchive::new(file)?;
     let wire = read_fit_json(&mut zip)?;
     let warnings = read_warnings(&mut zip).unwrap_or_default();
-    Ok(wire_to_summary(wire, warnings))
+    let mut summary = wire_to_summary(wire, warnings);
+    // ETAbar is not in fit.json; compute it from the EBEs (mean and t-test p per ETA).
+    if let Ok(Some(ebes)) = read_ebes(path) {
+        for b in ebes.eta_bar() {
+            summary.etabar.push(b.as_ref().map(|b| b.mean).unwrap_or(f64::NAN));
+            summary.etabar_pvalue.push(b.as_ref().map(|b| b.p).unwrap_or(f64::NAN));
+        }
+    }
+    Ok(summary)
 }
 
 /// Reads the raw model source stored inside the bundle.
@@ -954,7 +962,7 @@ fn wire_to_summary(w: FitWire, mut warnings: Vec<String>) -> FitSummary {
         covariance_ok: w.covariance_status == "computed",
         eta_shrinkage,
         eps_shrinkage,
-        etabar:        vec![], // not in fit.json
+        etabar:        vec![], // filled from ebes.csv by read_fit_summary
         etabar_pvalue: vec![],
         near_boundary:   w.r_extras.get("estimate_near_boundary").and_then(|v| v.as_bool()),
         stalled_at_init: w.r_extras.get("stalled_at_init").and_then(|v| v.as_bool()),

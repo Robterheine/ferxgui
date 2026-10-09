@@ -405,6 +405,8 @@ pub struct UiState {
     pub editor_dirty: bool,
     /// Which model stem is currently loaded in the editor (used to detect selection change).
     pub editor_loaded_stem: Option<String>,
+    /// The reference model is declared nested in the compared models (enables the LRT verdict).
+    pub lrt_nested: bool,
     /// Model the user tried to switch to while the editor had unsaved edits (prompt pending).
     pub editor_switch_target: Option<String>,
     /// The model file changed on disk since it was loaded; a second Save overwrites.
@@ -754,6 +756,7 @@ impl Default for UiState {
             quit_confirmed: false,
             editor_buffer: String::new(),
             editor_dirty: false,
+            lrt_nested: false,
             editor_switch_target: None,
             editor_overwrite_ok: false,
             last_draft_at: None,

@@ -279,11 +279,15 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                 let (cf, pf) = (state.workspace.models[mi].fit.as_ref(),
                                 state.workspace.models[pi].fit.as_ref());
                 if let (Some(cf), Some(pf)) = (cf, pf) {
-                    let delta = cf.ofv_cmp() - pf.ofv_cmp();
+                    let cmp = crate::domain::Comparison::new(cf, pf);
+                    let delta = cmp.delta_ofv;
                     let d_str = format!("{delta:+.1}");
-                    let d_col = if delta < -3.84 { theme::GREEN }
-                                else if delta > 0.5 { theme::ORANGE }
-                                else { theme::fg2(dark) };
+                    // Coloured only when the user declared nesting (see the Models tab toggle).
+                    let d_col = match cmp.verdict(state.ui.lrt_nested) {
+                        crate::domain::Verdict::Better { .. } => theme::GREEN,
+                        crate::domain::Verdict::NotBetter { .. } if delta > 0.5 => theme::ORANGE,
+                        _ => theme::fg2(dark),
+                    };
                     let mid = egui::pos2((p0.x + p3.x) * 0.5, (p0.y + p3.y) * 0.5);
                     let fsize = (9.0 * zoom).clamp(6.0, 14.0);
                     // Pill background.
@@ -542,9 +546,15 @@ fn show_info_panel(
                     .find(|m| &m.model.stem == parent_stem)
                 {
                     if let Some(pf) = &parent_entry.fit {
-                        let d   = f.ofv_cmp() - pf.ofv_cmp();
-                        let col = if d < -3.84 { theme::GREEN } else if d > 0.5 { theme::RED } else { dim };
+                        let cmp = crate::domain::Comparison::new(f, pf);
+                        let d   = cmp.delta_ofv;
+                        let col = match cmp.verdict(state.ui.lrt_nested) {
+                            crate::domain::Verdict::Better { .. } => theme::GREEN,
+                            crate::domain::Verdict::NotBetter { .. } if d > 0.5 => theme::RED,
+                            _ => dim,
+                        };
                         info_row(ui, "ΔOFV vs parent", &format!("{d:+.3}"), col, dark);
+                        info_row(ui, "ΔAIC / ΔBIC", &format!("{:+.2} / {:+.2}", cmp.delta_aic, cmp.delta_bic), dim, dark);
                     }
                 }
             }

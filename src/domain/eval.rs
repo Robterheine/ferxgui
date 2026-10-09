@@ -38,10 +38,22 @@ pub struct EbesData {
     pub rows:      Vec<EbesRow>,
     /// Total OFV (sum of contributions).
     pub total_ofv: f64,
-    #[allow(dead_code)] pub eta_names: Vec<String>,
+    pub eta_names: Vec<String>,
 }
 
+/// ETAbar test for one ETA: mean of the EBEs and a one-sample t test of mean = 0.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EtaBar { pub mean: f64, pub sd: f64, pub t: f64, pub df: f64, pub p: f64 }
+
 impl EbesData {
+    /// ETAbar per ETA column (None for an ETA with fewer than 2 finite values or no spread).
+    pub fn eta_bar(&self) -> Vec<Option<EtaBar>> {
+        (0..self.eta_names.len()).map(|k| {
+            let xs: Vec<f64> = self.rows.iter().filter_map(|r| r.etas.get(k).copied()).collect();
+            super::stats::one_sample_t(&xs).map(|(mean, sd, t, df, p)| EtaBar { mean, sd, t, df, p })
+        }).collect()
+    }
+
     /// Rows sorted by `ofv_contribution` descending (worst subject first).
     pub fn sorted_by_iofv(&self) -> Vec<&EbesRow> {
         let mut v: Vec<&EbesRow> = self.rows.iter().collect();
@@ -402,5 +414,25 @@ mod conddist_tests {
         ]);
         assert!(cd2.shrinkage_for_eta("ETA_CL", 0.0).is_nan()); // omega_jj not positive
         assert!(cd2.shrinkage_for_eta("ETA_CL", f64::NAN).is_nan());
+    }
+}
+
+#[cfg(test)]
+mod etabar_tests {
+    use super::*;
+
+    #[test]
+    fn etabar_matches_r_golden() {
+        // R: t.test(c(0.1,-0.2,0.05,0.3,-0.1,0.22))
+        let xs = [0.1, -0.2, 0.05, 0.3, -0.1, 0.22];
+        let d = EbesData {
+            rows: xs.iter().map(|&x| EbesRow { id: "1".into(), ofv_contribution: 0.0, n_obs: 1, etas: vec![x] }).collect(),
+            total_ofv: 0.0, eta_names: vec!["ETA_CL".into()],
+        };
+        let b = d.eta_bar()[0].clone().unwrap();
+        assert!((b.mean - 0.0616666666666667).abs() < 1e-12);
+        assert!((b.t - 0.800385962113374).abs() < 1e-10);
+        assert_eq!(b.df, 5.0);
+        assert!((b.p - 0.459809935465811).abs() < 1e-10);
     }
 }
