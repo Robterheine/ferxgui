@@ -25,6 +25,7 @@ pub fn read_dataset(path: &Path) -> Result<RawDataset, String> {
         return Err(format!("dataset is {} MB; the join is limited to {} MB",
             size / (1024 * 1024), MAX_DATASET_BYTES / (1024 * 1024)));
     }
+    check_delimiter(path)?;
     let mut rdr = csv::ReaderBuilder::new()
         .trim(csv::Trim::All)
         .flexible(true)
@@ -38,6 +39,21 @@ pub fn read_dataset(path: &Path) -> Result<RawDataset, String> {
         rows.push(rec.iter().map(str::to_string).collect());
     }
     Ok(RawDataset { headers, rows })
+}
+
+/// ferx reads comma-separated files only. A header with no comma but a tab or semicolon is
+/// named as such, instead of surfacing later as "no ID, TIME and DV columns".
+fn check_delimiter(path: &Path) -> Result<(), String> {
+    use std::io::Read;
+    let mut buf = vec![0u8; 8192];
+    let n = std::fs::File::open(path).and_then(|mut f| f.read(&mut buf)).map_err(|e| e.to_string())?;
+    let line = buf[..n].split(|&b| b == b'\n').next().unwrap_or(&[]);
+    if !line.contains(&b',') {
+        if let Some(&d) = line.iter().find(|&&b| b == b'\t' || b == b';') {
+            return Err(crate::io::textdoc::DocError::Delimiter { found: d as char }.to_string());
+        }
+    }
+    Ok(())
 }
 
 /// Finds the dataset file for a fit: a user-chosen path, the path recorded in the bundle
@@ -255,5 +271,14 @@ mod tests {
         let occ_ds = &cols.iter().find(|(h, _)| h == "OCC").unwrap().1;
         let occ_pred = &eval.extras.iter().find(|(h, _)| h == "OCC").unwrap().1;
         assert_eq!(occ_ds, occ_pred);
+    }
+
+    #[test]
+    fn tab_file_names_the_delimiter() {
+        let p = std::env::temp_dir().join(format!("ferxgui_tab_{}.csv", std::process::id()));
+        std::fs::write(&p, "ID\tTIME\tDV\n1\t0\t1\n").unwrap();
+        let e = read_dataset(&p).unwrap_err();
+        let _ = std::fs::remove_file(&p);
+        assert!(e.contains("tab"), "{e}");
     }
 }

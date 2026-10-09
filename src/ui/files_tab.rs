@@ -60,6 +60,7 @@ const CAT_COLORS: [egui::Color32; 8] = [
 
 pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     show_unsaved_nav_dialog(ui.ctx(), state);
+    show_save_conflict_dialog(ui.ctx(), state);
 
     // Bootstrap: sync cwd to working directory on first entry or when not set.
     if state.ui.files_cwd.is_none() {
@@ -304,6 +305,7 @@ fn show_preview(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
             FilesViewMode::Table  => show_table_view(ui, state, dark),
             FilesViewMode::Plot   => show_plot_view(ui, state, dark),
             FilesViewMode::Bundle => super::bundle_view::show(ui, state, dark),
+            FilesViewMode::Error  => show_doc_error(ui, state, dark),
         }
     });
 }
@@ -737,6 +739,59 @@ fn show_binary_placeholder(ui: &mut egui::Ui, state: &AppState, dark: bool) {
     });
 }
 
+fn show_doc_error(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
+    let Some(err) = state.ui.files_doc_error.clone() else { return };
+    ui.add_space(24.0);
+    ui.label(egui::RichText::new("This file is not opened for editing").strong().size(14.0).color(theme::ORANGE));
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new(err.to_string()).size(12.0).color(theme::fg2(dark)));
+    if matches!(err, crate::io::textdoc::DocError::NotUtf8 { .. }) {
+        ui.add_space(10.0);
+        if ui.button("Convert to UTF-8 (Windows-1252 assumed, backup kept)").clicked() {
+            if let Some(path) = state.ui.files_selected.clone() {
+                match crate::io::textdoc::convert_cp1252_file(&path) {
+                    Ok(bak) => {
+                        state.ui.status_message = format!("Converted; original kept as {}", bak.display());
+                        state.ui.files_selected = None; // force a reload
+                        load_file(state, path);
+                    }
+                    Err(e) => state.ui.status_message = format!("Convert failed: {e}"),
+                }
+            }
+        }
+    }
+}
+
+/// Shown when the file on disk changed after it was loaded.
+fn show_save_conflict_dialog(ctx: &egui::Context, state: &mut AppState) {
+    if !state.ui.files_save_conflict { return; }
+    let (mut overwrite, mut reload, mut cancel) = (false, false, false);
+    egui::Window::new("File changed on disk")
+        .collapsible(false).resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            ui.label("This file was changed outside FeRx after you opened it.");
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() { cancel = true; }
+                if ui.button("Reload (lose my edits)").clicked() { reload = true; }
+                if ui.button("Overwrite (backup kept)").clicked() { overwrite = true; }
+            });
+        });
+    if cancel { state.ui.files_save_conflict = false; }
+    if reload {
+        state.ui.files_save_conflict = false;
+        if let Some(p) = state.ui.files_selected.take() { load_file(state, p); }
+    }
+    if overwrite {
+        state.ui.files_save_conflict = false;
+        state.ui.files_text_disk_hash = None; // skip the check this once
+        if let Some(d) = state.ui.files_csv_doc.as_mut() { d.disk_hash.clear(); }
+        if state.ui.files_text_dirty { save_text_file(state); }
+        if state.ui.files_csv_dirty { save_csv_file(state); }
+    }
+}
+
 fn show_empty_hint(ui: &mut egui::Ui, dark: bool) {
     ui.centered_and_justified(|ui| {
         ui.label(egui::RichText::new("Select a file to preview it.")
@@ -833,7 +888,17 @@ fn load_file(state: &mut AppState, path: PathBuf) {
     }
 
     if TABLE_EXTS.contains(&ext.as_str()) {
-        if let Some((headers, rows)) = load_csv_data(&path) {
+        state.ui.files_csv_doc = None;
+        state.ui.files_doc_error = None;
+        match crate::io::textdoc::load_csv(&path) {
+            Err(e) => {
+                state.ui.files_doc_error = Some(e);
+                state.ui.files_view_mode = FilesViewMode::Error;
+                return;
+            }
+            Ok(doc) => {
+            let (headers, rows) = (doc.headers.clone(), doc.rows.clone());
+            state.ui.files_csv_doc = Some(doc);
             let x = headers.first().cloned().unwrap_or_default();
             let y = headers.get(1).cloned().unwrap_or_else(|| x.clone());
             state.ui.files_csv_headers    = headers;
@@ -843,12 +908,13 @@ fn load_file(state: &mut AppState, path: PathBuf) {
             state.ui.files_plot_color_col = String::new();
             state.ui.files_view_mode      = FilesViewMode::Table;
             return;
+            }
         }
-        // Fall through to text view if CSV parse fails.
     }
 
-    match std::fs::read_to_string(&path) {
+    match std::fs::read(&path).map_err(|_| ()).and_then(|b| String::from_utf8(b).map_err(|_| ())) {
         Ok(content) => {
+            state.ui.files_text_disk_hash = Some(crate::io::textdoc::sha256_hex(content.as_bytes()));
             state.ui.files_text         = content;
             state.ui.files_text_dirty   = false;
             state.ui.files_text_is_ferx = ext == "ferx";
@@ -860,28 +926,18 @@ fn load_file(state: &mut AppState, path: PathBuf) {
     }
 }
 
-fn load_csv_data(path: &PathBuf) -> Option<(Vec<String>, Vec<Vec<String>>)> {
-    let mut rdr = csv::ReaderBuilder::new()
-        .trim(csv::Trim::All)
-        .flexible(true)
-        .from_path(path)
-        .ok()?;
-    let headers: Vec<String> = rdr.headers().ok()?.iter().map(str::to_owned).collect();
-    if headers.is_empty() { return None; }
-    let rows: Vec<Vec<String>> = rdr.records()
-        .filter_map(|r| r.ok().map(|rec| rec.iter().map(str::to_owned).collect()))
-        .collect();
-    Some((headers, rows))
-}
-
 // ── Save ──────────────────────────────────────────────────────────────────────
 
 fn save_text_file(state: &mut AppState) {
     let path = match state.ui.files_selected.clone() { Some(p) => p, None => return };
 
-    match std::fs::write(&path, state.ui.files_text.as_bytes()) {
-        Ok(()) => {
+    match crate::io::textdoc::save_checked(
+        &path, state.ui.files_text.as_bytes(), state.ui.files_text_disk_hash.as_deref())
+    {
+        Ok(true) => {
             state.ui.files_text_dirty = false;
+            if let Some(a) = &state.workspace.app_dir { crate::io::textdoc::remove_draft(a, &path); }
+            state.ui.files_text_disk_hash = Some(crate::io::textdoc::sha256_hex(state.ui.files_text.as_bytes()));
             state.ui.status_message   = format!("Saved {}", path.display());
 
             // Sync Models tab editor if the same .ferx file is currently open.
@@ -893,6 +949,7 @@ fn save_text_file(state: &mut AppState) {
 
             state.trigger_scan();
         }
+        Ok(false) => state.ui.files_save_conflict = true,
         Err(e) => {
             state.ui.status_message = format!("Save failed: {e}");
         }
@@ -901,23 +958,35 @@ fn save_text_file(state: &mut AppState) {
 
 fn save_csv_file(state: &mut AppState) {
     let path = match state.ui.files_selected.clone() { Some(p) => p, None => return };
+    let Some(mut doc) = state.ui.files_csv_doc.take() else {
+        state.ui.status_message = "CSV save failed: the file is not loaded".into();
+        return;
+    };
+    doc.headers = state.ui.files_csv_headers.clone();
+    doc.rows = state.ui.files_csv_rows.clone();
 
-    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
-        let mut wtr = csv::WriterBuilder::new().from_path(&path)?;
-        wtr.write_record(&state.ui.files_csv_headers)?;
-        for row in &state.ui.files_csv_rows { wtr.write_record(row)?; }
-        wtr.flush()?;
-        Ok(())
-    })();
+    let result = doc.to_bytes().map_err(std::io::Error::other).and_then(|bytes| {
+        let expected = (!doc.disk_hash.is_empty()).then_some(doc.disk_hash.as_str());
+        crate::io::textdoc::save_checked(&path, &bytes, expected).map(|ok| (ok, bytes))
+    });
 
     match result {
-        Ok(()) => {
+        Ok((true, _)) => {
             state.ui.files_csv_dirty     = false;
             state.ui.files_csv_edit_mode = false;
             state.ui.files_csv_editing   = None;
-            state.ui.status_message      = format!("Saved {}", path.display());
+            state.ui.status_message      = format!("Saved {} (previous version kept as .bak)", path.display());
+            // Reload the document so later saves compare against what is now on disk.
+            state.ui.files_csv_doc = crate::io::textdoc::load_csv(&path).ok();
         }
-        Err(e) => { state.ui.status_message = format!("CSV save failed: {e}"); }
+        Ok((false, _)) => {
+            state.ui.files_save_conflict = true;
+            state.ui.files_csv_doc = Some(doc);
+        }
+        Err(e) => {
+            state.ui.status_message = format!("CSV save failed: {e}");
+            state.ui.files_csv_doc = Some(doc);
+        }
     }
 }
 

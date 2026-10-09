@@ -6,3 +6,4 @@ pub mod fitrx;
 pub mod fsutil;
 pub mod persistence;
 pub mod r_extract;
+pub mod textdoc;

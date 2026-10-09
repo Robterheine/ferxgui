@@ -128,6 +128,8 @@ pub enum FilesViewMode {
     Binary,
     /// A `.fitrx` bundle inspector.
     Bundle,
+    /// A table file that cannot be opened for editing without changing it (see `files_doc_error`).
+    Error,
 }
 
 /// Sub-sections in the Evaluation tab (outer segmented control).
@@ -403,6 +405,12 @@ pub struct UiState {
     pub editor_dirty: bool,
     /// Which model stem is currently loaded in the editor (used to detect selection change).
     pub editor_loaded_stem: Option<String>,
+    /// Model the user tried to switch to while the editor had unsaved edits (prompt pending).
+    pub editor_switch_target: Option<String>,
+    /// The model file changed on disk since it was loaded; a second Save overwrites.
+    pub editor_overwrite_ok: bool,
+    /// When unsaved text was last written to a draft file.
+    pub last_draft_at: Option<std::time::Instant>,
     /// Cached syntax-highlighted layout job: (text_snapshot, dark_mode, job).
     /// Recomputed only when the buffer or theme changes.
     pub editor_layout_cache: Option<(String, bool, egui::text::LayoutJob)>,
@@ -698,6 +706,14 @@ pub struct UiState {
     // CSV / table view
     pub files_csv_headers:    Vec<String>,
     pub files_csv_rows:       Vec<Vec<String>>,
+    /// The loaded CSV with its original bytes; saves write untouched rows back unchanged.
+    pub files_csv_doc:        Option<crate::io::textdoc::CsvDoc>,
+    /// Why a table file was refused, and whether "Convert to UTF-8" applies.
+    pub files_doc_error:      Option<crate::io::textdoc::DocError>,
+    /// Hash of the text file as loaded, to detect an external change before saving.
+    pub files_text_disk_hash: Option<String>,
+    /// The file on disk changed since it was loaded: ask overwrite / reload.
+    pub files_save_conflict:  bool,
     pub files_csv_edit_mode:  bool,
     pub files_csv_dirty:      bool,
     /// Cell currently open for in-place editing (row, col).
@@ -738,6 +754,9 @@ impl Default for UiState {
             quit_confirmed: false,
             editor_buffer: String::new(),
             editor_dirty: false,
+            editor_switch_target: None,
+            editor_overwrite_ok: false,
+            last_draft_at: None,
             editor_loaded_stem: None,
             editor_layout_cache: None,
             run_method: "focei".to_string(),
@@ -858,6 +877,10 @@ impl Default for UiState {
             files_text_is_ferx:   false,
             files_csv_headers:    Vec::new(),
             files_csv_rows:       Vec::new(),
+            files_csv_doc:        None,
+            files_doc_error:      None,
+            files_text_disk_hash: None,
+            files_save_conflict:  false,
             files_csv_edit_mode:  false,
             files_csv_dirty:      false,
             files_csv_editing:    None,
@@ -1361,6 +1384,13 @@ pub struct AppState {
     pub worker_tx: Sender<WorkerMsg>,
     /// Receiver half — drained in the egui update() loop via try_recv().
     pub worker_rx: Receiver<WorkerMsg>,
+}
+
+impl UiState {
+    /// Any editor (Files text, Files table, Models editor) holding edits not yet on disk.
+    pub fn has_unsaved_edits(&self) -> bool {
+        self.files_text_dirty || self.files_csv_dirty || self.editor_dirty
+    }
 }
 
 impl AppState {

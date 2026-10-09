@@ -359,13 +359,14 @@ impl eframe::App for FerxApp {
         // unsaved edits, so quitting can't silently discard them the same
         // way switching files could (see files_tab's own guard).
         if ctx.input(|i| i.viewport().close_requested()) && !self.state.ui.quit_confirmed {
-            let dirty = self.state.ui.files_text_dirty || self.state.ui.files_csv_dirty;
-            if dirty {
+            if self.state.ui.has_unsaved_edits() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.state.ui.quit_unsaved_dialog = true;
             }
         }
         show_quit_unsaved_dialog(ctx, &mut self.state);
+
+        write_drafts(&mut self.state);
 
         // Drain worker messages first.
         self.state.process_worker_messages();
@@ -788,7 +789,7 @@ fn show_quit_unsaved_dialog(ctx: &egui::Context, state: &mut AppState) {
             ui.label(egui::RichText::new("Unsaved changes").strong().size(14.0).color(theme::fg(dark)));
             ui.add_space(8.0);
             ui.label(
-                egui::RichText::new("You have unsaved edits in the Files tab. Quit anyway?")
+                egui::RichText::new("You have unsaved edits (Files tab or model editor). Quit anyway?")
                     .color(theme::fg2(dark)).size(12.0),
             );
             ui.add_space(14.0);
@@ -2076,5 +2077,24 @@ mod font_sync_tests {
         let last = &font_deltas.last().expect("a font texture upload").1;
         assert!(last.pos.is_none(), "must be a full update, not a partial one");
         assert_eq!([last.image.width(), last.image.height()], size);
+    }
+}
+
+/// Every 30 s while an editor is dirty, copy its text to `<app dir>/drafts/` (not the project).
+fn write_drafts(state: &mut AppState) {
+    if !state.ui.has_unsaved_edits() { state.ui.last_draft_at = None; return; }
+    let due = state.ui.last_draft_at.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(30));
+    if !due { return; }
+    state.ui.last_draft_at = Some(std::time::Instant::now());
+    let Some(app_dir) = state.workspace.app_dir.clone() else { return };
+    if state.ui.editor_dirty {
+        if let Some(m) = state.ui.selected_model.and_then(|i| state.workspace.models.get(i)) {
+            crate::io::textdoc::write_draft(&app_dir, &m.model.path, &state.ui.editor_buffer);
+        }
+    }
+    if state.ui.files_text_dirty {
+        if let Some(p) = &state.ui.files_selected {
+            crate::io::textdoc::write_draft(&app_dir, p, &state.ui.files_text);
+        }
     }
 }

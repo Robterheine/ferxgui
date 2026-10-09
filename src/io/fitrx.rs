@@ -286,10 +286,13 @@ pub fn read_predictions(fitrx_path: &Path) -> Result<Option<EvalData>, FitrxErro
     };
 
     let col_id     = col("ID");
-    let col_time   = col("TIME").unwrap_or(usize::MAX);
-    let col_dv     = col("DV").unwrap_or(usize::MAX);
-    let col_pred   = col("PRED").unwrap_or(usize::MAX);
-    let col_ipred  = col("IPRED").unwrap_or(usize::MAX);
+    // These four drive every Evaluation plot; a missing one must not become a column of NaN.
+    let need = |name: &str| col(name).ok_or_else(|| FitrxError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData, format!("predictions.csv has no {name} column"))));
+    let col_time   = need("TIME")?;
+    let col_dv     = need("DV")?;
+    let col_pred   = need("PRED")?;
+    let col_ipred  = need("IPRED")?;
     let col_cwres  = col("CWRES");
     let col_iwres  = col("IWRES");
     let col_ebeofv = col("EBE_OFV");
@@ -522,7 +525,9 @@ pub fn read_conddist(fitrx_path: &Path) -> Result<Option<crate::domain::CondDist
 ///
 /// Returns the paths that were actually written.
 pub fn extract_output_tables(fitrx_path: &Path) -> Result<Vec<PathBuf>, FitrxError> {
-    let dir  = fitrx_path.parent().unwrap_or(std::path::Path::new("."));
+    // Exports live in `ferx_outputs/` beside the bundle, never among the user's own files.
+    let dir  = fitrx_path.parent().unwrap_or(std::path::Path::new(".")).join("ferx_outputs");
+    std::fs::create_dir_all(&dir)?;
     let stem = fitrx_path.file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("model");
@@ -545,9 +550,10 @@ pub fn extract_output_tables(fitrx_path: &Path) -> Result<Vec<PathBuf>, FitrxErr
         let mut entry = bound_entry(entry_name, entry)?;
         let mut buf = String::new();
         entry.read_to_string(&mut buf)?;
-        let out_path = dir.join(out_name);
+        let out_path = crate::io::textdoc::export_target(&dir, out_name);
         std::fs::write(&out_path, buf.as_bytes())
             .map_err(FitrxError::Io)?;
+        crate::io::textdoc::record_export(&out_path);
         written.push(out_path);
     }
     Ok(written)
@@ -1503,5 +1509,18 @@ mod tests {
         let r = parse_trace_csv("iter,foo\n1,2\n".as_bytes());
         assert!(r.is_err());
         assert!(parse_trace_csv("iter,ofv\n1,2\n".as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn predictions_missing_column_is_error() {
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!("ferxgui_predmiss_{}.fitrx", std::process::id()));
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        zip.start_file("predictions.csv", zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(b"ID,TIME,DV,PRED\n1,0,1,1\n").unwrap();
+        zip.finish().unwrap();
+        let r = read_predictions(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(matches!(r, Err(FitrxError::Io(ref e)) if e.to_string().contains("IPRED")), "{r:?}");
     }
 }

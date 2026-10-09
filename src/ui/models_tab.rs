@@ -36,8 +36,9 @@ const W_FLAG:   f32 = 20.0;
 // ── Public entry point ───────────────────────────────────────────────────────
 
 pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
-    // If selected model changed, reload editor buffer.
+    // If selected model changed, reload editor buffer (asking first when it has unsaved edits).
     sync_editor_buffer(state);
+    show_editor_switch_dialog(ui.ctx(), state);
 
     show_top_bar(ui, state);
     ui.separator();
@@ -1675,12 +1676,63 @@ mod contrast_tests {
 fn save_editor(state: &mut AppState, idx: usize) {
     let path = state.workspace.models[idx].model.path.clone();
     let buf = state.ui.editor_buffer.clone();
-    if std::fs::write(&path, &buf).is_ok() {
-        state.workspace.models[idx].model.source = buf;
+    // The source we loaded is what we expect to find on disk; anything else is an outside edit.
+    let expected = (!state.ui.editor_overwrite_ok)
+        .then(|| crate::io::textdoc::sha256_hex(state.workspace.models[idx].model.source.as_bytes()));
+    match crate::io::textdoc::save_checked(&path, buf.as_bytes(), expected.as_deref()) {
+        Ok(true) => {
+            state.workspace.models[idx].model.source = buf;
+            state.ui.editor_dirty = false;
+            state.ui.editor_overwrite_ok = false;
+            if let Some(a) = &state.workspace.app_dir { crate::io::textdoc::remove_draft(a, &path); }
+            state.ui.status_message = format!("Saved {}", path.display());
+        }
+        Ok(false) => {
+            state.ui.editor_overwrite_ok = true;
+            state.ui.status_message = format!(
+                "{} changed on disk since it was opened. Press Save again to overwrite (a backup is kept), \
+                 or Discard to reload.", path.display());
+        }
+        Err(e) => state.ui.status_message = format!("Save failed: {} ({e})", path.display()),
+    }
+}
+
+/// What to do when the selected model no longer matches the one loaded in the editor.
+#[derive(Debug, PartialEq, Eq)]
+enum SwitchAction { Nothing, Load, Prompt }
+
+fn switch_action(dirty: bool, loaded: Option<&str>, current: Option<&str>) -> SwitchAction {
+    if loaded == current { SwitchAction::Nothing }
+    else if dirty && loaded.is_some() { SwitchAction::Prompt }
+    else { SwitchAction::Load }
+}
+
+/// Unsaved-edits prompt shown when the user selects another model while the editor is dirty.
+fn show_editor_switch_dialog(ctx: &egui::Context, state: &mut AppState) {
+    let Some(target) = state.ui.editor_switch_target.clone() else { return };
+    let (mut save, mut discard, mut cancel) = (false, false, false);
+    egui::Window::new("Unsaved changes")
+        .collapsible(false).resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            ui.label("The model editor has unsaved edits. Save before switching?");
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() { cancel = true; }
+                if ui.button("Discard").clicked() { discard = true; }
+                if ui.button("Save").clicked() { save = true; }
+            });
+        });
+    let go = |state: &mut AppState| {
         state.ui.editor_dirty = false;
-        state.ui.status_message = format!("Saved {}", path.display());
-    } else {
-        state.ui.status_message = format!("Save failed: {}", path.display());
+        state.ui.editor_switch_target = None;
+        state.ui.selected_model = state.workspace.models.iter().position(|m| m.model.stem == target);
+    };
+    if cancel { state.ui.editor_switch_target = None; }
+    if discard { go(state); }
+    if save {
+        if let Some(idx) = state.ui.selected_model { save_editor(state, idx); }
+        if !state.ui.editor_dirty { go(state); }
     }
 }
 
@@ -1854,7 +1906,7 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
                         ui.checkbox(&mut state.ui.run_export_tables, "Save output tables")
                             .on_hover_text(
                                 "After run: write {stem}_sdtab.csv (predictions) and \
-                                 {stem}_patab.csv (EBEs) next to the model — \
+                                 {stem}_patab.csv (EBEs) in ferx_outputs/ beside the model — \
                                  equivalent to NONMEM's sdtab/patab",
                             );
                     });
@@ -4146,7 +4198,18 @@ fn sync_editor_buffer(state: &mut AppState) {
         .and_then(|i| state.workspace.models.get(i))
         .map(|e| e.model.stem.clone());
 
-    if current_stem != state.ui.editor_loaded_stem {
+    match switch_action(state.ui.editor_dirty, state.ui.editor_loaded_stem.as_deref(), current_stem.as_deref()) {
+        SwitchAction::Nothing => return,
+        SwitchAction::Prompt => {
+            // Keep the edited model selected and ask first; the target is remembered.
+            state.ui.editor_switch_target = current_stem;
+            state.ui.selected_model = state.ui.editor_loaded_stem.as_ref()
+                .and_then(|s| state.workspace.models.iter().position(|m| &m.model.stem == s));
+            return;
+        }
+        SwitchAction::Load => {}
+    }
+    {
         if let Some(stem) = &current_stem {
             if let Some(idx) = state.ui.selected_model {
                 state.ui.editor_buffer = state.workspace.models[idx].model.source.clone();
@@ -5395,5 +5458,18 @@ fn compare_param_rows(
             if d_pct.is_finite() { format!("{d_pct:+.1}%") } else { "—".to_string() })
             .size(11.0).color(d_col));
         ui.end_row();
+    }
+}
+
+#[cfg(test)]
+mod editor_switch_tests {
+    use super::*;
+
+    #[test]
+    fn models_switch_prompts_when_dirty() {
+        assert_eq!(switch_action(true, Some("a"), Some("b")), SwitchAction::Prompt);
+        assert_eq!(switch_action(false, Some("a"), Some("b")), SwitchAction::Load);
+        assert_eq!(switch_action(true, Some("a"), Some("a")), SwitchAction::Nothing);
+        assert_eq!(switch_action(true, None, Some("a")), SwitchAction::Load);
     }
 }
