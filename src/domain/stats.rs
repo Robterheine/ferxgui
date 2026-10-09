@@ -144,6 +144,30 @@ pub fn wald_ci95(est: f64, se: f64, log_scale: bool) -> Option<(f64, f64)> {
 /// 100·√(exp(ω²) − 1). Defined only for log-normal ETAs.
 pub fn cv_pct_lognormal(omega2: f64) -> f64 { 100.0 * (omega2.exp() - 1.0).sqrt() }
 
+/// Two-sided p-value of Pearson r from n pairs (the `cor.test` t statistic, df = n − 2).
+pub fn pearson_p(r: f64, n: usize) -> f64 {
+    if n < 3 || !r.is_finite() || r.abs() > 1.0 { return f64::NAN; }
+    if r.abs() == 1.0 { return 0.0; }
+    let df = (n - 2) as f64;
+    student_t_two_sided_p(r * (df / (1.0 - r * r)).sqrt(), df)
+}
+
+/// Recovers the number of pairs behind a reported (r, p) from `cor.test`, since the bridge does
+/// not return n. Exact when p was computed the standard way; None when no n reproduces p.
+pub fn n_from_r_p(r: f64, p: f64) -> Option<usize> {
+    if !r.is_finite() || !p.is_finite() || r == 0.0 || p <= 0.0 || p >= 1.0 { return None; }
+    // |r| fixed: p decreases as n grows. Bisect on n.
+    let (mut lo, mut hi) = (3usize, 200_000usize);
+    if pearson_p(r, hi) > p || pearson_p(r, lo) < p { return None; }
+    while hi - lo > 1 {
+        let mid = (lo + hi) / 2;
+        if pearson_p(r, mid) > p { lo = mid } else { hi = mid }
+    }
+    let best = [lo, hi].into_iter()
+        .min_by(|&a, &b| (pearson_p(r, a) - p).abs().total_cmp(&(pearson_p(r, b) - p).abs()))?;
+    ((pearson_p(r, best) - p).abs() <= 1e-6 * p.max(1e-12)).then_some(best)
+}
+
 /// Standard normal quantile (Wichura, AS 241 PPND16; ~1e-16 relative accuracy).
 pub fn qnorm(p: f64) -> f64 {
     if !(0.0..=1.0).contains(&p) || p.is_nan() { return f64::NAN; }
@@ -301,5 +325,13 @@ mod tests {
         for (w2, cv) in [(0.028589, 17.03), (0.009592, 9.82), (0.335870, 63.18)] {
             assert!((cv_pct_lognormal(w2) - cv).abs() < 0.005, "{w2}");
         }
+    }
+
+    #[test]
+    fn n_is_recovered_from_r_and_p() {
+        for (r, n) in [(0.31, 37usize), (-0.52, 12), (0.08, 140), (0.9, 6)] {
+            assert_eq!(n_from_r_p(r, pearson_p(r, n)), Some(n), "r={r} n={n}");
+        }
+        assert_eq!(n_from_r_p(0.3, 0.5), None);
     }
 }

@@ -1889,13 +1889,21 @@ fn show_eta_cov_dataset_scan(
                     );
                     ui.add_space(6.0);
 
+                    let raw_p: Vec<f64> = result.rows.iter().map(|r| r.p_val).collect();
+                    let adj_p = crate::domain::stats::benjamini_hochberg(&raw_p);
+                    ui.label(egui::RichText::new(
+                        "p is ferx's unadjusted cor.test p-value; BH adjusts across all pairs shown. \
+                         The CI is Fisher-z on n pairs recovered from r and p. Flag (|r| ≥ 0.3) is ferx's own.")
+                        .color(theme::fg3(dark)).size(10.0).italics());
+                    ui.add_space(4.0);
+
                     egui::Grid::new("eta_cov_table")
-                        .num_columns(4)
+                        .num_columns(7)
                         .striped(true)
                         .spacing([16.0, 3.0])
-                        .min_col_width(60.0)
+                        .min_col_width(50.0)
                         .show(ui, |ui| {
-                            for h in ["ETA", "COVARIATE", "r", "p-value"] {
+                            for h in ["ETA", "COVARIATE", "r", "95% CI", "p", "p (BH)", "ferx flag"] {
                                 ui.label(
                                     egui::RichText::new(h).strong()
                                         .color(theme::fg2(dark)).size(11.0),
@@ -1903,40 +1911,28 @@ fn show_eta_cov_dataset_scan(
                             }
                             ui.end_row();
 
-                            for row in &result.rows {
+                            let pfmt = |p: f64| if !p.is_finite() { "—".to_string() }
+                                else if p < 0.001 { "<0.001".to_string() } else { format!("{p:.3}") };
+                            for (k, row) in result.rows.iter().enumerate() {
                                 let name_col = if row.flag { theme::ORANGE } else { theme::fg(dark) };
-                                ui.label(
-                                    egui::RichText::new(&row.eta)
-                                        .color(name_col).size(12.0).monospace(),
-                                );
-                                ui.label(
-                                    egui::RichText::new(&row.covariate)
-                                        .color(name_col).size(12.0).monospace(),
-                                );
-                                let r_str = if row.r.is_finite() {
-                                    format!("{:+.3}", row.r)
-                                } else {
-                                    "—".to_string()
+                                ui.label(egui::RichText::new(&row.eta).color(name_col).size(12.0).monospace());
+                                ui.label(egui::RichText::new(&row.covariate).color(name_col).size(12.0).monospace());
+                                let r_str = if row.r.is_finite() { format!("{:+.3}", row.r) } else { "—".to_string() };
+                                ui.label(egui::RichText::new(r_str).color(theme::fg(dark)).size(12.0));
+                                let ci = crate::domain::stats::n_from_r_p(row.r, row.p_val)
+                                    .and_then(|n| crate::domain::stats::fisher_z_ci(row.r, n, 0.95)
+                                        .map(|c| (n, c)));
+                                let ci_str = match ci {
+                                    Some((n, (lo, hi))) => format!("[{lo:+.2}, {hi:+.2}]  n={n}"),
+                                    None => "—".to_string(),
                                 };
-                                let r_col = if row.flag { theme::ORANGE } else { theme::fg(dark) };
-                                ui.label(
-                                    egui::RichText::new(r_str).color(r_col).size(12.0),
-                                );
-                                let p_str = if row.p_val.is_finite() {
-                                    if row.p_val < 0.001 {
-                                        "<0.001".to_string()
-                                    } else {
-                                        format!("{:.3}", row.p_val)
-                                    }
-                                } else {
-                                    "—".to_string()
-                                };
-                                let p_col = if row.p_val.is_finite() && row.p_val < 0.05 {
-                                    theme::ORANGE
-                                } else {
-                                    theme::fg2(dark)
-                                };
-                                ui.label(egui::RichText::new(p_str).color(p_col).size(12.0));
+                                ui.label(egui::RichText::new(ci_str).color(theme::fg2(dark)).size(11.0));
+                                ui.label(egui::RichText::new(pfmt(row.p_val)).color(theme::fg2(dark)).size(12.0));
+                                let adj = adj_p[k];
+                                let adj_col = if adj.is_finite() && adj < 0.05 { theme::ORANGE } else { theme::fg2(dark) };
+                                ui.label(egui::RichText::new(pfmt(adj)).color(adj_col).size(12.0));
+                                ui.label(egui::RichText::new(if row.flag { "[!]" } else { "" })
+                                    .color(theme::ORANGE).size(12.0));
                                 ui.end_row();
                             }
                         });
