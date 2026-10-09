@@ -529,8 +529,7 @@ fn show_info_panel(
 
             // DW
             if let Some(dw) = f.dw_statistic {
-                let dw_col = if !(1.5..=2.5).contains(&dw) { theme::ORANGE } else { theme::GREEN };
-                info_row(ui, "Durbin-Watson", &format!("{dw:.3}"), dw_col, dark);
+                info_row(ui, "Durbin-Watson", &format!("{dw:.3}"), dim, dark);
             }
 
             // Shrinkage.

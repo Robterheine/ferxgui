@@ -233,6 +233,27 @@ impl FitSummary {
         self.near_boundary == Some(true)
     }
 
+    /// True when theta `i` is positive by declaration (lower bound above zero), so its
+    /// confidence interval is built on the log scale.
+    pub fn theta_is_positive(&self, i: usize) -> bool {
+        self.theta_lower.get(i).is_some_and(|&l| l > 0.0)
+    }
+
+    /// Number of within-subject consecutive residual pairs (n_obs - n_subjects): the n behind the
+    /// lag-1 correlation. 0 when unknown.
+    pub fn lag_pairs(&self) -> usize { self.n_obs.saturating_sub(self.n_subjects) }
+
+    /// Approximate 95 % flag level for the lag-1 correlation: |r| > 2/√n. None when n is unknown.
+    pub fn lag1_threshold(&self) -> Option<f64> {
+        let n = self.lag_pairs();
+        (n >= 4).then(|| 2.0 / (n as f64).sqrt())
+    }
+
+    /// True when the lag-1 correlation exceeds its sample-size-scaled threshold.
+    pub fn lag1_flagged(&self) -> Option<bool> {
+        Some(self.iwres_lag1_r?.abs() > self.lag1_threshold()?)
+    }
+
     /// Whether theta `i` was declared FIX.
     pub fn is_theta_fixed(&self, i: usize) -> bool {
         self.theta_fixed.get(i).copied().unwrap_or(false)
@@ -446,5 +467,22 @@ impl ParamRow {
             return None;
         }
         Some((self.se / self.estimate).abs() * 100.0)
+    }
+}
+
+#[cfg(test)]
+mod lag_tests {
+    use super::*;
+
+    #[test]
+    fn dw_lag_threshold_scales_with_n() {
+        let f = FitSummary { n_obs: 110, n_subjects: 10, iwres_lag1_r: Some(0.19), ..Default::default() };
+        assert_eq!(f.lag_pairs(), 100);
+        assert!((f.lag1_threshold().unwrap() - 0.2).abs() < 1e-12);
+        assert_eq!(f.lag1_flagged(), Some(false));
+        let small = FitSummary { n_obs: 24, n_subjects: 4, iwres_lag1_r: Some(0.3), ..f.clone() };
+        assert!((small.lag1_threshold().unwrap() - 2.0 / 20f64.sqrt()).abs() < 1e-12);
+        assert_eq!(small.lag1_flagged(), Some(false)); // 0.3 < 0.447: not flagged with few pairs
+        assert_eq!(FitSummary::default().lag1_flagged(), None);
     }
 }

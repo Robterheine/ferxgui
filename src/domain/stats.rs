@@ -126,6 +126,24 @@ pub fn benjamini_hochberg(p: &[f64]) -> Vec<f64> {
     out
 }
 
+/// 95 % Wald interval. With `log_scale` the interval is built on ln(estimate) by the delta
+/// method (SE of ln est = SE / est) and back-transformed, so it stays positive; it falls back
+/// to the natural scale when the estimate is not positive. None when either input is not finite.
+pub fn wald_ci95(est: f64, se: f64, log_scale: bool) -> Option<(f64, f64)> {
+    if !est.is_finite() || !se.is_finite() { return None; }
+    let z = qnorm(0.975);
+    if log_scale && est > 0.0 {
+        let h = z * se / est;
+        Some((est * (-h).exp(), est * h.exp()))
+    } else {
+        Some((est - z * se, est + z * se))
+    }
+}
+
+/// Coefficient of variation (%) of a log-normal random effect with variance `omega2`:
+/// 100·√(exp(ω²) − 1). Defined only for log-normal ETAs.
+pub fn cv_pct_lognormal(omega2: f64) -> f64 { 100.0 * (omega2.exp() - 1.0).sqrt() }
+
 /// Standard normal quantile (Wichura, AS 241 PPND16; ~1e-16 relative accuracy).
 pub fn qnorm(p: f64) -> f64 {
     if !(0.0..=1.0).contains(&p) || p.is_nan() { return f64::NAN; }
@@ -264,5 +282,24 @@ mod tests {
         // 5/20 at 95 %: textbook Wilson interval [0.1119, 0.4687].
         let (lo, hi) = wilson_ci(5, 20, 0.95).unwrap();
         assert!((lo - 0.1119).abs() < 1e-3 && (hi - 0.4687).abs() < 1e-3, "{lo} {hi}");
+    }
+
+    #[test]
+    fn ci_log_scale_for_positive_params() {
+        // Warfarin FOCEI, plan §5.6: TVCL est 0.13270, SE 0.0070...; log-scale target.
+        let (lo, hi) = wald_ci95(0.13270, 0.007_08, true).unwrap();
+        assert!(lo > 0.0 && (lo - 0.1195).abs() < 5e-4 && (hi - 0.1473).abs() < 5e-4, "{lo} {hi}");
+        // A variance with a large relative SE: natural scale goes negative, log scale cannot.
+        let (nlo, _) = wald_ci95(0.0841, 0.1, false).unwrap();
+        let (llo, _) = wald_ci95(0.0841, 0.1, true).unwrap();
+        assert!(nlo < 0.0 && llo > 0.0);
+        assert_eq!(wald_ci95(f64::NAN, 1.0, true), None);
+    }
+
+    #[test]
+    fn cv_lognormal_golden() {
+        for (w2, cv) in [(0.028589, 17.03), (0.009592, 9.82), (0.335870, 63.18)] {
+            assert!((cv_pct_lognormal(w2) - cv).abs() < 0.005, "{w2}");
+        }
     }
 }

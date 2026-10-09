@@ -191,7 +191,7 @@ fn show_theta_section(ui: &mut egui::Ui, fit: &FitSummary, dark: bool) {
                 .unwrap_or_else(|| format!("THETA{}", i + 1));
             let est = fit.theta.get(i).copied().unwrap_or(f64::NAN);
             let se  = fit.se_theta.get(i).copied().unwrap_or(f64::NAN);
-            param_row_fixed(ui, &name, est, se, fit.is_theta_fixed(i), dark);
+            param_row_fixed(ui, &name, est, se, fit.is_theta_fixed(i), fit.theta_is_positive(i), dark);
         }
     });
 }
@@ -227,7 +227,7 @@ fn show_kappa_section(ui: &mut egui::Ui, fit: &FitSummary, dark: bool) {
                 .unwrap_or_else(|| format!("KAPPA{}", i + 1));
             let est = fit.kappa_value(i, i).unwrap_or(f64::NAN);
             let se  = fit.se_kappa_diag(i).unwrap_or(f64::NAN);
-            param_row_fixed(ui, &name, est, se, false, dark);
+            param_row_fixed(ui, &name, est, se, false, true, dark);
         }
     });
 }
@@ -256,44 +256,31 @@ fn show_diagnostics_section(ui: &mut egui::Ui, fit: &FitSummary, dark: bool) {
     let dim = theme::fg3(dark);
 
     if let Some(dw) = fit.dw_statistic {
-        let ok  = (1.5..=2.5).contains(&dw);
-        let col = if ok { theme::GREEN } else { theme::ORANGE };
-        let verdict = if dw < 1.5 {
-            "positive autocorrelation"
-        } else if dw > 2.5 {
-            "negative autocorrelation"
-        } else {
-            "acceptable — no autocorrelation"
-        };
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Durbin-Watson").color(theme::fg2(dark)).size(11.0));
-            ui.label(egui::RichText::new(format!("{dw:.3}")).color(col).size(11.0).strong());
-            ui.label(egui::RichText::new(format!("({verdict})")).color(col).size(11.0));
+            ui.label(egui::RichText::new(format!("{dw:.3}")).color(theme::fg(dark)).size(11.0).strong());
+            ui.label(egui::RichText::new(format!("(n = {} pairs)", fit.lag_pairs())).color(dim).size(11.0));
         });
-        ui.label(egui::RichText::new(
-            "Tests for temporal autocorrelation in IWRES. \
-             Computed as a pooled statistic across all subjects. \
-             Acceptable range: 1.5 – 2.5 (near 2.0 = independent residuals). \
-             Values outside this range suggest model misspecification — \
-             check the structural model or residual error model.")
-            .color(dim).size(10.0).italics());
+        ui.label(egui::RichText::new(DW_NOTE).color(dim).size(10.0).italics());
         ui.add_space(6.0);
     }
 
     if let Some(r) = fit.iwres_lag1_r {
-        let flagged = r.abs() > 0.2;
-        let col     = if flagged { theme::ORANGE } else { theme::GREEN };
-        let verdict = if flagged { "autocorrelation detected" } else { "acceptable" };
+        let flagged = fit.lag1_flagged();
+        let col = match flagged { Some(true) => theme::ORANGE, Some(false) => theme::GREEN, None => theme::fg(dark) };
+        let verdict = match (flagged, fit.lag1_threshold()) {
+            (Some(true), Some(t)) => format!("|r| above {t:.2}: autocorrelation worth investigating"),
+            (Some(false), Some(t)) => format!("|r| within ±{t:.2}"),
+            _ => "too few pairs to judge".to_string(),
+        };
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("IWRES lag-1 r").color(theme::fg2(dark)).size(11.0));
             ui.label(egui::RichText::new(format!("{r:.3}")).color(col).size(11.0).strong());
-            ui.label(egui::RichText::new(format!("({verdict})")).color(col).size(11.0));
+            ui.label(egui::RichText::new(format!("({verdict}; n = {} pairs)", fit.lag_pairs())).color(col).size(11.0));
         });
         ui.label(egui::RichText::new(
-            "Pearson correlation between consecutive IWRES within each subject (lag 1). \
-             Complements the Durbin-Watson statistic. \
-             Near zero = residuals are independent. \
-             |r| > 0.2 flags autocorrelation worth investigating.")
+            "Pearson correlation between consecutive IWRES within each subject. Its standard error \
+             is about 1/√n, so the flag level is 2/√n and shrinks as the number of pairs grows.")
             .color(dim).size(10.0).italics());
         ui.add_space(6.0);
     }
@@ -323,6 +310,9 @@ fn show_diagnostics_section(ui: &mut egui::Ui, fit: &FitSummary, dark: bool) {
         ui.label(egui::RichText::new(SHRINK_NOTE).color(theme::fg3(dark)).size(9.5).italics());
     }
 }
+
+const DW_NOTE: &str = "Descriptive: about 2 when residuals are uncorrelated, below 2 for positive and \
+    above 2 for negative autocorrelation. No formal test is applied.";
 
 /// Where the colour thresholds come from; shown beside every shrinkage table.
 const SHRINK_NOTE: &str = "Colours: green below 20 %, amber 20–40 %, red above. EBE-based diagnostics \
@@ -399,7 +389,7 @@ fn param_table(
 }
 
 fn param_row_fixed(
-    ui: &mut egui::Ui, name: &str, est: f64, se: f64, fixed: bool, dark: bool,
+    ui: &mut egui::Ui, name: &str, est: f64, se: f64, fixed: bool, log_ci: bool, dark: bool,
 ) {
     let label = if fixed { format!("{name}  FIX") } else { name.to_string() };
     ui.label(egui::RichText::new(label).color(theme::fg(dark)).size(12.0).monospace());
@@ -407,7 +397,7 @@ fn param_row_fixed(
     ui.label(egui::RichText::new(fmt_sig4(se)).color(theme::fg2(dark)).size(12.0));
     let rse = rse_pct(est, se);
     ui.label(egui::RichText::new(fmt_rse(rse)).color(rse_color(rse)).size(12.0));
-    ci_cells(ui, est, se, dark);
+    ci_cells(ui, est, se, log_ci, dark);
     ui.end_row();
 }
 
@@ -420,7 +410,7 @@ fn param_row_omega(
     ui.label(egui::RichText::new(fmt_sig4(se)).color(theme::fg2(dark)).size(12.0));
     let rse = rse_pct(est, se);
     ui.label(egui::RichText::new(fmt_rse(rse)).color(rse_color(rse)).size(12.0));
-    ci_cells(ui, est, se, dark);
+    ci_cells(ui, est, se, true, dark);
     // Shrinkage column.
     if let Some(s) = shrinkage {
         let col = shrink_color(s);
@@ -450,11 +440,12 @@ fn kv_col(ui: &mut egui::Ui, label: &str, value: &str, col: egui::Color32, dark:
     ui.label(egui::RichText::new(value).color(col).size(11.0));
 }
 
-fn ci_cells(ui: &mut egui::Ui, est: f64, se: f64, dark: bool) {
-    if se.is_finite() && est.is_finite() {
+/// 95 % Wald interval cells; on the log scale for parameters that are positive by declaration.
+fn ci_cells(ui: &mut egui::Ui, est: f64, se: f64, log_ci: bool, dark: bool) {
+    if let Some((lo, hi)) = crate::domain::stats::wald_ci95(est, se, log_ci) {
         let c = theme::fg2(dark);
-        ui.label(egui::RichText::new(fmt_sig4(est - 1.96 * se)).color(c).size(11.0));
-        ui.label(egui::RichText::new(fmt_sig4(est + 1.96 * se)).color(c).size(11.0));
+        ui.label(egui::RichText::new(fmt_sig4(lo)).color(c).size(11.0));
+        ui.label(egui::RichText::new(fmt_sig4(hi)).color(c).size(11.0));
     } else {
         let c = theme::fg3(dark);
         ui.label(egui::RichText::new("—").color(c).size(11.0));
@@ -608,7 +599,7 @@ fn generate_html(
                 .unwrap_or_else(|| format!("THETA{}", i + 1));
             let est = fit.theta.get(i).copied().unwrap_or(f64::NAN);
             let se  = fit.se_theta.get(i).copied().unwrap_or(f64::NAN);
-            b.push_str(&html_param_row_fixed(&name, est, se, fit.is_theta_fixed(i)));
+            b.push_str(&html_param_row_fixed(&name, est, se, fit.is_theta_fixed(i), fit.theta_is_positive(i)));
         }
         b.push_str("</table></section>\n");
     }
@@ -643,7 +634,7 @@ fn generate_html(
                 .unwrap_or_else(|| format!("KAPPA{}", i + 1));
             let est = fit.kappa_value(i, i).unwrap_or(f64::NAN);
             let se  = fit.se_kappa_diag(i).unwrap_or(f64::NAN);
-            b.push_str(&html_param_row_fixed(&name, est, se, false));
+            b.push_str(&html_param_row_fixed(&name, est, se, false, true));
         }
         b.push_str("</table></section>\n");
     }
@@ -669,38 +660,20 @@ fn generate_html(
     // ── Diagnostics ──
     b.push_str("<section><h2>Diagnostics</h2><table class=\"kv\">\n");
     if let Some(dw) = fit.dw_statistic {
-        let ok  = (1.5..=2.5).contains(&dw);
-        let cls = if ok { "ok" } else { "warn" };
-        let verdict = if dw < 1.5 { "positive autocorrelation" }
-                      else if dw > 2.5 { "negative autocorrelation" }
-                      else { "acceptable — no autocorrelation" };
         b.push_str(&format!(
-            "<tr>\
-               <td>Durbin-Watson\
-                 <div class=\"explain\">Tests for temporal autocorrelation in IWRES \
-                   (pooled across subjects). Acceptable range: 1.5–2.5. \
-                   Values outside this range suggest model misspecification — \
-                   review the structural model or residual error model.</div></td>\
-               <td class=\"{cls}\">{:.3} ({verdict})</td>\
-             </tr>\n",
-            dw,
-        ));
+            "<tr><td>Durbin-Watson<div class=\"explain\">{DW_NOTE}</div></td>\
+             <td>{dw:.3} (n = {} pairs)</td></tr>\n", fit.lag_pairs()));
     }
     if let Some(r) = fit.iwres_lag1_r {
-        let flagged = r.abs() > 0.2;
-        let cls = if flagged { "warn" } else { "ok" };
-        let verdict = if flagged { "autocorrelation detected" } else { "acceptable" };
+        let (cls, verdict) = match (fit.lag1_flagged(), fit.lag1_threshold()) {
+            (Some(true), Some(t)) => ("warn", format!("|r| above {t:.2}")),
+            (Some(false), Some(t)) => ("ok", format!("|r| within ±{t:.2}")),
+            _ => ("", "too few pairs to judge".to_string()),
+        };
         b.push_str(&format!(
-            "<tr>\
-               <td>IWRES lag-1 r\
-                 <div class=\"explain\">Pearson correlation of consecutive IWRES within each \
-                   subject (lag 1). Complements the Durbin-Watson statistic. \
-                   Near zero = independent residuals. |r| &gt; 0.2 flags autocorrelation \
-                   worth investigating.</div></td>\
-               <td class=\"{cls}\">{:.3} ({verdict})</td>\
-             </tr>\n",
-            r,
-        ));
+            "<tr><td>IWRES lag-1 r<div class=\"explain\">Pearson correlation of consecutive IWRES \
+             within each subject. Its standard error is about 1/√n, so the flag level is 2/√n.</div></td>\
+             <td class=\"{cls}\">{r:.3} ({verdict}; n = {} pairs)</td></tr>\n", fit.lag_pairs()));
     }
     b.push_str("</table>\n");
 
@@ -765,11 +738,11 @@ fn html_kv_raw(label: &str, value: &str) -> String {
     format!("<tr><td>{label}</td><td>{value}</td></tr>\n")
 }
 
-fn html_param_row_fixed(name: &str, est: f64, se: f64, fixed: bool) -> String {
+fn html_param_row_fixed(name: &str, est: f64, se: f64, fixed: bool, log_ci: bool) -> String {
     let rse = rse_pct(est, se);
     let cls = "";
     let name = &if fixed { format!("{name} (FIX)") } else { name.to_string() };
-    let (lo, hi) = ci_pair(est, se);
+    let (lo, hi) = ci_pair(est, se, log_ci);
     format!(
         "<tr{cls}><td class=\"mono\">{name}</td><td>{}</td><td>{}</td>\
          <td class=\"{}\">{}</td><td>{lo}</td><td>{hi}</td></tr>\n",
@@ -780,7 +753,7 @@ fn html_param_row_fixed(name: &str, est: f64, se: f64, fixed: bool) -> String {
 
 fn html_param_row_omega(name: &str, est: f64, se: f64, shrink: Option<f64>) -> String {
     let rse = rse_pct(est, se);
-    let (lo, hi) = ci_pair(est, se);
+    let (lo, hi) = ci_pair(est, se, true);
     let shrink_str = match shrink {
         Some(s) => format!("<td class=\"{}\">{:.1}%</td>", shrink_html_class(s), s),
         None    => "<td>—</td>".to_string(),
@@ -846,9 +819,9 @@ fn corr_rgb(r: f64) -> (u8, u8, u8) {
     }
 }
 
-fn ci_pair(est: f64, se: f64) -> (String, String) {
-    if se.is_finite() && est.is_finite() {
-        (fmt_sig4(est - 1.96 * se), fmt_sig4(est + 1.96 * se))
+fn ci_pair(est: f64, se: f64, log_ci: bool) -> (String, String) {
+    if let Some((lo, hi)) = crate::domain::stats::wald_ci95(est, se, log_ci) {
+        (fmt_sig4(lo), fmt_sig4(hi))
     } else {
         ("—".into(), "—".into())
     }

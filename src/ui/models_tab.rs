@@ -3220,14 +3220,10 @@ fn show_output_pill(ui: &mut egui::Ui, state: &mut AppState) {
 
                             // Row 5: IWRES diagnostics (ferx >= 0.1.5 — only shown when available)
                             if let Some(dw) = fit.dw_statistic {
-                                let dw_color = if !(1.5..=2.5).contains(&dw) {
-                                    theme::ORANGE
-                                } else {
-                                    theme::GREEN
-                                };
-                                kv(ui, "Durbin-Watson", &format!("{dw:.3}"), dw_color);
+                                // Descriptive only: no pass/fail colour for a statistic with no test.
+                                kv(ui, "Durbin-Watson", &format!("{dw:.3}"), theme::FG);
                                 if let Some(r) = fit.iwres_lag1_r {
-                                    let r_color = if r.abs() > 0.2 { theme::ORANGE } else { theme::FG };
+                                    let r_color = if fit.lag1_flagged() == Some(true) { theme::ORANGE } else { theme::FG };
                                     kv(ui, "IWRES lag-1 r", &format!("{r:.3}"), r_color);
                                 }
                                 ui.end_row();
@@ -3362,7 +3358,7 @@ fn show_params_pill(ui: &mut egui::Ui, state: &mut AppState) {
                     let init = params.theta_init_for(&name, i);
                     let est  = fit.theta.get(i).copied().unwrap_or(f64::NAN);
                     let se   = fit.se_theta.get(i).copied().unwrap_or(f64::NAN);
-                    theta_param_row(ui, &name, init, est, se, fit.is_theta_fixed(i));
+                    theta_param_row(ui, &name, init, est, se, fit.is_theta_fixed(i), fit.theta_is_positive(i));
                 }
             });
 
@@ -3524,7 +3520,7 @@ fn show_params_pill(ui: &mut egui::Ui, state: &mut AppState) {
                     let init = params.sigma_init.get(i).copied().unwrap_or(f64::NAN);
                     let est  = fit.sigma.get(i).copied().unwrap_or(f64::NAN);
                     let se   = fit.se_sigma.get(i).copied().unwrap_or(f64::NAN);
-                    theta_param_row(ui, &name, init, est, se, false);
+                    theta_param_row(ui, &name, init, est, se, false, true);
                 }
             });
 
@@ -3810,6 +3806,7 @@ fn theta_param_row(
     estimate: f64,
     se: f64,
     fixed: bool,
+    log_ci: bool,
 ) {
     let dark = ui.visuals().dark_mode;
     ui.label(egui::RichText::new(name).color(theme::fg(dark)).size(12.0).monospace());
@@ -3820,7 +3817,7 @@ fn theta_param_row(
     let rse = rse_pct(estimate, se);
     let rse_color = rse_color(rse);
     ui.label(egui::RichText::new(fmt_f64_1dp(rse)).color(rse_color).size(12.0));
-    ci_cells(ui, estimate, se);
+    ci_cells(ui, estimate, se, log_ci);
     ui.end_row();
 }
 
@@ -3847,20 +3844,23 @@ fn omega_param_row(
     ui.label(egui::RichText::new(fmt_sig4(se)).color(theme::fg2(dark)).size(12.0));
     let cv_cell: Option<(f64, &str)> = if estimate.is_finite() {
         match param_type {
-            "log_normal"           => Some(((estimate.exp() - 1.0).sqrt() * 100.0, "CV%")),
-            "additive" | "normal"  => Some((estimate.sqrt() * 100.0, "SD%")),
+            "log_normal"           => Some((crate::domain::stats::cv_pct_lognormal(estimate), "CV%")),
+            "additive" | "normal"  => Some((estimate.sqrt(), "SD")),
             _                      => None,
         }
     } else { None };
     if let Some((val, label)) = cv_cell {
-        let col = if val > 100.0 { theme::RED } else if val > 50.0 { theme::ORANGE } else { theme::fg(dark) };
-        ui.label(egui::RichText::new(format!("{val:.1}% {label}")).color(col).size(12.0));
+        let col = if label == "CV%" && val > 100.0 { theme::RED }
+                  else if label == "CV%" && val > 50.0 { theme::ORANGE } else { theme::fg(dark) };
+        let txt = if label == "CV%" { format!("{val:.1}% CV") } else { format!("{val:.3} SD") };
+        ui.label(egui::RichText::new(txt).color(col).size(12.0))
+            .on_hover_text(format!("ω² = {}   SD = {}", fmt_sig4(estimate), fmt_sig4(estimate.sqrt())));
     } else {
         ui.label(egui::RichText::new("—").color(theme::fg3(dark)).size(12.0));
     }
     let rse = rse_pct(estimate, se);
     ui.label(egui::RichText::new(fmt_f64_1dp(rse)).color(rse_color(rse)).size(12.0));
-    ci_cells(ui, estimate, se);
+    ci_cells(ui, estimate, se, true);
     ui.end_row();
 }
 
@@ -3877,12 +3877,13 @@ fn rse_color(rse: f64) -> egui::Color32 {
     else { theme::RED }
 }
 
-fn ci_cells(ui: &mut egui::Ui, estimate: f64, se: f64) {
+/// 95 % Wald interval cells; on the log scale for parameters that are positive by declaration.
+fn ci_cells(ui: &mut egui::Ui, estimate: f64, se: f64, log_ci: bool) {
     let dark = ui.visuals().dark_mode;
-    if se.is_finite() && estimate.is_finite() {
+    if let Some((lo, hi)) = crate::domain::stats::wald_ci95(estimate, se, log_ci) {
         let ci_color = theme::fg2(dark);
-        ui.label(egui::RichText::new(fmt_sig4(estimate - 1.96 * se)).color(ci_color).size(11.0));
-        ui.label(egui::RichText::new(fmt_sig4(estimate + 1.96 * se)).color(ci_color).size(11.0));
+        ui.label(egui::RichText::new(fmt_sig4(lo)).color(ci_color).size(11.0));
+        ui.label(egui::RichText::new(fmt_sig4(hi)).color(ci_color).size(11.0));
     } else {
         ui.label(egui::RichText::new("—").color(theme::fg3(dark)).size(11.0));
         ui.label(egui::RichText::new("—").color(theme::fg3(dark)).size(11.0));

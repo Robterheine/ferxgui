@@ -236,6 +236,14 @@ pub fn read_fit_summary(path: &Path) -> Result<FitSummary, FitrxError> {
     let wire = read_fit_json(&mut zip)?;
     let warnings = read_warnings(&mut zip).unwrap_or_default();
     let mut summary = wire_to_summary(wire, warnings);
+    // Declared bounds come from the model stored in the bundle (what the fit actually used).
+    if let Ok(src) = read_text_entry(&mut zip, "model.ferx") {
+        let pp = crate::io::ferx_file::parse_params(&src);
+        if pp.theta_lower.len() == summary.theta.len() {
+            summary.theta_lower = pp.theta_lower;
+            summary.theta_upper = pp.theta_upper;
+        }
+    }
     // ETAbar is not in fit.json; compute it from the EBEs (mean and t-test p per ETA).
     if let Ok(Some(ebes)) = read_ebes(path) {
         for b in ebes.eta_bar() {
@@ -677,7 +685,6 @@ fn read_warnings(zip: &mut zip::ZipArchive<std::fs::File>) -> Option<Vec<String>
     Some(buf.lines().filter(|l| !l.is_empty()).map(str::to_owned).collect())
 }
 
-#[allow(dead_code)]
 fn read_text_entry(
     zip: &mut zip::ZipArchive<std::fs::File>,
     name: &str,
