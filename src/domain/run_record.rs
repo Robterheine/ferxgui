@@ -34,6 +34,8 @@ pub enum JobStatus {
     Completed,
     Failed,
     Cancelled,
+    /// The run ended while the GUI was not watching and left no usable exit status.
+    Unknown,
 }
 
 impl JobStatus {
@@ -43,6 +45,7 @@ impl JobStatus {
             JobStatus::Completed  => "OK",
             JobStatus::Failed     => "Failed",
             JobStatus::Cancelled  => "Cancelled",
+            JobStatus::Unknown    => "Unknown",
         }
     }
 }

@@ -25,6 +25,12 @@ pub struct RunManifest {
     pub command: String,
     /// Working directory the process was launched from.
     pub directory: PathBuf,
+    /// File the run script writes its exit status to (0 = success), for runs that outlive the GUI.
+    #[serde(default)]
+    pub status_path: Option<PathBuf>,
+    /// Who the process is (PID + start time); signals are refused without a matching identity.
+    #[serde(default)]
+    pub identity: Option<super::procid::ProcessIdentity>,
 }
 
 impl RunManifest {
@@ -56,8 +62,9 @@ impl RunManifest {
 
     /// True if a process with this PID appears to be running.
     ///
-    /// Uses `kill(pid, 0)` on Unix (signal 0 = liveness probe).
-    /// On Windows falls back to `tasklist`.
+    /// Uses `kill(pid, 0)` on Unix (signal 0 = liveness probe) and
+    /// `OpenProcess` + `GetExitCodeProcess` on Windows. Liveness only: it says nothing about
+    /// WHO the process is (see `procid`).
     pub fn is_pid_alive(pid: u32) -> bool {
         pid_alive(pid)
     }
@@ -133,6 +140,7 @@ fn pid_alive(pid: u32) -> bool {
         fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
     }
     const WNOHANG: i32 = 1;
+    if !super::procid::pid_in_range(pid) { return false; }
     unsafe {
         if kill(pid as i32, 0) != 0 {
             return false; // ESRCH or EPERM — gone or inaccessible
@@ -152,20 +160,7 @@ fn pid_alive(pid: u32) -> bool {
 
 #[cfg(windows)]
 fn pid_alive(pid: u32) -> bool {
-    // Query tasklist for the exact PID.  Use CSV output and exact token match
-    // so PID 123 doesn't spuriously match 1234, and suppress the console window.
-    let mut cmd = std::process::Command::new("tasklist");
-    cmd.args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"]);
-    let mut cmd = crate::io::r_extract::apply_no_window(cmd);
-    cmd.output()
-        .map(|o| {
-            let s = String::from_utf8_lossy(&o.stdout);
-            let target = pid.to_string();
-            // CSV fields are quoted & comma-separated, e.g. "Rscript.exe","123",...
-            s.split(|c: char| c == ',' || c == '"' || c.is_whitespace())
-                .any(|tok| tok == target)
-        })
-        .unwrap_or(false)
+    super::procid::windows_pid_alive(pid)
 }
 
 #[cfg(not(any(unix, windows)))]

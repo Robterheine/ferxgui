@@ -3079,6 +3079,11 @@ pub fn do_launch_queued(state: &mut AppState, queued: crate::domain::QueuedRun) 
         .and_then(|d| manifest_path(d, &run_id))
         .unwrap_or_else(|| cwd.join(format!("{run_id}.runmfst")));
 
+    // The run script writes its exit status here, so a run that outlives the GUI can be classified.
+    let status_file = mfst_path.with_extension("status");
+    let mut args = args;
+    args.push(status_file.to_string_lossy().to_string());
+
     // Ensure the running/ dir exists (manifest_path() does this, but fallback may not).
     if let Some(app_dir) = &state.workspace.app_dir {
         let _ = running_dir(app_dir);
@@ -3109,6 +3114,7 @@ pub fn do_launch_queued(state: &mut AppState, queued: crate::domain::QueuedRun) 
         cwd,
         log_path.clone(),
         mfst_path.clone(),
+        Some(status_file),
         tx,
         cancel_rx,
     ) {

@@ -1504,6 +1504,8 @@ impl AppState {
                     format!("Run finished but no {stem}.fitrx was written in {}", record.directory.display())
                 } else if success {
                     format!("Run completed: {stem}")
+                } else if record.status == crate::domain::JobStatus::Unknown {
+                    format!("Run ended but its exit status was not recorded: {stem}")
                 } else {
                     format!("Run failed (exit {exit_code}): {stem}")
                 };

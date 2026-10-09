@@ -1814,11 +1814,9 @@ fn reconnect_orphaned_runs(state: &mut AppState) {
     let mut last_run_id: Option<String> = None;
 
     for (mfst_path, manifest) in manifests {
-        if !RunManifest::is_pid_alive(manifest.pid) {
-            // Process already gone — remove stale manifest.
-            RunManifest::remove(&mfst_path);
-            continue;
-        }
+        // Gone, or the PID now belongs to a different process (recorded start time differs).
+        let same_process = manifest.identity.as_ref().is_none_or(|i| i.is_still_that_process());
+        let alive = RunManifest::is_pid_alive(manifest.pid) && same_process;
 
         // Reconstruct a minimal RunRecord (full details not in manifest).
         let record = RunRecord {
@@ -1835,6 +1833,23 @@ fn reconnect_orphaned_runs(state: &mut AppState) {
             data_path:     None,
             file_hashes:   HashMap::new(),
         };
+
+        if !alive {
+            // The run ended while the GUI was closed. Record it with what we can establish
+            // (status file + a valid bundle), instead of silently forgetting it.
+            let mut done = record.clone();
+            let code = crate::workers::run::orphan_exit_code(manifest.status_path.as_deref(), &done);
+            done.status = match code {
+                0 => JobStatus::Completed,
+                crate::workers::run::EXIT_UNKNOWN => JobStatus::Unknown,
+                _ => JobStatus::Failed,
+            };
+            done.completed = Some(crate::workers::run::now_iso());
+            state.run.run_history.push(done);
+            if let Some(sp) = &manifest.status_path { let _ = std::fs::remove_file(sp); }
+            RunManifest::remove(&mfst_path);
+            continue;
+        }
 
         let (cancel_tx, cancel_rx) = std::sync::mpsc::channel::<CancelMode>();
         let tx = state.worker_tx.clone();

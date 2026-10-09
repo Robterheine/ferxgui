@@ -311,7 +311,7 @@ fn build_row(hist_idx: usize, state: &AppState) -> RowData {
     let dot_color = match &rec.status {
         JobStatus::Completed => theme::GREEN,
         JobStatus::Failed    => theme::RED,
-        JobStatus::Cancelled => theme::ORANGE,
+        JobStatus::Cancelled | JobStatus::Unknown => theme::ORANGE,
         JobStatus::Running   => theme::ACCENT,
     };
     let status_ord = match &rec.status {
@@ -439,6 +439,7 @@ fn show_detail(
                     JobStatus::Completed => (theme::GREEN,  "Completed"),
                     JobStatus::Failed    => (theme::RED,    "Failed"),
                     JobStatus::Cancelled => (theme::ORANGE, "Cancelled"),
+                    JobStatus::Unknown   => (theme::ORANGE, "Unknown (exit status not recorded)"),
                     JobStatus::Running   => (theme::ACCENT, "Running"),
                 };
                 let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());

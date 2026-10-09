@@ -294,7 +294,7 @@ cat(toJSON(list(covariance_status = fit$covariance_status), auto_unbox = TRUE, d
 "#;
 
 /// Run script — spawned (detached) to fit a model and write a `.fitrx` bundle.
-/// Args: <model> <data> <method> <covariance> <out.fitrx> [gradient] [settings_json] [threads] [optimizer_trace]
+/// Args: <model> <data> <method> <covariance> <out.fitrx> [gradient] [settings_json] [threads] [optimizer_trace] [status_path]
 pub const RUN_FERX_R: &str = r#"
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) < 5) stop("usage: run_ferx.R <model> <data> <method> <covariance> <out.fitrx> [gradient] [settings_json] [threads] [optimizer_trace]")
@@ -318,15 +318,24 @@ gradient        <- if (length(args) >= 6 && nchar(args[6]) > 0) args[6] else "au
 settings_val    <- if (length(args) >= 7 && nchar(args[7]) > 0) jsonlite::fromJSON(args[7]) else NULL
 threads_n       <- if (length(args) >= 8 && nchar(args[8]) > 0) as.integer(args[8]) else NULL
 optimizer_trace <- if (length(args) >= 9 && args[9] == "true") TRUE else FALSE
+status_path     <- if (length(args) >= 10 && nchar(args[10]) > 0) args[10] else NULL
 
-fit <- ferx_fit(model = model_path, data = data_path,
-                method = method, covariance = covariance,
-                gradient = gradient,
-                threads = threads_n,
-                optimizer_trace = optimizer_trace,
-                settings = settings_val)
-ferx_save_fit(fit, out_path)
-cat(sprintf("[ferxgui] saved %s\n", out_path))
+# The exit status is written to a file however the script ends, so a run that outlives the GUI can
+# still be classified (the GUI cannot read the exit code of a process it did not start).
+status <- 1L
+tryCatch({
+  fit <- ferx_fit(model = model_path, data = data_path,
+                  method = method, covariance = covariance,
+                  gradient = gradient,
+                  threads = threads_n,
+                  optimizer_trace = optimizer_trace,
+                  settings = settings_val)
+  ferx_save_fit(fit, out_path)
+  cat(sprintf("[ferxgui] saved %s\n", out_path))
+  status <- 0L
+}, finally = {
+  if (!is.null(status_path)) try(writeLines(as.character(status), status_path), silent = TRUE)
+})
 "#;
 
 // VPC bridge: all statistics are computed by the `vpc` package (vpcdb = TRUE);

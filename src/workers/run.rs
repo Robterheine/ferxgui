@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use crate::domain::{JobStatus, RunRecord};
 use super::messages::{CancelMode, WorkerMsg};
+use super::procid::{may_signal, ProcessIdentity};
 use super::run_manifest::RunManifest;
 
 // ---------------------------------------------------------------------------
@@ -41,6 +42,7 @@ pub fn spawn_detached_run(
     cwd: PathBuf,
     log_path: PathBuf,
     manifest_path: PathBuf,
+    status_path: Option<PathBuf>,
     tx: Sender<WorkerMsg>,
     cancel_rx: Receiver<CancelMode>,
 ) -> std::io::Result<SpawnedRun> {
@@ -106,6 +108,8 @@ pub fn spawn_detached_run(
         log_path: log_path.clone(),
         command: record.command.clone(),
         directory: cwd,
+        status_path,
+        identity: ProcessIdentity::of(pid),
     };
     manifest.write(&manifest_path)?;
 
@@ -113,8 +117,9 @@ pub fn spawn_detached_run(
     let mp2  = manifest_path.clone();
     let lp2  = log_path.clone();
     let rec2 = record;
+    let identity = manifest.identity.clone();
     std::thread::spawn(move || {
-        fresh_run_worker(child, pid, rec2, lp2, mp2, tx, cancel_rx);
+        fresh_run_worker(child, pid, identity, rec2, lp2, mp2, tx, cancel_rx);
     });
 
     Ok(SpawnedRun { log_path })
@@ -132,8 +137,10 @@ pub fn reconnect_orphan(
 ) {
     let log_path  = manifest.log_path.clone();
     let pid       = manifest.pid;
+    let identity  = manifest.identity.clone();
+    let status    = manifest.status_path.clone();
     std::thread::spawn(move || {
-        orphan_worker(pid, record, log_path, manifest_path, tx, cancel_rx);
+        orphan_worker(pid, identity, status, record, log_path, manifest_path, tx, cancel_rx);
     });
 }
 
@@ -145,6 +152,7 @@ pub fn reconnect_orphan(
 fn fresh_run_worker(
     child: std::process::Child,
     pid: u32,
+    identity: Option<ProcessIdentity>,
     record: RunRecord,
     log_path: PathBuf,
     manifest_path: PathBuf,
@@ -155,7 +163,7 @@ fn fresh_run_worker(
     let tx2  = tx.clone();
     let stem = record.model_stem.clone();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        fresh_run_worker_inner(child, pid, record, log_path, manifest_path, tx, cancel_rx);
+        fresh_run_worker_inner(child, pid, identity, record, log_path, manifest_path, tx, cancel_rx);
     }));
     if result.is_err() {
         RunManifest::remove(&mp);
@@ -169,6 +177,7 @@ fn fresh_run_worker(
 fn fresh_run_worker_inner(
     mut child: std::process::Child,
     pid: u32,
+    identity: Option<ProcessIdentity>,
     record: RunRecord,
     log_path: PathBuf,
     manifest_path: PathBuf,
@@ -181,7 +190,7 @@ fn fresh_run_worker_inner(
     let exit_code = loop {
         // ── Cancel check ────────────────────────────────────────────────
         if let Ok(mode) = cancel_rx.try_recv() {
-            apply_cancel(mode, &mut child, pid);
+            apply_cancel(mode, &mut child, pid, identity.as_ref(), &tx, &record.model_stem);
             let _ = child.wait();
             finish(record, -1, &manifest_path, &tx);
             return;
@@ -220,6 +229,8 @@ fn fresh_run_worker_inner(
 /// Monitor + tailer for a reconnected orphan (no Child handle).
 fn orphan_worker(
     pid: u32,
+    identity: Option<ProcessIdentity>,
+    status_path: Option<PathBuf>,
     record: RunRecord,
     log_path: PathBuf,
     manifest_path: PathBuf,
@@ -230,7 +241,7 @@ fn orphan_worker(
     let tx2  = tx.clone();
     let stem = record.model_stem.clone();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        orphan_worker_inner(pid, record, log_path, manifest_path, tx, cancel_rx);
+        orphan_worker_inner(pid, identity, status_path, record, log_path, manifest_path, tx, cancel_rx);
     }));
     if result.is_err() {
         RunManifest::remove(&mp);
@@ -243,6 +254,8 @@ fn orphan_worker(
 
 fn orphan_worker_inner(
     pid: u32,
+    identity: Option<ProcessIdentity>,
+    status_path: Option<PathBuf>,
     record: RunRecord,
     log_path: PathBuf,
     manifest_path: PathBuf,
@@ -255,6 +268,15 @@ fn orphan_worker_inner(
     loop {
         // ── Cancel check ────────────────────────────────────────────────
         if let Ok(mode) = cancel_rx.try_recv() {
+            if !may_signal(identity.as_ref(), pid) {
+                // Never signal a PID we cannot prove is still our run (it may have been reused).
+                let _ = tx.send(WorkerMsg::RunLine {
+                    stem: record.model_stem.clone(),
+                    line: format!("[ferxgui] Cancel refused: could not verify that process {pid} is still \
+                                   this run (its start time is missing or differs). Nothing was signalled."),
+                });
+                continue;
+            }
             kill_pid(mode, pid);
             // Give it a moment before draining final output.
             std::thread::sleep(Duration::from_millis(500));
@@ -273,8 +295,10 @@ fn orphan_worker_inner(
         // Throttled so Windows doesn't spawn `tasklist` at 10 Hz.
         if tick.is_multiple_of(5) && !RunManifest::is_pid_alive(pid) {
             log_reader.drain(&tx);
-            // We don't know the exit code from a reconnected run.
-            finish(record, 0, &manifest_path, &tx);
+            // We cannot read the exit code of a process we did not start; the run script wrote its
+            // status to a file, and a completed run must also have left a valid bundle.
+            let code = orphan_exit_code(status_path.as_deref(), &record);
+            finish(record, code, &manifest_path, &tx);
             return;
         }
 
@@ -287,7 +311,24 @@ fn orphan_worker_inner(
 // ---------------------------------------------------------------------------
 
 /// Apply a cancel request to a Child.
-fn apply_cancel(mode: CancelMode, child: &mut std::process::Child, pid: u32) {
+fn apply_cancel(
+    mode: CancelMode,
+    child: &mut std::process::Child,
+    pid: u32,
+    identity: Option<&ProcessIdentity>,
+    tx: &Sender<WorkerMsg>,
+    stem: &str,
+) {
+    // We hold the Child (not yet reaped), so its PID cannot have been reused; the identity check
+    // still guards the PID-addressed signals against any bookkeeping error.
+    if !may_signal(identity, pid) {
+        let _ = tx.send(WorkerMsg::RunLine {
+            stem: stem.to_string(),
+            line: "[ferxgui] process identity could not be verified; using the process handle only".into(),
+        });
+        let _ = child.kill();
+        return;
+    }
     match mode {
         CancelMode::Graceful => {
             // Send the platform's "please stop cleanly" signal, then wait up to
@@ -329,6 +370,7 @@ fn kill_pid(mode: CancelMode, pid: u32) {
 
 #[cfg(unix)]
 fn sigterm(pid: u32) {
+    if !super::procid::pid_in_range(pid) { return; }
     extern "C" { fn kill(pid: i32, sig: i32) -> i32; }
     unsafe { kill(pid as i32, 15); } // SIGTERM = 15
 }
@@ -349,6 +391,7 @@ fn ctrl_break(pid: u32) {
 }
 
 pub(crate) fn kill_hard(pid: u32) {
+    if !super::procid::pid_in_range(pid) { return; }
     #[cfg(unix)]
     { extern "C" { fn kill(pid: i32, sig: i32) -> i32; }
       unsafe { kill(pid as i32, 9); } } // SIGKILL = 9
@@ -360,10 +403,42 @@ pub(crate) fn kill_hard(pid: u32) {
     }
 }
 
+/// Exit code reported for a run whose outcome could not be determined.
+pub const EXIT_UNKNOWN: i32 = -2;
+
+/// Outcome of a run that ended while the GUI was not watching: Completed only when the run script
+/// recorded status 0 AND the bundle parses with a finite OFV; a recorded non-zero status is a
+/// failure; anything else is Unknown rather than a guess.
+pub fn orphan_exit_code(status_path: Option<&Path>, record: &RunRecord) -> i32 {
+    let status = status_path
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| t.trim().parse::<i32>().ok());
+    let bundle = record.directory.join(format!("{}.fitrx", record.model_stem));
+    classify_orphan(status, || {
+        crate::io::fitrx::read_fit_summary(&bundle).map(|f| f.ofv.is_finite()).unwrap_or(false)
+    })
+}
+
+fn classify_orphan(status: Option<i32>, bundle_ok: impl FnOnce() -> bool) -> i32 {
+    match status {
+        Some(0) if bundle_ok() => 0,
+        Some(0) => EXIT_UNKNOWN, // claimed success, but no valid result: do not call it Completed
+        Some(n) => if n == 0 { 1 } else { n },
+        None => EXIT_UNKNOWN,
+    }
+}
+
 /// Send `RunFinished` and remove the manifest.
 fn finish(mut record: RunRecord, exit_code: i32, manifest_path: &Path, tx: &Sender<WorkerMsg>) {
+    if let Some(m) = RunManifest::load(manifest_path) {
+        if let Some(sp) = m.status_path { let _ = std::fs::remove_file(sp); }
+    }
     record.completed = Some(now_iso());
-    record.status = if exit_code == 0 { JobStatus::Completed } else { JobStatus::Failed };
+    record.status = match exit_code {
+        0 => JobStatus::Completed,
+        EXIT_UNKNOWN => JobStatus::Unknown,
+        _ => JobStatus::Failed,
+    };
     RunManifest::remove(manifest_path);
     let _ = tx.send(WorkerMsg::RunFinished { exit_code, record: Box::new(record) });
 }
@@ -510,5 +585,76 @@ mod format_iso_timestamp_tests {
     #[test]
     fn falls_back_to_input_unchanged_when_no_t_present() {
         assert_eq!(format_iso_timestamp("not-a-timestamp"), "not-a-timestamp");
+    }
+}
+
+#[cfg(test)]
+mod orphan_status_tests {
+    use super::*;
+
+    #[test]
+    fn orphan_without_status_is_unknown() {
+        assert_eq!(classify_orphan(None, || true), EXIT_UNKNOWN);
+    }
+
+    #[test]
+    fn orphan_status_zero_and_valid_bundle_is_completed() {
+        assert_eq!(classify_orphan(Some(0), || true), 0);
+        // success claimed but no valid bundle: not Completed
+        assert_eq!(classify_orphan(Some(0), || false), EXIT_UNKNOWN);
+    }
+
+    #[test]
+    fn orphan_status_nonzero_is_failed() {
+        assert_eq!(classify_orphan(Some(1), || true), 1);
+        assert_eq!(classify_orphan(Some(137), || false), 137);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kill_refused_on_identity_mismatch() {
+        use super::super::procid::ProcessIdentity;
+        let mut child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id();
+        let dir = std::env::temp_dir().join(format!("ferxgui_orphan_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest = RunManifest {
+            version: RunManifest::VERSION, run_id: "r".into(), model_stem: "m".into(), pid,
+            log_path: dir.join("m.log"), command: "sleep".into(), directory: dir.clone(),
+            status_path: Some(dir.join("m.status")),
+            identity: Some(ProcessIdentity { pid, start_time: "definitely-not-its-start-time".into() }),
+        };
+        let record = RunRecord {
+            id: "r".into(), model_stem: "m".into(), tool: "ferx".into(), method: None,
+            status: JobStatus::Running, started: String::new(), completed: None, duration_secs: None,
+            command: String::new(), directory: dir.clone(), data_path: None, file_hashes: Default::default(),
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (cancel_tx, cancel_rx) = std::sync::mpsc::channel();
+        reconnect_orphan(manifest, dir.join("m.runmfst"), record, tx, cancel_rx);
+        cancel_tx.send(CancelMode::Kill).unwrap();
+        // The worker must say it refused, and the process must still be alive.
+        let mut refused = false;
+        let t0 = std::time::Instant::now();
+        while t0.elapsed() < Duration::from_secs(3) && !refused {
+            if let Ok(WorkerMsg::RunLine { line, .. }) = rx.recv_timeout(Duration::from_millis(200)) {
+                refused = line.contains("Cancel refused");
+            }
+        }
+        assert!(refused, "worker did not report the refusal");
+        assert!(child.try_wait().unwrap().is_none(), "child must be untouched");
+        // Real kill with the true identity works; the worker then reports Unknown (no status file).
+        assert!(super::super::procid::may_signal(ProcessIdentity::of(pid).as_ref(), pid));
+        kill_hard(pid);
+        let _ = child.wait();
+        let mut finished = None;
+        let t1 = std::time::Instant::now();
+        while t1.elapsed() < Duration::from_secs(6) && finished.is_none() {
+            if let Ok(WorkerMsg::RunFinished { exit_code, record }) = rx.recv_timeout(Duration::from_millis(300)) {
+                finished = Some((exit_code, record.status.clone()));
+            }
+        }
+        assert_eq!(finished, Some((EXIT_UNKNOWN, JobStatus::Unknown)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
