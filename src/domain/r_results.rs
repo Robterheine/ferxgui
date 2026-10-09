@@ -455,6 +455,11 @@ pub struct SirResult {
     #[serde(default)]
     pub sir_resamples_dim:  usize,
 
+    /// False when the packed layout is not verified (block omega / sigma, IOV kappa): the CI
+    /// table is still ferx's own, but no histograms or correlations are derived.
+    #[serde(default)]
+    pub hist_supported: bool,
+
     /// `FitSummary::estimates_fingerprint()` of the fit this result was computed from.
     /// Results without one (older caches, legacy bundles) are never reused.
     #[serde(default)]

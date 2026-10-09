@@ -37,7 +37,7 @@ out <- list(
                 else paste(as.character(info$residual), collapse = " ")
 )
 
-cat(toJSON(out, auto_unbox = TRUE))
+cat(toJSON(out, auto_unbox = TRUE, digits = NA))
 "#;
 
 const CHECK_INIT_R: &str = r#"
@@ -63,7 +63,7 @@ out <- list(
   ofv_drop  = finite_or_null(s$ofv_drop),
   converged = isTRUE(s$converged)
 )
-cat(toJSON(out, auto_unbox = TRUE, na = "null"))
+cat(toJSON(out, auto_unbox = TRUE, digits = NA, na = "null"))
 "#;
 
 /// Static syntax/structure validation of a `.ferx` file — no fit, no
@@ -91,7 +91,7 @@ rows <- if (is.null(diag) || nrow(diag) == 0) list() else lapply(seq_len(nrow(di
     suggestion = if (is.na(diag$suggestion[i])) NA_character_ else as.character(diag$suggestion[i])
   )
 })
-cat(toJSON(list(ok = isTRUE(res$ok), diagnostics = rows), auto_unbox = TRUE, na = "null"))
+cat(toJSON(list(ok = isTRUE(res$ok), diagnostics = rows), auto_unbox = TRUE, digits = NA, na = "null"))
 "#;
 
 /// Call `ferx_model_validate()` via R — static syntax/structure check, no
@@ -147,7 +147,7 @@ rows <- lapply(seq_len(nrow(sd)), function(i) {
     npd   = as.numeric(sd$NPD[i])
   )
 })
-cat(toJSON(list(rows = rows), auto_unbox = TRUE, na = "null"))
+cat(toJSON(list(rows = rows), auto_unbox = TRUE, digits = NA, na = "null"))
 "#;
 
 /// Call `ferx_simulate_adaptive()` via R. Blocking — run from a background thread.
@@ -266,7 +266,7 @@ cat(toJSON(list(
   doses = dose_rows,
   decisions = dec_rows,
   metrics = met_rows
-), auto_unbox = TRUE, na = "null"))
+), auto_unbox = TRUE, digits = NA, na = "null"))
 "#;
 
 /// Recompute the covariance step on an existing `.fitrx` bundle and overwrite
@@ -290,7 +290,7 @@ invisible(ferx_load_fit(tmp_path))
 file.copy(fitrx_path, paste0(fitrx_path, ".bak"), overwrite = TRUE)
 if (!file.rename(tmp_path, fitrx_path)) stop("could not replace the bundle")
 
-cat(toJSON(list(covariance_status = fit$covariance_status), auto_unbox = TRUE))
+cat(toJSON(list(covariance_status = fit$covariance_status), auto_unbox = TRUE, digits = NA))
 "#;
 
 /// Run script — spawned (detached) to fit a model and write a `.fitrx` bundle.
@@ -337,7 +337,7 @@ args <- commandArgs(trailingOnly = TRUE)
 if (length(args) < 1) stop("usage: vpc.R <config_json_path>")
 
 emit_error <- function(kind, msg) {
-  cat(jsonlite::toJSON(list(error = msg, error_kind = kind), auto_unbox = TRUE))
+  cat(jsonlite::toJSON(list(error = msg, error_kind = kind), auto_unbox = TRUE, digits = NA))
   quit(save = "no", status = 0)
 }
 
@@ -658,7 +658,7 @@ args <- commandArgs(trailingOnly = TRUE)
 if (length(args) < 1) stop("usage: simulate.R <config_json_path>")
 
 emit_error <- function(kind, msg) {
-  cat(jsonlite::toJSON(list(error = msg, error_kind = kind), auto_unbox = TRUE))
+  cat(jsonlite::toJSON(list(error = msg, error_kind = kind), auto_unbox = TRUE, digits = NA))
   quit(save = "no", status = 0)
 }
 
@@ -749,7 +749,7 @@ result <- list(
   n_rows   = nrow(merged),
   columns  = as.list(names(merged))
 )
-cat(toJSON(result, auto_unbox = TRUE))
+cat(toJSON(result, auto_unbox = TRUE, digits = NA))
 "#;
 
 const SIR_R: &str = r#"
@@ -760,6 +760,10 @@ sir_samples   <- as.integer(args[2])
 sir_resamples <- as.integer(args[3])
 sir_seed      <- as.integer(args[4])
 keep_samples  <- if (length(args) >= 5) tolower(args[5]) == "true" else TRUE
+# Declared theta lower bounds (comma list; "" when unknown) and whether the packed layout is the
+# diagonal one this script can undo (no block omega / sigma, no IOV kappa).
+theta_lower   <- if (length(args) >= 6 && nchar(args[6]) > 0) as.numeric(strsplit(args[6], ",")[[1]]) else numeric(0)
+layout_ok     <- if (length(args) >= 7) tolower(args[7]) == "true" else FALSE
 
 suppressMessages(library(ferx))
 suppressMessages(library(jsonlite))
@@ -810,6 +814,16 @@ if (keep_samples &&
 
   # Build canonical parameter name vector: theta, omega diagonal, sigma.
   theta_names <- names(sir_fit$theta)
+  # The packed layout is only known for diagonal omega / sigma and no kappa, and only when every
+  # theta's declared bound is known. Otherwise the raw resamples are kept (simulation needs
+  # them) but no histogram or correlation is derived from guessed columns.
+  hist_ok <- layout_ok && length(theta_lower) == length(theta_names) &&
+             n_dim == length(theta_names) + nrow(sir_fit$omega) + length(sir_fit$sigma)
+  result$hist_supported <- hist_ok
+  if (!hist_ok) {
+    cat(toJSON(result, auto_unbox = TRUE, digits = NA, na = "null"))
+    quit(save = "no", status = 0)
+  }
   n_eta <- nrow(sir_fit$omega)
   en    <- sir_fit$eta_names
   omega_names <- if (!is.null(en) && length(en) == n_eta) en
@@ -820,17 +834,18 @@ if (keep_samples &&
                  else paste0("SIGMA(", seq_along(sir_fit$sigma), ")")
   all_names <- c(theta_names, omega_names, sigma_names)[seq_len(n_dim)]
 
-  # Back-transform from ferx's internal unconstrained parameterisation to
-  # natural scale so histograms match the point estimates and CIs:
-  #   Theta (positive-bounded): log → exp(x)
-  #   Omega diagonal:           log-Cholesky = 0.5*log(var) → exp(2*x)
-  #   Sigma:                    log(sigma_SD) → exp(x)
+  # Back-transform from ferx's packed parameterisation to natural scale so histograms match the
+  # point estimates and CIs (ferx docs, estimation/parameterization):
+  #   Theta with declared lower bound >= 0: packed as log -> exp(x)
+  #   Theta with a negative lower bound:    packed on the identity scale -> unchanged
+  #   Omega diagonal:                       log-Cholesky = 0.5*log(var) -> exp(2*x)
+  #   Sigma:                                log(sigma_SD) -> exp(x)
   n_theta_params <- length(theta_names)
   n_omega_params <- min(n_eta, n_dim - n_theta_params)
   n_sigma_params <- n_dim - n_theta_params - n_omega_params
 
-  if (n_theta_params > 0) {
-    mat[, seq_len(n_theta_params)] <- exp(mat[, seq_len(n_theta_params)])
+  for (j in seq_len(n_theta_params)) {
+    if (theta_lower[j] >= 0) mat[, j] <- exp(mat[, j])
   }
   if (n_omega_params > 0) {
     omega_cols <- seq(n_theta_params + 1, n_theta_params + n_omega_params)
@@ -857,7 +872,7 @@ if (keep_samples &&
   result$param_samples <- param_samples
 }
 
-cat(toJSON(result, auto_unbox = TRUE, na = "null"))
+cat(toJSON(result, auto_unbox = TRUE, digits = NA, na = "null"))
 "#;
 
 /// GOF export script.
@@ -1035,7 +1050,7 @@ if (is.null(result) || !is.data.frame(result) || nrow(result) == 0) {
   data_path    <- tryCatch(fit$data_path, error = function(e) NULL)
   data_missing <- !is.null(data_path) && length(data_path) == 1 &&
                   !is.na(data_path) && nzchar(data_path) && !file.exists(data_path)
-  cat(toJSON(list(rows = list(), data_unavailable = data_missing), auto_unbox = TRUE))
+  cat(toJSON(list(rows = list(), data_unavailable = data_missing), auto_unbox = TRUE, digits = NA))
 } else {
   rows <- lapply(seq_len(nrow(result)), function(i) {
     r_v   <- result$r[i]
@@ -1049,7 +1064,7 @@ if (is.null(result) || !is.data.frame(result) || nrow(result) == 0) {
       flag      = flg
     )
   })
-  cat(toJSON(list(rows = rows, data_unavailable = FALSE), auto_unbox = TRUE, na = "null"))
+  cat(toJSON(list(rows = rows, data_unavailable = FALSE), auto_unbox = TRUE, digits = NA, na = "null"))
 }
 "#;
 
@@ -1077,13 +1092,13 @@ no_etas       <- is.null(fit$ebe_etas) || !is.data.frame(fit$ebe_etas)
 
 if (no_covariates || no_etas) {
   cat(toJSON(list(rows = list(), no_covariates = no_covariates, no_etas = no_etas),
-             auto_unbox = TRUE))
+             auto_unbox = TRUE, digits = NA))
 } else {
   # ferx_cov_screen() prints its summary table to the console — capture it.
   invisible(capture.output(result <- ferx_cov_screen(fit)))
 
   if (is.null(result) || !is.data.frame(result) || nrow(result) == 0) {
-    cat(toJSON(list(rows = list(), no_covariates = FALSE, no_etas = FALSE), auto_unbox = TRUE))
+    cat(toJSON(list(rows = list(), no_covariates = FALSE, no_etas = FALSE), auto_unbox = TRUE, digits = NA))
   } else {
     rows <- lapply(seq_len(nrow(result)), function(i) {
       ebe_v <- result$ebe[i]
@@ -1097,7 +1112,7 @@ if (no_covariates || no_etas) {
       )
     })
     cat(toJSON(list(rows = rows, no_covariates = FALSE, no_etas = FALSE),
-               auto_unbox = TRUE, na = "null"))
+               auto_unbox = TRUE, digits = NA, na = "null"))
   }
 }
 "#;
@@ -1612,21 +1627,35 @@ pub fn compute_sir(
     seed:         u32,
     keep_samples: bool,
 ) -> Result<SirResult, String> {
+    let fit = crate::io::fitrx::read_fit_summary(fitrx_path).ok();
+    let theta_lower = fit.as_ref()
+        .filter(|f| f.theta_lower.len() == f.theta.len())
+        .map(|f| f.theta_lower.iter().map(|v| format!("{v}")).collect::<Vec<_>>().join(","))
+        .unwrap_or_default();
+    let layout_ok = fit.as_ref().is_some_and(sir_layout_supported);
     let json = run_script(SIR_R, &[
         path_as_str(fitrx_path)?,
         &n_samples.to_string(),
         &n_resamples.to_string(),
         &seed.to_string(),
         if keep_samples { "true" } else { "false" },
+        &theta_lower,
+        if layout_ok { "true" } else { "false" },
     ])?;
     let mut result = parse_sir_result(&json)
         .map_err(|e| format!("SIR JSON parse error: {e}\nR output: {}", crate::util::truncate_chars(&json, 500)))?;
-    result.fingerprint = crate::io::fitrx::read_fit_summary(fitrx_path).ok()
-        .and_then(|f| f.estimates_fingerprint());
+    result.fingerprint = fit.as_ref().and_then(|f| f.estimates_fingerprint());
     result.settings = Some(crate::domain::SirSettings {
         samples: n_samples, resamples: n_resamples, seed, keep: keep_samples,
     });
     Ok(result)
+}
+
+/// The packed SIR column order is documented for diagonal omega / sigma only. Block omega,
+/// block sigma and IOV kappa fail closed (no histograms, no correlation matrix) until the
+/// order is verified against `fit$omega`.
+pub fn sir_layout_supported(f: &crate::domain::FitSummary) -> bool {
+    f.omega_is_diagonal != Some(false) && f.n_kappa == 0 && f.residual_correlations.is_empty()
 }
 
 fn parse_sir_result(json: &str) -> Result<SirResult, serde_json::Error> {
@@ -1660,6 +1689,7 @@ fn parse_sir_result(json: &str) -> Result<SirResult, serde_json::Error> {
         #[serde(default)] sir_resamples_flat: Vec<f64>,
         #[serde(default)] sir_resamples_n:    usize,
         #[serde(default)] sir_resamples_dim:  usize,
+        #[serde(default)] hist_supported:     bool,
     }
     let w: Wire = serde_json::from_str(json)?;
     Ok(SirResult {
@@ -1674,6 +1704,7 @@ fn parse_sir_result(json: &str) -> Result<SirResult, serde_json::Error> {
         sir_resamples_flat: w.sir_resamples_flat,
         sir_resamples_n:    w.sir_resamples_n,
         sir_resamples_dim:  w.sir_resamples_dim,
+        hist_supported: w.hist_supported,
         fingerprint: None,
         settings:    None,
     })
@@ -2470,5 +2501,55 @@ mod vpc_live_tests {
         let total_obs: usize = want.values().sum();
         let got_pts = res.obs_points.len();
         assert_eq!(got_pts, total_obs, "observed points {got_pts} vs raw observations {total_obs}");
+    }
+}
+
+#[cfg(test)]
+mod sir_layout_tests {
+    use super::*;
+    use crate::util::testsupport::{available, fixture, r_with_ferx};
+
+    #[test]
+    fn block_sir_histograms_hidden() {
+        let diag = crate::io::fitrx::read_fit_summary(&fixture("warfarin.fitrx")).unwrap();
+        let block = crate::io::fitrx::read_fit_summary(&fixture("warfarin_block_omega.fitrx")).unwrap();
+        assert!(sir_layout_supported(&diag));
+        assert!(!sir_layout_supported(&block));
+    }
+
+    /// Live: a diagonal fit gets histograms; a block-omega fit gets the CI table and raw
+    /// resamples but no derived samples.
+    #[test]
+    fn sir_live_diag_and_block() {
+        if !available(r_with_ferx(), "Rscript with ferx") { return; }
+        let d = compute_sir(&fixture("warfarin.fitrx"), 200, 100, 1, true).unwrap();
+        assert!(d.hist_supported && !d.param_samples.is_empty());
+        assert_eq!(d.corr_names.len(), 7); // 3 theta + 3 omega + 1 sigma
+        let b = compute_sir(&fixture("warfarin_block_omega.fitrx"), 200, 100, 1, true).unwrap();
+        assert!(!b.hist_supported && b.param_samples.is_empty() && b.corr_flat.is_empty());
+        assert!(!b.theta.is_empty(), "CI table still shown");
+    }
+
+    /// Plan §5.8: an identity-packed theta (declared lower bound < 0) must not be exp()-ed. The
+    /// histogram column's 2.5/97.5 % quantiles must equal ferx's own natural-scale interval.
+    #[test]
+    fn sir_identity_packed_theta_is_not_exponentiated() {
+        if !available(r_with_ferx(), "Rscript with ferx") { return; }
+        let r = compute_sir(&fixture("warfarin_add_cl.fitrx"), 400, 200, 1, true).unwrap();
+        assert!(r.hist_supported);
+        let ci = r.theta.iter().find(|c| c.name == "ADD_CL").expect("ADD_CL in ferx CI");
+        let mut col = r.param_samples["ADD_CL"].clone();
+        col.sort_by(f64::total_cmp);
+        let q = |p: f64| { // R type 7
+            let h = p * (col.len() - 1) as f64; let lo = h.floor() as usize;
+            col[lo] + (h - lo as f64) * (col[(lo + 1).min(col.len() - 1)] - col[lo])
+        };
+        assert!((q(0.025) - ci.lo).abs() < 1e-6, "{} vs {}", q(0.025), ci.lo);
+        assert!((q(0.975) - ci.hi).abs() < 1e-6, "{} vs {}", q(0.975), ci.hi);
+        assert!((ci.lo - 0.01742748).abs() < 1e-6 && (ci.hi - 0.09309472).abs() < 1e-6,
+                "plan §5.8 golden: {} {}", ci.lo, ci.hi);
+        // The log-packed thetas still match their ferx interval after exp().
+        let cl = r.theta.iter().find(|c| c.name == "TVCL").unwrap();
+        assert!(cl.lo > 0.0 && r.param_samples["TVCL"].iter().all(|v| *v > 0.0));
     }
 }
