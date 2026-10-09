@@ -312,7 +312,16 @@ fn show_options(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
         }
     });
 
+    let legacy_fit = state.ui.selected_model
+        .and_then(|i| state.workspace.models.get(i))
+        .and_then(|m| m.fit.as_ref())
+        .is_some_and(|f| !f.has_identity());
     section(ui, "Simulation", true, dark, |ui| {
+        if legacy_fit {
+            ui.label(egui::RichText::new("This bundle has no model/data hashes. Re-fit to enable cache checks; \
+                                          the simulation cache is off for this model.")
+                .size(9.5).color(theme::ORANGE));
+        }
         let o = &mut state.ui.vpc_opts;
         egui::Grid::new("vpc_sim_grid").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
             ui.label(egui::RichText::new("Replicates").size(11.0));
@@ -322,6 +331,9 @@ fn show_options(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
             ui.add(egui::DragValue::new(&mut o.seed).speed(1));
             ui.end_row();
         });
+        ui.checkbox(&mut o.allow_changed_files, "Use fitted estimates with the current files")
+            .on_hover_text("Off by default: the VPC is refused when the model or dataset differs \
+                            from what the fit used. Advanced use only.");
         ui.label(egui::RichText::new("Changing these re-simulates (slower).")
             .size(9.5).color(theme::fg3(dark)).italics());
     });
@@ -678,9 +690,31 @@ fn build_config(state: &AppState, idx: usize) -> Result<VpcConfig, String> {
         .ok_or_else(|| "no dataset selected".to_string())?;
     let o = &state.ui.vpc_opts;
 
-    let cache_path = r_extract::vpc_cache_path(
-        &model_path, &data_path, fitrx_path.as_deref(), o.n_sim, o.seed,
-    )?;
+    let fit = state.workspace.models[idx].fit.as_ref();
+    if let Some(f) = fit {
+        if !o.allow_changed_files {
+            let mh = crate::io::fsutil::sha256_file_cached(&model_path);
+            let dh = crate::io::fsutil::sha256_file_cached(&data_path);
+            let changed = |fit_h: &Option<String>, now: &Option<String>| {
+                matches!((fit_h, now), (Some(a), Some(b)) if a != b)
+            };
+            if changed(&f.model_hash, &mh) {
+                return Err("the model file has changed since this fit; re-fit it, or enable \
+                            \"Use fitted estimates with the current files\" under Simulation".into());
+            }
+            if changed(&f.data_hash, &dh) {
+                return Err("the dataset differs from the one this fit used; pick the original \
+                            dataset, re-fit, or enable \"Use fitted estimates with the current files\" \
+                            under Simulation".into());
+            }
+        }
+    }
+    let (cache_path, cache_key) = match r_extract::vpc_cache_path(
+        &model_path, &data_path, fit, o.n_sim, o.seed,
+    ) {
+        Some((p, k)) => (Some(p.to_string_lossy().into_owned()), Some(k)),
+        None => (None, None),
+    };
     let manual_bins = if o.bins_type == "manual" {
         let parsed: Vec<f64> = o.manual_bins.split(',')
             .filter_map(|s| s.trim().parse::<f64>().ok()).collect();
@@ -700,7 +734,7 @@ fn build_config(state: &AppState, idx: usize) -> Result<VpcConfig, String> {
         model_path: model_path.to_string_lossy().into_owned(),
         data_path:  data_path.to_string_lossy().into_owned(),
         fitrx_path: fitrx_path.map(|p| p.to_string_lossy().into_owned()),
-        cache_path: cache_path.to_string_lossy().into_owned(),
+        cache_path, cache_key,
         n_sim: o.n_sim, seed: o.seed,
         pi_lo: o.pi_lo, pi_hi: o.pi_hi,
         ci_lo: o.ci_lo, ci_hi: o.ci_hi,

@@ -21,8 +21,9 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     let has_fitrx = state.workspace.models[idx].fitrx_path.is_some();
     let has_covariance = state.workspace.models[idx].fit.as_ref()
         .map(|f| f.covariance_ok).unwrap_or(false);
+    let fit_fp = state.workspace.models[idx].fit.as_ref().and_then(|f| f.estimates_fingerprint());
     let has_sir_resamples = state.workspace.sir_results.get(&stem)
-        .map(|r| r.sir_resamples_n > 0).unwrap_or(false);
+        .map(|r| r.sir_resamples_n > 0 && r.matches(fit_fp.as_deref())).unwrap_or(false);
     let has_adaptive_dosing = state.workspace.models[idx].model.source.contains("[adaptive_dosing]");
 
     // A fit (and, for the uncertainty bases, a covariance matrix or kept SIR
@@ -367,6 +368,9 @@ fn build_config(state: &AppState, idx: usize) -> Option<SimRunConfig> {
     let (sir_resamples_flat, sir_resamples_n, sir_resamples_dim) = if state.ui.simrun_basis == SimBasis::SirUncertainty {
         let stem = &state.workspace.models[idx].model.stem;
         let sir = state.workspace.sir_results.get(stem)?;
+        // A SIR result from another fit must never drive this simulation.
+        let fp = state.workspace.models[idx].fit.as_ref().and_then(|f| f.estimates_fingerprint());
+        if !sir.matches(fp.as_deref()) { return None; }
         (Some(sir.sir_resamples_flat.clone()), Some(sir.sir_resamples_n), Some(sir.sir_resamples_dim))
     } else {
         (None, None, None)

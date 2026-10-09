@@ -32,7 +32,12 @@ pub struct VpcConfig {
     /// Existing `.fitrx` bundle to load (skips a refit). None → fit from scratch.
     pub fitrx_path: Option<String>,
     /// RDS cache for the simulated dataset; reused when only display options change.
-    pub cache_path: String,
+    /// None for legacy bundles without a fit identity: caching is then disabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_path: Option<String>,
+    /// Identity key embedded in the RDS and checked on read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_key: Option<String>,
     pub n_sim: u32,
     pub seed:  u32,
     /// Prediction-interval bounds (outer percentiles), e.g. 0.05 / 0.95.
@@ -444,6 +449,22 @@ pub struct SirResult {
     /// Parameter dimension (columns of the matrix above).
     #[serde(default)]
     pub sir_resamples_dim:  usize,
+
+    /// `FitSummary::estimates_fingerprint()` of the fit this result was computed from.
+    /// Results without one (older caches, legacy bundles) are never reused.
+    #[serde(default)]
+    pub fingerprint: Option<String>,
+    #[serde(default)]
+    pub settings:    Option<SirSettings>,
+}
+
+/// The SIR run settings, kept with the result so the tab can show what produced it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SirSettings {
+    pub samples:   u32,
+    pub resamples: u32,
+    pub seed:      u32,
+    pub keep:      bool,
 }
 
 impl SirResult {
@@ -459,19 +480,19 @@ impl SirResult {
         std::fs::write(Self::cache_path(fitrx_path), json)
     }
 
-    /// Load from disk if the cache exists and is not older than the `.fitrx`
-    /// (older = stale from a previous estimation run → discard).
-    pub fn load_if_fresh(fitrx_path: &Path) -> Option<Self> {
-        let cache = Self::cache_path(fitrx_path);
-        if !cache.exists() { return None; }
-        // Discard if the .fitrx was written after the SIR cache.
-        let fitrx_mt = std::fs::metadata(fitrx_path).and_then(|m| m.modified()).ok();
-        let cache_mt = std::fs::metadata(&cache).and_then(|m| m.modified()).ok();
-        if let (Some(ft), Some(ct)) = (fitrx_mt, cache_mt) {
-            if ft > ct { return None; }
-        }
-        let json = std::fs::read_to_string(&cache).ok()?;
-        serde_json::from_str(&json).ok()
+    /// True when this result was computed from the fit with the given fingerprint.
+    pub fn matches(&self, fingerprint: Option<&str>) -> bool {
+        matches!((self.fingerprint.as_deref(), fingerprint), (Some(a), Some(b)) if a == b)
+    }
+
+    /// Load from disk only if the cache belongs to the fit with this fingerprint. Identity,
+    /// not file times: a re-fit with new estimates never reuses an old resample set, and a
+    /// touched-but-unchanged bundle does not discard a good one.
+    pub fn load_if_matches(fitrx_path: &Path, fingerprint: Option<&str>) -> Option<Self> {
+        fingerprint?;
+        let json = std::fs::read_to_string(Self::cache_path(fitrx_path)).ok()?;
+        let r: Self = serde_json::from_str(&json).ok()?;
+        r.matches(fingerprint).then_some(r)
     }
 }
 
@@ -754,5 +775,36 @@ mod lenient_number_tests {
         assert!(r.ebe.is_nan() && r.eta.is_nan());
         let ok: CovScreenRow = serde_json::from_str(r#"{"parameter":"CL","covariate":"WT","ebe":0.4,"eta":-0.2}"#).unwrap();
         assert_eq!((ok.ebe, ok.eta), (0.4, -0.2));
+    }
+}
+
+#[cfg(test)]
+mod sir_identity_tests {
+    use super::*;
+
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("ferxgui_sir_{name}_{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d.join("m.fitrx")
+    }
+
+    #[test]
+    fn sir_result_rejected_after_refit() {
+        let fitrx = tmp("refit");
+        let r = SirResult { fingerprint: Some("fit-A".into()), sir_resamples_n: 5, ..Default::default() };
+        r.save(&fitrx).unwrap();
+        assert!(SirResult::load_if_matches(&fitrx, Some("fit-A")).is_some());
+        assert!(SirResult::load_if_matches(&fitrx, Some("fit-B")).is_none(), "re-fit must reject");
+        assert!(SirResult::load_if_matches(&fitrx, None).is_none(), "legacy bundle must reject");
+        assert!(!r.matches(Some("fit-B")));
+        let _ = std::fs::remove_dir_all(fitrx.parent().unwrap());
+    }
+
+    #[test]
+    fn result_without_fingerprint_is_never_reused() {
+        let fitrx = tmp("legacy");
+        SirResult::default().save(&fitrx).unwrap();
+        assert!(SirResult::load_if_matches(&fitrx, Some("fit-A")).is_none());
+        let _ = std::fs::remove_dir_all(fitrx.parent().unwrap());
     }
 }

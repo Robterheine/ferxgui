@@ -270,6 +270,9 @@ impl Default for VpcTheme {
 /// the rest are display options the `vpc` package recomputes cheaply from cache.
 #[derive(Debug, Clone)]
 pub struct VpcOpts {
+    /// Advanced: simulate with the fitted estimates even though the model or dataset file
+    /// differs from the one the fit used. Off by default; the VPC is then refused.
+    pub allow_changed_files: bool,
     pub n_sim: u32,
     pub seed:  u32,
     pub pi_lo: f64,
@@ -334,6 +337,7 @@ pub struct VpcRenderData {
 impl Default for VpcOpts {
     fn default() -> Self {
         Self {
+            allow_changed_files: false,
             n_sim: 500,
             seed:  42,
             pi_lo: 0.05,
@@ -1392,12 +1396,17 @@ impl AppState {
         use WorkerMsg::*;
         match msg {
             ScanComplete(models) => {
-                // Load any fresh SIR caches that appeared on disk.
+                // SIR results are tied to the fit that produced them: drop any in-memory result
+                // whose fit changed, then load matching caches from disk.
                 for m in &models {
+                    let stem = m.model.stem.clone();
+                    let fp = m.fit.as_ref().and_then(|f| f.estimates_fingerprint());
+                    if self.workspace.sir_results.get(&stem).is_some_and(|r| !r.matches(fp.as_deref())) {
+                        self.workspace.sir_results.remove(&stem);
+                    }
                     if let Some(fitrx) = &m.fitrx_path {
-                        let stem = m.model.stem.clone();
                         if let std::collections::hash_map::Entry::Vacant(e) = self.workspace.sir_results.entry(stem) {
-                            if let Some(sir) = crate::domain::SirResult::load_if_fresh(fitrx) {
+                            if let Some(sir) = crate::domain::SirResult::load_if_matches(fitrx, fp.as_deref()) {
                                 e.insert(sir);
                             }
                         }

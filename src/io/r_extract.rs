@@ -279,7 +279,13 @@ suppressMessages(library(jsonlite))
 
 fit <- ferx_load_fit(fitrx_path)
 fit <- ferx_covariance(fit, covariance_method = cov_method)
-ferx_save_fit(fit, fitrx_path)
+# Write to a temporary bundle, prove it loads, keep the old one as .bak, then swap.
+tmp_path <- paste0(sub("\\.fitrx$", "", fitrx_path), ".tmp.fitrx")
+on.exit(unlink(tmp_path), add = TRUE)
+ferx_save_fit(fit, tmp_path)
+invisible(ferx_load_fit(tmp_path))
+file.copy(fitrx_path, paste0(fitrx_path, ".bak"), overwrite = TRUE)
+if (!file.rename(tmp_path, fitrx_path)) stop("could not replace the bundle")
 
 cat(toJSON(list(covariance_status = fit$covariance_status), auto_unbox = TRUE))
 "#;
@@ -448,8 +454,13 @@ cfg <- jsonlite::fromJSON(args[1])
 
 # ---- Fit + simulate, cached by config hash so option tweaks are cheap -------
 sim_dat <- NULL; obs <- NULL
+cached <- NULL
 if (!is.null(cfg$cache_path) && file.exists(cfg$cache_path)) {
-  cached  <- readRDS(cfg$cache_path)
+  cached <- tryCatch(readRDS(cfg$cache_path), error = function(e) NULL)
+  # A cache without the matching identity key is never trusted.
+  if (!is.null(cached) && !identical(cached$key, cfg$cache_key)) cached <- NULL
+}
+if (!is.null(cached)) {
   obs     <- cached$obs
   sim_dat <- cached$sim
 } else {
@@ -473,7 +484,7 @@ if (!is.null(cfg$cache_path) && file.exists(cfg$cache_path)) {
     # script's intended output — breaking a strict JSON parse on the Rust
     # side the moment a fresh (uncached) simulation is computed.
     invisible(tryCatch({
-      saveRDS(list(obs = obs, sim = sim_dat), tmp_cache)
+      saveRDS(list(obs = obs, sim = sim_dat, key = cfg$cache_key), tmp_cache)
       file.rename(tmp_cache, cfg$cache_path)
     }, error = function(e) { unlink(tmp_cache); NULL }))
   }
@@ -1359,8 +1370,13 @@ attach_from_raw <- function(obs, csv_path, col, context, fail) {
 cfg <- jsonlite::fromJSON(args[1])
 
 sim_dat <- NULL; obs <- NULL
+cached <- NULL
 if (!is.null(cfg$cache_path) && file.exists(cfg$cache_path)) {
-  cached  <- readRDS(cfg$cache_path)
+  cached <- tryCatch(readRDS(cfg$cache_path), error = function(e) NULL)
+  # A cache without the matching identity key is never trusted.
+  if (!is.null(cached) && !identical(cached$key, cfg$cache_key)) cached <- NULL
+}
+if (!is.null(cached)) {
   obs     <- cached$obs
   sim_dat <- cached$sim
 } else {
@@ -1384,7 +1400,7 @@ if (!is.null(cfg$cache_path) && file.exists(cfg$cache_path)) {
     # script's intended output — breaking a strict JSON parse on the Rust
     # side the moment a fresh (uncached) simulation is computed.
     invisible(tryCatch({
-      saveRDS(list(obs = obs, sim = sim_dat), tmp_cache)
+      saveRDS(list(obs = obs, sim = sim_dat, key = cfg$cache_key), tmp_cache)
       file.rename(tmp_cache, cfg$cache_path)
     }, error = function(e) { unlink(tmp_cache); NULL }))
   }
@@ -1556,31 +1572,29 @@ if (requireNamespace("vpc", quietly = TRUE)) {
     }
 }
 
-/// Deterministic cache file for a VPC simulated dataset, keyed by the inputs
-/// that actually affect the simulation (model, data, fit, n_sim, seed).
-/// Display options (PI/CI/bins) are deliberately excluded so tweaking them
-/// reuses the cache.
-pub fn vpc_cache_path(model_path: &Path, data_path: &Path, fitrx_path: Option<&Path>, n_sim: u32, seed: u32) -> Result<std::path::PathBuf, String> {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    model_path.hash(&mut h);
-    data_path.hash(&mut h);
-    n_sim.hash(&mut h);
-    seed.hash(&mut h);
-    // Fold in the fit bundle's mtime so a re-fit invalidates the cache.
-    if let Some(fp) = fitrx_path {
-        fp.hash(&mut h);
-        if let Ok(meta) = std::fs::metadata(fp) {
-            if let Ok(modified) = meta.modified() {
-                if let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH) {
-                    dur.as_secs().hash(&mut h);
-                }
-            }
-        }
+/// Bump when the VPC bridge script changes what it stores in the cache.
+const VPC_SCRIPT_VERSION: &str = "2";
+
+/// Cache file and identity key for a VPC simulated dataset. The key covers everything that
+/// changes the simulation: the *content* of the model and dataset files, the fitted estimates,
+/// the ferx version, n_sim, seed and the script version. Display options (PI/CI/bins) are
+/// excluded so tweaking them reuses the cache. None when the fit carries no identity (legacy
+/// bundle) or a file cannot be read: caching is then disabled rather than guessed.
+pub fn vpc_cache_path(
+    model_path: &Path, data_path: &Path, fit: Option<&crate::domain::FitSummary>, n_sim: u32, seed: u32,
+) -> Option<(std::path::PathBuf, String)> {
+    use sha2::{Digest, Sha256};
+    let fp = fit?.estimates_fingerprint()?;
+    let mh = crate::io::fsutil::sha256_file_cached(model_path)?;
+    let dh = crate::io::fsutil::sha256_file_cached(data_path)?;
+    let mut h = Sha256::new();
+    for part in [mh.as_str(), dh.as_str(), fp.as_str(), VPC_SCRIPT_VERSION,
+                 &n_sim.to_string(), &seed.to_string()] {
+        h.update(part.as_bytes()); h.update(b"\x1f");
     }
-    Ok(helper_temp_dir()?
-        .join("ferxgui_vpc_cache")
-        .join(format!("{:016x}.rds", h.finish())))
+    let key: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    let path = helper_temp_dir().ok()?.join("ferxgui_vpc_cache").join(format!("{}.rds", &key[..32]));
+    Some((path, key))
 }
 
 /// Run `ferx_sir()` via R against a saved `.fitrx` bundle.
@@ -1599,8 +1613,14 @@ pub fn compute_sir(
         &seed.to_string(),
         if keep_samples { "true" } else { "false" },
     ])?;
-    parse_sir_result(&json)
-        .map_err(|e| format!("SIR JSON parse error: {e}\nR output: {}", crate::util::truncate_chars(&json, 500)))
+    let mut result = parse_sir_result(&json)
+        .map_err(|e| format!("SIR JSON parse error: {e}\nR output: {}", crate::util::truncate_chars(&json, 500)))?;
+    result.fingerprint = crate::io::fitrx::read_fit_summary(fitrx_path).ok()
+        .and_then(|f| f.estimates_fingerprint());
+    result.settings = Some(crate::domain::SirSettings {
+        samples: n_samples, resamples: n_resamples, seed, keep: keep_samples,
+    });
+    Ok(result)
 }
 
 fn parse_sir_result(json: &str) -> Result<SirResult, serde_json::Error> {
@@ -1648,6 +1668,8 @@ fn parse_sir_result(json: &str) -> Result<SirResult, serde_json::Error> {
         sir_resamples_flat: w.sir_resamples_flat,
         sir_resamples_n:    w.sir_resamples_n,
         sir_resamples_dim:  w.sir_resamples_dim,
+        fingerprint: None,
+        settings:    None,
     })
 }
 
@@ -2364,5 +2386,37 @@ mod validate_live_tests {
         assert!(!r.diagnostics.is_empty());
         assert!(r.diagnostics.iter().all(|d| !d.message.contains("<U+")), "{:?}", r.diagnostics);
         assert!(r.diagnostics.iter().any(|d| d.message.contains('\u{2014}')), "{:?}", r.diagnostics);
+    }
+
+    fn fit_with(theta: f64) -> crate::domain::FitSummary {
+        crate::domain::FitSummary { model_hash: Some("m".into()), data_hash: Some("d".into()),
+            theta: vec![theta], ..Default::default() }
+    }
+
+    #[test]
+    fn vpc_cache_follows_content_not_mtime() {
+        let dir = std::env::temp_dir().join(format!("ferxgui_vpckey_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (m, d) = (dir.join("a.ferx"), dir.join("a.csv"));
+        std::fs::write(&m, b"model-1").unwrap();
+        std::fs::write(&d, b"ID,TIME\n1,0\n").unwrap();
+        let t0 = std::fs::metadata(&m).unwrap().modified().unwrap();
+        let fit = fit_with(1.0);
+        let k0 = super::vpc_cache_path(&m, &d, Some(&fit), 100, 1).unwrap().1;
+        // Same-size edit with mtime restored: still a miss.
+        std::fs::write(&m, b"model-2").unwrap();
+        std::fs::File::options().write(true).open(&m).unwrap().set_modified(t0).unwrap();
+        assert_ne!(k0, super::vpc_cache_path(&m, &d, Some(&fit), 100, 1).unwrap().1);
+        // Touch only: hit.
+        std::fs::write(&m, b"model-1").unwrap();
+        std::fs::File::options().write(true).open(&m).unwrap()
+            .set_modified(t0 + std::time::Duration::from_secs(9)).unwrap();
+        assert_eq!(k0, super::vpc_cache_path(&m, &d, Some(&fit), 100, 1).unwrap().1);
+        // Different estimates, n_sim or seed: miss. Legacy fit: no cache at all.
+        assert_ne!(k0, super::vpc_cache_path(&m, &d, Some(&fit_with(2.0)), 100, 1).unwrap().1);
+        assert_ne!(k0, super::vpc_cache_path(&m, &d, Some(&fit), 101, 1).unwrap().1);
+        assert_ne!(k0, super::vpc_cache_path(&m, &d, Some(&fit), 100, 2).unwrap().1);
+        assert!(super::vpc_cache_path(&m, &d, Some(&crate::domain::FitSummary::default()), 100, 1).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

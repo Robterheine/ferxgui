@@ -1,7 +1,41 @@
 //! Filesystem helpers.
 
+use std::collections::HashMap;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
+
+type HashKey = (PathBuf, u64, Option<SystemTime>);
+
+/// Files up to this size are always re-hashed: it costs milliseconds, and it keeps a same-size
+/// edit with a restored mtime from returning a stale hash.
+const MEMO_MIN_BYTES: u64 = 4 * 1024 * 1024;
+
+/// SHA-256 (lowercase hex) of a file's bytes. Large files are memoised per (path, size, mtime)
+/// so they are hashed once per change, not once per call; small files are always read.
+/// None when the file cannot be read.
+pub fn sha256_file_cached(path: &Path) -> Option<String> {
+    static CACHE: OnceLock<Mutex<HashMap<HashKey, String>>> = OnceLock::new();
+    let meta = std::fs::metadata(path).ok()?;
+    let key = (path.to_path_buf(), meta.len(), meta.modified().ok());
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let memo = meta.len() >= MEMO_MIN_BYTES;
+    if memo {
+        if let Some(h) = cache.lock().ok()?.get(&key) { return Some(h.clone()); }
+    }
+    use sha2::{Digest, Sha256};
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut f, &mut hasher).ok()?;
+    let hex: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    if memo {
+        let mut g = cache.lock().ok()?;
+        if g.len() > 256 { g.clear(); }
+        g.insert(key, hex.clone());
+    }
+    Some(hex)
+}
 
 /// Write `bytes` to `path` atomically: write a temp file in the same
 /// directory, `sync_all`, then rename over the target. A crash mid-write
@@ -24,6 +58,26 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hash_follows_content_not_mtime() {
+        let dir = std::env::temp_dir().join(format!("ferxgui_hash_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("m.ferx");
+        std::fs::write(&p, b"aaaa").unwrap();
+        let t0 = std::fs::metadata(&p).unwrap().modified().unwrap();
+        let h1 = sha256_file_cached(&p).unwrap();
+        // Same size, different content, original mtime restored: must still be a new hash.
+        std::fs::write(&p, b"bbbb").unwrap();
+        std::fs::File::options().write(true).open(&p).unwrap().set_modified(t0).unwrap();
+        let h2 = sha256_file_cached(&p).unwrap();
+        assert_ne!(h1, h2);
+        // Touch without content change: same hash.
+        let t1 = t0 + std::time::Duration::from_secs(5);
+        std::fs::File::options().write(true).open(&p).unwrap().set_modified(t1).unwrap();
+        assert_eq!(sha256_file_cached(&p).unwrap(), h2);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn write_atomic_replaces_and_leaves_no_temp() {
