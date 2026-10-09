@@ -388,10 +388,8 @@ fn sorted_filtered_indices(state: &AppState) -> Vec<usize> {
         let ord = match col {
             HistorySortCol::Model    => ra.stem.cmp(&rb.stem),
             HistorySortCol::Method   => ra.method.cmp(&rb.method),
-            HistorySortCol::Ofv      => ra.ofv_val.partial_cmp(&rb.ofv_val)
-                                           .unwrap_or(std::cmp::Ordering::Equal),
-            HistorySortCol::Duration => ra.duration_val.partial_cmp(&rb.duration_val)
-                                           .unwrap_or(std::cmp::Ordering::Equal),
+            HistorySortCol::Ofv      => crate::util::cmp_nan_last(ra.ofv_val, rb.ofv_val),
+            HistorySortCol::Duration => crate::util::cmp_nan_last(ra.duration_val, rb.duration_val),
             HistorySortCol::Started  => {
                 let ha = &state.run.run_history[a].started;
                 let hb = &state.run.run_history[b].started;

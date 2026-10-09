@@ -930,14 +930,10 @@ fn show_vpc_plot(ui: &mut egui::Ui, vpc: &VpcResult, opts: &VpcOpts, dark: bool)
             // Filter bands and obs rows for this stratum.
             let mut bands: Vec<&crate::domain::VpcBandRow> = vpc.vpc_dat.iter()
                 .filter(|b| b.strat == *strat).collect();
-            bands.sort_by(|a, b| a.bin_mid.unwrap_or(f64::NAN)
-                .partial_cmp(&b.bin_mid.unwrap_or(f64::NAN))
-                .unwrap_or(std::cmp::Ordering::Equal));
+            bands.sort_by(|a, b| crate::util::cmp_nan_last(a.bin_mid.unwrap_or(f64::NAN), b.bin_mid.unwrap_or(f64::NAN)));
             let mut obs_rows: Vec<&crate::domain::VpcObsRow> = vpc.aggr_obs.iter()
                 .filter(|b| b.strat == *strat).collect();
-            obs_rows.sort_by(|a, b| a.bin_mid.unwrap_or(f64::NAN)
-                .partial_cmp(&b.bin_mid.unwrap_or(f64::NAN))
-                .unwrap_or(std::cmp::Ordering::Equal));
+            obs_rows.sort_by(|a, b| crate::util::cmp_nan_last(a.bin_mid.unwrap_or(f64::NAN), b.bin_mid.unwrap_or(f64::NAN)));
 
             // Observed percentile lines (y-transformed for log).
             let obs_line = |sel: &dyn Fn(&crate::domain::VpcObsRow) -> Option<f64>| -> Vec<[f64; 2]> {

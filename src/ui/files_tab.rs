@@ -987,12 +987,7 @@ fn save_filter(state: &mut AppState) {
 // ── OS helpers ────────────────────────────────────────────────────────────────
 
 fn os_open(path: &std::path::Path) {
-    #[cfg(target_os = "macos")]
-    { let _ = std::process::Command::new("open").arg(path).spawn(); }
-    #[cfg(target_os = "linux")]
-    { let _ = std::process::Command::new("xdg-open").arg(path).spawn(); }
-    #[cfg(target_os = "windows")]
-    { let _ = std::process::Command::new("cmd").args(["/c", "start", ""]).arg(path).spawn(); }
+    let _ = open::that_detached(path);
 }
 
 fn reveal_in_finder(path: &std::path::Path) {
@@ -1004,7 +999,12 @@ fn reveal_in_finder(path: &std::path::Path) {
         let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
     }
     #[cfg(target_os = "windows")]
-    { let _ = std::process::Command::new("explorer").arg("/select,").arg(path).spawn(); }
+    {
+        use std::os::windows::process::CommandExt;
+        // One raw argument so a path containing spaces or `&` stays quoted.
+        let _ = std::process::Command::new("explorer")
+            .raw_arg(format!("/select,\"{}\"", path.display())).spawn();
+    }
 }
 
 // ── Formatting helpers ────────────────────────────────────────────────────────

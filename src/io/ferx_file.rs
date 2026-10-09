@@ -458,9 +458,7 @@ fn classify_word(w: &str) -> TokenKind {
     match w {
         "theta" | "omega" | "sigma" | "block_omega" | "block_sigma" | "kappa"
         | "block_kappa" | "prior" => TokenKind::ParamKeyword,
-        "one_cpt_oral" | "one_cpt_iv_bolus" | "one_cpt_infusion"
-        | "two_cpt_oral" | "two_cpt_iv_bolus" | "two_cpt_infusion"
-        | "three_cpt_oral" | "three_cpt_iv_bolus" | "three_cpt_infusion"
+        "one_cpt_oral" | "two_cpt_oral" | "three_cpt_oral" | "three_cpt_infusion"
         | "pk" | "ode" | "ode_template" | "power" => TokenKind::BuiltinFunction,
         "method" | "maxiter" | "covariance" | "gradient" | "threads"
         | "output" | "optimizer" | "interaction" | "lloq"
@@ -482,6 +480,15 @@ fn classify_word(w: &str) -> TokenKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removed_keywords_not_builtin() {
+        for w in ["one_cpt_iv_bolus", "one_cpt_infusion", "two_cpt_iv_bolus",
+                  "two_cpt_infusion", "three_cpt_iv_bolus"] {
+            assert!(!matches!(classify_word(w), TokenKind::BuiltinFunction), "{w}");
+        }
+        assert!(matches!(classify_word("one_cpt_oral"), TokenKind::BuiltinFunction));
+    }
 
     const WARFARIN: &str = r#"
 # One-compartment oral PK model (warfarin)

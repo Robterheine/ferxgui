@@ -3,6 +3,7 @@ mod domain;
 mod io;
 mod notify;
 mod state;
+mod util;
 mod ui;
 mod workers;
 

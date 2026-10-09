@@ -45,8 +45,7 @@ impl EbesData {
     /// Rows sorted by `ofv_contribution` descending (worst subject first).
     pub fn sorted_by_iofv(&self) -> Vec<&EbesRow> {
         let mut v: Vec<&EbesRow> = self.rows.iter().collect();
-        v.sort_by(|a, b| b.ofv_contribution.partial_cmp(&a.ofv_contribution)
-                          .unwrap_or(std::cmp::Ordering::Equal));
+        v.sort_by(|a, b| crate::util::cmp_nan_last(b.ofv_contribution, a.ofv_contribution));
         v
     }
 }

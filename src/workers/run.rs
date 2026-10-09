@@ -396,10 +396,11 @@ impl LogReader {
         let _ = f.seek(SeekFrom::Start(self.pos));
         let mut reader = BufReader::new(&*f);
         loop {
-            let mut line = String::new();
-            match reader.read_line(&mut line) {
+            let mut buf = Vec::new();
+            match reader.read_until(b'\n', &mut buf) {
                 Ok(0) => break,
                 Ok(_) => {
+                    let line = String::from_utf8_lossy(&buf);
                     let trimmed = line.trim_end_matches(['\n', '\r']).to_string();
                     if tx.send(WorkerMsg::RunLine { stem: self.stem.clone(), line: trimmed }).is_err() {
                         return;
@@ -474,6 +475,25 @@ pub fn now_iso() -> String {
 
 fn is_leap(y: u32) -> bool {
     (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
+}
+
+#[cfg(test)]
+mod log_reader_tests {
+    use super::*;
+
+    #[test]
+    fn log_reader_keeps_lines_after_bad_byte() {
+        let path = std::env::temp_dir().join(format!("ferxgui_log_{}.txt", std::process::id()));
+        std::fs::write(&path, b"first line\n\xe9t\xe9 ok\nthird line\n").unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        LogReader::new(path.clone(), "m".into()).drain(&tx);
+        drop(tx);
+        let lines: Vec<String> = rx.iter().filter_map(|m| match m {
+            WorkerMsg::RunLine { line, .. } => Some(line), _ => None }).collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[2], "third line");
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 #[cfg(test)]

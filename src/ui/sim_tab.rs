@@ -894,18 +894,21 @@ fn compute_quantiles(
         }
     }
 
-    let mut triples: Vec<(u64, u64, f64)> = Vec::with_capacity(n);
+    // `x + 0.0` folds -0.0 into 0.0 so both land in one group. Ordering is by
+    // total_cmp on the values: sorting raw bit patterns puts negative times
+    // after positive ones.
+    let mut triples: Vec<(f64, f64, f64)> = Vec::with_capacity(n);
     for i in 0..n {
         if !mask[i] { continue; }
         let r = rep_arr[i]; let x = x_arr[i]; let y = y_arr[i];
         if r.is_nan() || x.is_nan() || y.is_nan() { continue; }
-        triples.push((r.to_bits(), x.to_bits(), y));
+        triples.push((r + 0.0, x + 0.0, y));
     }
     if triples.is_empty() { return Err("No rows remain after filtering.".into()); }
 
-    triples.sort_unstable_by_key(|(r, x, _)| (*r, *x));
+    triples.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
 
-    let mut rep_x_means: Vec<(u64, f64)> = Vec::new();
+    let mut rep_x_means: Vec<(f64, f64)> = Vec::new();
     let mut i = 0;
     while i < triples.len() {
         let (rep, x, _) = triples[i];
@@ -916,7 +919,7 @@ fn compute_quantiles(
         rep_x_means.push((x, sum / cnt as f64));
     }
 
-    rep_x_means.sort_unstable_by_key(|(x, _)| *x);
+    rep_x_means.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
 
     let mut times:  Vec<f64>      = Vec::new();
     let mut all_ys: Vec<Vec<f64>> = Vec::new();
@@ -927,7 +930,7 @@ fn compute_quantiles(
         while j < rep_x_means.len() && rep_x_means[j].0 == xb {
             ys.push(rep_x_means[j].1); j += 1;
         }
-        times.push(f64::from_bits(xb));
+        times.push(xb);
         all_ys.push(ys);
     }
     if times.is_empty() { return Err("No valid data after grouping.".into()); }
@@ -1373,4 +1376,35 @@ fn wide_color_button(ui: &mut egui::Ui, color: &mut egui::Color32, width: f32) {
     });
 
     response.on_hover_text("Click to change colour");
+}
+
+#[cfg(test)]
+mod order_tests {
+    use super::*;
+
+    fn data(x: &[f64], y: &[f64]) -> SimData {
+        let mut col_data = HashMap::new();
+        col_data.insert("T".to_string(), x.to_vec());
+        col_data.insert("Y".to_string(), y.to_vec());
+        col_data.insert("R".to_string(), vec![1.0; x.len()]);
+        SimData { columns: vec!["T".into(), "Y".into(), "R".into()], col_data, n_rows: x.len() }
+    }
+
+    fn run(d: &SimData) -> SimPlotResult {
+        compute_quantiles(d, "T", "Y", "R", &[(2.5, 97.5)], &[], false).unwrap()
+    }
+
+    #[test]
+    fn sim_band_negative_time_order() {
+        let r = run(&data(&[2.0, -1.0, 0.5, -3.0], &[4.0, 1.0, 3.0, 0.0]));
+        assert_eq!(r.times, vec![-3.0, -1.0, 0.5, 2.0]);
+        assert_eq!(r.bands[0].med, vec![0.0, 1.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn negative_zero_is_zero() {
+        let r = run(&data(&[-0.0, 0.0, 1.0], &[1.0, 3.0, 5.0]));
+        assert_eq!(r.times.len(), 2, "-0.0 and 0.0 must share one time point");
+        assert_eq!(r.bands[0].med[0], 2.0);
+    }
 }

@@ -201,7 +201,7 @@ The first launch auto-detects `Rscript` and the `ferx` package. If detection fai
    .\target\release\ferxgui.exe
    ```
 
-> **Note for Windows:** FeRx processes are spawned with `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` so they survive terminal close and SSH sessions. If your environment uses Job Objects that prevent breakaway (e.g. some CI runners), set `loginctl enable-linger` or run as a normal desktop user.
+> **Note for Windows:** FeRx processes are spawned with `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` so they survive terminal close and SSH sessions. If your environment uses Job Objects that prevent breakaway (e.g. some CI runners), run FeRx as a normal desktop user outside the job.
 
 ### Linux (Ubuntu / Debian)
 

@@ -109,7 +109,7 @@ pub fn compute_model_validate(model_path: &Path, data_path: Option<&Path>) -> Re
         data_arg,
     ])?;
     let mut res: ModelValidateResult = serde_json::from_str(&json)
-        .map_err(|e| format!("model_validate JSON parse error: {e}\nR output: {}", &json[..json.len().min(500)]))?;
+        .map_err(|e| format!("model_validate JSON parse error: {e}\nR output: {}", crate::util::truncate_chars(&json, 500)))?;
     // The engine's messages contain non-ASCII (em dashes); R escapes them as <U+XXXX>
     // in the non-UTF-8 locale the script runs under.
     for d in &mut res.diagnostics {
@@ -171,7 +171,7 @@ pub fn compute_adaptive_sim(
         path_as_str(out_path)?,
     ])?;
     serde_json::from_str(&json)
-        .map_err(|e| format!("adaptive-sim JSON parse error: {e}\nR output: {}", &json[..json.len().min(500)]))
+        .map_err(|e| format!("adaptive-sim JSON parse error: {e}\nR output: {}", crate::util::truncate_chars(&json, 500)))
 }
 
 /// Call `ferx_calc_npde()` via R — Monte-Carlo simulation from the model+data
@@ -187,7 +187,7 @@ pub fn compute_npde(fitrx_path: &Path, nsim: u32, seed: Option<u32>) -> Result<N
         &seed_str,
     ])?;
     serde_json::from_str(&json)
-        .map_err(|e| format!("npde JSON parse error: {e}\nR output: {}", &json[..json.len().min(500)]))
+        .map_err(|e| format!("npde JSON parse error: {e}\nR output: {}", crate::util::truncate_chars(&json, 500)))
 }
 
 /// Adaptive-dosing simulation via `ferx_simulate_adaptive()` — runs the
@@ -1154,7 +1154,7 @@ pub fn compute_check_init(model_path: &Path, data_path: &Path) -> Result<CheckIn
         path_as_str(data_path)?,
     ])?;
     serde_json::from_str(&json)
-        .map_err(|e| format!("check_init JSON parse error: {e}\nR output: {}", &json[..json.len().min(500)]))
+        .map_err(|e| format!("check_init JSON parse error: {e}\nR output: {}", crate::util::truncate_chars(&json, 500)))
 }
 
 /// Recompute the covariance step on an already-completed fit — via
@@ -1176,7 +1176,7 @@ pub fn compute_covariance(fitrx_path: &Path, covariance_method: &str) -> Result<
     #[derive(serde::Deserialize)]
     struct Out { covariance_status: String }
     let out: Out = serde_json::from_str(&json)
-        .map_err(|e| format!("covariance JSON parse error: {e}\nR output: {}", &json[..json.len().min(500)]))?;
+        .map_err(|e| format!("covariance JSON parse error: {e}\nR output: {}", crate::util::truncate_chars(&json, 500)))?;
     Ok(out.covariance_status)
 }
 
@@ -1203,7 +1203,7 @@ pub fn compute_vpc(cfg: &VpcConfig) -> Result<VpcResult, String> {
         return Err(err.error);
     }
     serde_json::from_str(&json)
-        .map_err(|e| format!("VPC JSON parse error: {e}\nR output: {}", &json[..json.len().min(500)]))
+        .map_err(|e| format!("VPC JSON parse error: {e}\nR output: {}", crate::util::truncate_chars(&json, 500)))
 }
 
 /// Run `ferx_simulate()` and write the merged CSV (original data columns +
@@ -1225,7 +1225,7 @@ pub fn compute_simulation(cfg: &SimRunConfig) -> Result<SimRunResult, String> {
         return Err(err.error);
     }
     serde_json::from_str(&json)
-        .map_err(|e| format!("simulation JSON parse error: {e}\nR output: {}", &json[..json.len().min(500)]))
+        .map_err(|e| format!("simulation JSON parse error: {e}\nR output: {}", crate::util::truncate_chars(&json, 500)))
 }
 
 /// A structured error emitted by an R bridge script (e.g. package not installed).
@@ -1600,7 +1600,7 @@ pub fn compute_sir(
         if keep_samples { "true" } else { "false" },
     ])?;
     parse_sir_result(&json)
-        .map_err(|e| format!("SIR JSON parse error: {e}\nR output: {}", &json[..json.len().min(500)]))
+        .map_err(|e| format!("SIR JSON parse error: {e}\nR output: {}", crate::util::truncate_chars(&json, 500)))
 }
 
 fn parse_sir_result(json: &str) -> Result<SirResult, serde_json::Error> {
@@ -1656,13 +1656,13 @@ fn parse_sir_result(json: &str) -> Result<SirResult, serde_json::Error> {
 pub fn compute_eta_cov(fitrx_path: &Path) -> Result<EtaCovResult, String> {
     let json = run_script(ETA_COV_R, &[path_as_str(fitrx_path)?])?;
     serde_json::from_str(&json)
-        .map_err(|e| format!("eta_cov JSON parse error: {e}\nR output: {}", &json[..json.len().min(500)]))
+        .map_err(|e| format!("eta_cov JSON parse error: {e}\nR output: {}", crate::util::truncate_chars(&json, 500)))
 }
 
 pub fn compute_cov_screen(fitrx_path: &Path) -> Result<CovScreenResult, String> {
     let json = run_script(COV_SCREEN_R, &[path_as_str(fitrx_path)?])?;
     serde_json::from_str(&json)
-        .map_err(|e| format!("cov_screen JSON parse error: {e}\nR output: {}", &json[..json.len().min(500)]))
+        .map_err(|e| format!("cov_screen JSON parse error: {e}\nR output: {}", crate::util::truncate_chars(&json, 500)))
 }
 
 /// Export a 4-panel GOF figure via an R/ggplot2 script.
