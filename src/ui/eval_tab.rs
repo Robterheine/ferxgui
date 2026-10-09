@@ -745,7 +745,7 @@ fn show_npde(ui: &mut egui::Ui, state: &mut AppState, model_idx: usize, dark: bo
         ui.add(egui::DragValue::new(&mut state.ui.npde_nsim).range(100..=100_000).speed(10));
         ui.add_space(10.0);
         ui.label(egui::RichText::new("seed:").color(dim).size(11.0));
-        let seed_suffix = if state.ui.npde_seed == 0 { " (auto)" } else { "" };
+        let seed_suffix = if state.ui.npde_seed == 0 { " (random)" } else { "" };
         ui.add(egui::DragValue::new(&mut state.ui.npde_seed).range(0..=u32::MAX).suffix(seed_suffix));
         ui.add_space(10.0);
 
@@ -943,14 +943,15 @@ fn show_npde(ui: &mut egui::Ui, state: &mut AppState, model_idx: usize, dark: bo
             let n_flag_95 = result.rows.iter().filter(|r| r.npde.is_finite() && r.npde.abs() > 1.96).count();
             let n_flag_99 = result.rows.iter().filter(|r| r.npde.is_finite() && r.npde.abs() > 2.58).count();
             ui.add_space(8.0);
+            ui.label(egui::RichText::new(tail_line("NPDE", 1.96, n_flag_95, n, 5.0))
+                .size(11.0).color(theme::fg(dark)));
+            ui.label(egui::RichText::new(tail_line("NPDE", 2.58, n_flag_99, n, 1.0))
+                .size(11.0).color(theme::fg(dark)));
             ui.label(egui::RichText::new(format!(
-                "|NPDE| > 1.96: {n_flag_95}/{n} ({:.1}%, expect ~5%)",
-                100.0 * n_flag_95 as f64 / n as f64,
-            )).size(11.0).color(theme::fg(dark)));
-            ui.label(egui::RichText::new(format!(
-                "|NPDE| > 2.58: {n_flag_99}/{n} ({:.1}%, expect ~1%)",
-                100.0 * n_flag_99 as f64 / n as f64,
-            )).size(11.0).color(theme::fg(dark)));
+                "{} simulations, seed {}. The binomial interval shows whether the observed share \
+                 is compatible with the expected one.",
+                result.nsim, result.seed.map(|s| s.to_string()).unwrap_or_else(|| "random".into())))
+                .size(10.0).color(dim).italics());
 
             // NPD — the whole-subject decorrelated counterpart to NPDE.
             // Same N(0,1) null and the same two flag thresholds apply.
@@ -958,16 +959,22 @@ fn show_npde(ui: &mut egui::Ui, state: &mut AppState, model_idx: usize, dark: bo
             let n_flag_99_npd = result.rows.iter().filter(|r| r.npd.is_finite() && r.npd.abs() > 2.58).count();
             ui.add_space(8.0);
             ui.label(egui::RichText::new("NPD").size(11.0).color(theme::fg2(dark)).strong());
-            ui.label(egui::RichText::new(format!(
-                "|NPD| > 1.96: {n_flag_95_npd}/{n} ({:.1}%, expect ~5%)",
-                100.0 * n_flag_95_npd as f64 / n as f64,
-            )).size(11.0).color(theme::fg(dark)));
-            ui.label(egui::RichText::new(format!(
-                "|NPD| > 2.58: {n_flag_99_npd}/{n} ({:.1}%, expect ~1%)",
-                100.0 * n_flag_99_npd as f64 / n as f64,
-            )).size(11.0).color(theme::fg(dark)));
+            ui.label(egui::RichText::new(tail_line("NPD", 1.96, n_flag_95_npd, n, 5.0))
+                .size(11.0).color(theme::fg(dark)));
+            ui.label(egui::RichText::new(tail_line("NPD", 2.58, n_flag_99_npd, n, 1.0))
+                .size(11.0).color(theme::fg(dark)));
         });
     });
+}
+
+/// "|X| > t: k/n (p %, 95 % CI lo–hi %, expect ~e %)" with a Wilson interval on the proportion.
+fn tail_line(name: &str, t: f64, k: usize, n: usize, expect_pct: f64) -> String {
+    let pct = 100.0 * k as f64 / n.max(1) as f64;
+    match crate::domain::stats::wilson_ci(k, n, 0.95) {
+        Some((lo, hi)) => format!("|{name}| > {t}: {k}/{n} ({pct:.1}%, 95% CI {:.1}–{:.1}%, expect ~{expect_pct}%)",
+            lo * 100.0, hi * 100.0),
+        None => format!("|{name}| > {t}: {k}/{n}"),
+    }
 }
 
 /// Inverse standard normal CDF (quantile function) via Acklam's rational

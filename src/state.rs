@@ -811,7 +811,7 @@ impl Default for UiState {
             eval_conddist_view: CondDistView::default(),
             eval_conddist_eta_idx: 0,
             npde_nsim: 1000,
-            npde_seed: 0,
+            npde_seed: 1234,
             eval_npde_x_col:   "TIME".to_string(),
             eval_npde_x_col_2: "PRED".to_string(),
             eval_eta_cov_view: EtaCovView::default(),
@@ -1932,5 +1932,15 @@ mod vpc_theme_tests {
         // existed; the default must reproduce that behavior unchanged.
         use super::VpcOpts;
         assert_eq!(VpcOpts::default().idv, "time");
+    }
+}
+
+#[cfg(test)]
+mod npde_seed_tests {
+    #[test]
+    fn npde_default_seed_reproducible() {
+        let ui = super::UiState::default();
+        assert_eq!(ui.npde_seed, 1234, "two runs of the same analysis must agree by default");
+        assert_eq!(ui.npde_nsim, 1000);
     }
 }

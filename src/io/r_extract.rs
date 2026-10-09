@@ -186,8 +186,11 @@ pub fn compute_npde(fitrx_path: &Path, nsim: u32, seed: Option<u32>) -> Result<N
         &nsim_str,
         &seed_str,
     ])?;
-    serde_json::from_str(&json)
-        .map_err(|e| format!("npde JSON parse error: {e}\nR output: {}", crate::util::truncate_chars(&json, 500)))
+    let mut r: NpdeResult = serde_json::from_str(&json)
+        .map_err(|e| format!("npde JSON parse error: {e}\nR output: {}", crate::util::truncate_chars(&json, 500)))?;
+    r.nsim = nsim;
+    r.seed = seed;
+    Ok(r)
 }
 
 /// Adaptive-dosing simulation via `ferx_simulate_adaptive()` — runs the

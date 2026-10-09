@@ -380,6 +380,11 @@ pub struct ValidateDiagnostic {
 pub struct NpdeResult {
     #[serde(default)]
     pub rows: Vec<NpdeRow>,
+    /// Settings that produced these rows (filled in by the GUI after the R call).
+    #[serde(default)]
+    pub nsim: u32,
+    #[serde(default)]
+    pub seed: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
