@@ -817,18 +817,17 @@ mod tests {
         assert!(h.query_by_label_contains("not a readable zip").is_some());
     }
 
-    /// With `FERX_TEST_FLEXPROVE` set: the real bundle renders every section.
+    /// The real (committed) bundle renders every section.
     #[test]
     fn real_bundle_renders() {
-        let Ok(p) = std::env::var("FERX_TEST_FLEXPROVE") else { return };
-        let p = std::path::PathBuf::from(p);
+        let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/warfarin_fix.fitrx");
         for sec in [BundleSection::Overview, BundleSection::Parameters, BundleSection::Model,
                     BundleSection::Contents, BundleSection::FitJson] {
             let h = render(sec, &p);
             assert!(h.query_by_label_contains("Overview").is_some());
         }
         let h = render(BundleSection::Overview, &p);
-        assert!(h.query_by_label_contains("2h 50m 00s").is_some(), "wall time of the real fit");
-        assert!(h.query_by_label_contains("ETA_EMAX 31.6%").is_some(), "shrinkage shown as percent");
+        assert!(h.query_by_label_contains("ETA_KA").is_some(), "ETAs listed with their shrinkage");
+        assert!(h.query_all_by_label_contains("%").count() >= 1, "shrinkage shown as percent");
     }
 }

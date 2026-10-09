@@ -252,22 +252,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// With `FERX_TEST_BUNDLES` set: aligns real bundles to their real datasets.
+    /// Real bundles (committed fixtures) line up with their real datasets.
     #[test]
     fn real_bundles_align_with_their_datasets() {
-        let Ok(dir) = std::env::var("FERX_TEST_BUNDLES") else { return };
-        let ex = "/opt/homebrew/lib/R/4.6/site-library/ferx/examples/data";
-        for (bundle, data) in [("warfarin_iov", "warfarin_iov"), ("warfarin_block_omega", "warfarin_block_omega"), ("warfarin_bloq", "warfarin_bloq"), ("two_cpt_oral_cov", "two_cpt_oral_cov")] {
-            let eval = crate::io::fitrx::read_predictions(&std::path::Path::new(&dir).join(format!("{bundle}.fitrx")))
-                .unwrap().unwrap();
-            let cols = load_aligned(&std::path::Path::new(ex).join(format!("{data}.csv")), &eval)
+        let d = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        for (bundle, data) in [("warfarin_iov", "warfarin_iov"), ("warfarin_block_omega", "warfarin_block_omega"),
+                               ("warfarin", "warfarin")] {
+            let eval = crate::io::fitrx::read_predictions(&d.join(format!("{bundle}.fitrx"))).unwrap().unwrap();
+            let cols = load_aligned(&d.join(format!("{data}.csv")), &eval)
                 .unwrap_or_else(|e| panic!("{bundle}: {e}"));
             assert!(cols.iter().any(|(h, _)| h == "CMT"), "{bundle}");
             assert!(cols.iter().all(|(_, v)| v.len() == eval.rows.len()));
         }
         // OCC from the dataset matches the OCC the bundle already carries.
-        let eval = crate::io::fitrx::read_predictions(&std::path::Path::new(&dir).join("warfarin_iov.fitrx")).unwrap().unwrap();
-        let cols = load_aligned(&std::path::Path::new(ex).join("warfarin_iov.csv"), &eval).unwrap();
+        let eval = crate::io::fitrx::read_predictions(&d.join("warfarin_iov.fitrx")).unwrap().unwrap();
+        let cols = load_aligned(&d.join("warfarin_iov.csv"), &eval).unwrap();
         let occ_ds = &cols.iter().find(|(h, _)| h == "OCC").unwrap().1;
         let occ_pred = &eval.extras.iter().find(|(h, _)| h == "OCC").unwrap().1;
         assert_eq!(occ_ds, occ_pred);

@@ -2176,12 +2176,10 @@ mod simulation_tests {
     /// dataset survive into the output untouched.
     #[test]
     fn simulate_merges_covariates_and_evid_from_input_data() {
-        let base = std::path::Path::new(
-            "/Users/robterheine/Downloads/ferx_inspect/ferx-r/ferx-r-main"
-        );
-        let model_path = base.join("inst/examples/models/two_cpt_oral_cov.ferx");
-        let data_path  = base.join("examples/data/two_cpt_oral_cov.csv");
-        if !model_path.exists() || !data_path.exists() { return; } // skip on other machines
+        use crate::util::testsupport::{available, fixture, r_with_ferx};
+        if !available(r_with_ferx(), "Rscript with ferx") { return; }
+        let model_path = fixture("two_cpt_oral_cov.ferx");
+        let data_path  = fixture("two_cpt_oral_cov.csv");
 
         let out_path = std::env::temp_dir().join("ferxgui_test_sim_output.csv");
         let cfg = SimRunConfig {
@@ -2253,26 +2251,12 @@ mod simulation_tests {
     /// Self-documented "skip on other machines".
     #[test]
     fn simulate_with_asymptotic_uncertainty_produces_draw_varying_output() {
-        let base = std::path::Path::new(
-            "/Users/robterheine/Downloads/ferx_inspect/ferx-r/ferx-r-main"
-        );
-        let model_path = base.join("inst/examples/models/warfarin.ferx");
-        let data_path  = base.join("inst/examples/data/warfarin.csv");
-        if !model_path.exists() || !data_path.exists() { return; } // skip on other machines
+        use crate::util::testsupport::{available, fixture, r_with_ferx};
+        if !available(r_with_ferx(), "Rscript with ferx") { return; }
+        let model_path = fixture("warfarin.ferx");
+        let data_path  = fixture("warfarin.csv");
 
-        let fitrx_path = std::env::temp_dir().join("ferxgui_test_uncertainty.fitrx");
-        let fit_script = r#"
-args <- commandArgs(trailingOnly = TRUE)
-suppressMessages(library(ferx))
-fit <- ferx_fit(args[1], args[2], method = "focei", covariance = TRUE)
-ferx_save_fit(fit, args[3])
-cat("ok")
-"#;
-        run_script(fit_script, &[
-            path_as_str(&model_path).unwrap(),
-            path_as_str(&data_path).unwrap(),
-            path_as_str(&fitrx_path).unwrap(),
-        ]).expect("warfarin fit with covariance should succeed");
+        let fitrx_path = fixture("warfarin.fitrx");
 
         let out_path = std::env::temp_dir().join("ferxgui_test_uncertainty_output.csv");
         let cfg = SimRunConfig {
@@ -2335,7 +2319,6 @@ cat("ok")
         assert!(found_difference, "IPRED should differ across parameter draws");
 
         let _ = std::fs::remove_file(&out_path);
-        let _ = std::fs::remove_file(&fitrx_path);
     }
 
     /// Live integration test for Phase 3's SIR-uncertainty path — the one
@@ -2348,26 +2331,12 @@ cat("ok")
     /// machines".
     #[test]
     fn simulate_with_sir_uncertainty_produces_draw_varying_output() {
-        let base = std::path::Path::new(
-            "/Users/robterheine/Downloads/ferx_inspect/ferx-r/ferx-r-main"
-        );
-        let model_path = base.join("inst/examples/models/warfarin.ferx");
-        let data_path  = base.join("inst/examples/data/warfarin.csv");
-        if !model_path.exists() || !data_path.exists() { return; } // skip on other machines
+        use crate::util::testsupport::{available, fixture, r_with_ferx};
+        if !available(r_with_ferx(), "Rscript with ferx") { return; }
+        let model_path = fixture("warfarin.ferx");
+        let data_path  = fixture("warfarin.csv");
 
-        let fitrx_path = std::env::temp_dir().join("ferxgui_test_sir_uncertainty.fitrx");
-        let fit_script = r#"
-args <- commandArgs(trailingOnly = TRUE)
-suppressMessages(library(ferx))
-fit <- ferx_fit(args[1], args[2], method = "focei", covariance = TRUE)
-ferx_save_fit(fit, args[3])
-cat("ok")
-"#;
-        run_script(fit_script, &[
-            path_as_str(&model_path).unwrap(),
-            path_as_str(&data_path).unwrap(),
-            path_as_str(&fitrx_path).unwrap(),
-        ]).expect("warfarin fit with covariance should succeed");
+        let fitrx_path = fixture("warfarin.fitrx");
 
         let sir = compute_sir(&fitrx_path, 200, 100, 1, true)
             .expect("SIR with kept samples should succeed");
@@ -2425,18 +2394,18 @@ cat("ok")
         assert!(found_difference, "IPRED should differ across SIR parameter draws");
 
         let _ = std::fs::remove_file(&out_path);
-        let _ = std::fs::remove_file(&fitrx_path);
     }
 }
 
 #[cfg(test)]
 mod validate_live_tests {
-    /// Runs the real R bridge when `FERX_TEST_BAD_MODEL` points at a model with an
-    /// out-of-bounds theta init (whose engine message contains an em dash).
+    /// Runs the real R bridge on a model with an out-of-bounds theta init (the engine message
+    /// contains an em dash, which must survive the round trip).
     #[test]
     fn validate_decodes_em_dash_live() {
-        let Ok(p) = std::env::var("FERX_TEST_BAD_MODEL") else { return };
-        let r = super::compute_model_validate(std::path::Path::new(&p), None).unwrap();
+        use crate::util::testsupport::{available, fixture, r_with_ferx};
+        if !available(r_with_ferx(), "Rscript with ferx") { return; }
+        let r = super::compute_model_validate(&fixture("warfarin_bad_init.ferx"), None).unwrap();
         assert!(!r.diagnostics.is_empty());
         assert!(r.diagnostics.iter().all(|d| !d.message.contains("<U+")), "{:?}", r.diagnostics);
         assert!(r.diagnostics.iter().any(|d| d.message.contains('\u{2014}')), "{:?}", r.diagnostics);

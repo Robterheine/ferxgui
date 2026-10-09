@@ -356,11 +356,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// With `FERX_TEST_FLEXPROVE` set: the real bundle's hashes verify against its files.
+    /// The real (committed) bundle's recorded hashes verify against its bundled files.
     #[test]
     fn real_bundle_hashes_verify() {
-        let Ok(p) = std::env::var("FERX_TEST_FLEXPROVE") else { return };
-        let info = inspect(Path::new(&p)).unwrap();
+        let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/warfarin_fix.fitrx");
+        let info = inspect(&p).unwrap();
         assert!(info.entries.len() >= 6);
         assert!(info.summary.is_some());
         let bundled = info.model_source.clone().unwrap();
