@@ -1,0 +1,7 @@
+The example models (*.ferx) and datasets (*.csv) in this directory are copied from the ferx-r
+package (https://github.com/InsightRX/ferx-r, tag v0.4.0), which is released under the MIT
+licence:
+
+    Copyright (c) 2026 the FeRx core developer team
+
+The *.fitrx bundles were written by ferx 0.4.0.9000 from these files by make_fixtures.R.

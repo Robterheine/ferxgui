@@ -1539,3 +1539,65 @@ mod tests {
         assert!(matches!(r, Err(FitrxError::Io(ref e)) if e.to_string().contains("IPRED")), "{r:?}");
     }
 }
+
+#[cfg(test)]
+mod fixture_tests {
+    use super::*;
+
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
+    }
+
+    #[test]
+    fn warfarin_identity_matches_the_file_bytes() {
+        let s = read_fit_summary(&fixture("warfarin.fitrx")).unwrap();
+        assert_eq!(s.model_hash.as_deref(), Some("2ea0ff6e94efed4d9487b6c327d9bc317795cc0c9aa862d0d41b1e6965d9252a"));
+        assert_eq!(s.data_hash.as_deref(), Some("a6ab771d516f67906c5ed509c4b667a8585d2c752a519eb7dc15d40731c2d0ed"));
+        assert_eq!(crate::io::fsutil::sha256_file_cached(&fixture("warfarin.ferx")), s.model_hash);
+        assert_eq!(crate::io::fsutil::sha256_file_cached(&fixture("warfarin.csv")), s.data_hash);
+        assert!(s.has_identity());
+    }
+
+    #[test]
+    fn etabar_matches_r_golden_warfarin() {
+        // Plan §5.3: one-sample t test of the EBEs, warfarin FOCEI, n = 10.
+        let ebes = read_ebes(&fixture("warfarin.fitrx")).unwrap().unwrap();
+        let bars = ebes.eta_bar();
+        let want = [("ETA_CL", 4.28e-6, 0.99994), ("ETA_V", -4.07e-5, 0.99903), ("ETA_KA", -1.39e-4, 0.99944)];
+        assert_eq!(bars.len(), 3);
+        for (k, (name, mean, p)) in want.iter().enumerate() {
+            let b = bars[k].as_ref().unwrap();
+            assert!(ebes.eta_names[k].eq_ignore_ascii_case(name) || ebes.eta_names[k].contains("ETA"), "{name}");
+            assert_eq!(b.df, 9.0);
+            assert!((b.mean - mean).abs() < 0.005 * mean.abs(), "{name} mean {} vs {mean}", b.mean);
+            assert!((b.p - p).abs() < 2e-4, "{name} p {} vs {p}", b.p);
+        }
+    }
+
+    #[test]
+    fn warfarin_log_scale_ci_and_cv_goldens() {
+        use crate::domain::stats::{cv_pct_lognormal, wald_ci95};
+        let s = read_fit_summary(&fixture("warfarin.fitrx")).unwrap();
+        // Plan §5.6 (TVCL, TVV, TVKA) natural vs log-scale targets.
+        let want = [([0.11879, 0.14661], [0.11949, 0.14736]),
+                    ([7.26720, 8.20821], [7.28122, 8.22281]),
+                    ([0.51946, 1.10213], [0.56606, 1.16135])];
+        for (i, (nat, log)) in want.iter().enumerate() {
+            assert!(s.theta_is_positive(i), "theta {i} has a positive lower bound");
+            let (nlo, nhi) = wald_ci95(s.theta[i], s.se_theta[i], false).unwrap();
+            let (llo, lhi) = wald_ci95(s.theta[i], s.se_theta[i], true).unwrap();
+            for (g, w) in [(nlo, nat[0]), (nhi, nat[1]), (llo, log[0]), (lhi, log[1])] {
+                assert!((g - w).abs() / w < 2e-3, "theta {i}: {g} vs {w}");
+            }
+        }
+        // §5.4: CV% of the three log-normal ETAs.
+        for (k, cv) in [17.03, 9.82, 63.18].iter().enumerate() {
+            let w2 = s.omega_value(k, k).unwrap();
+            assert!((cv_pct_lognormal(w2) - cv).abs() < 0.01, "eta {k}: {}", cv_pct_lognormal(w2));
+        }
+        // §5.6: the ETA_KA variance interval must not cross zero on the log scale.
+        let (nat_lo, _) = wald_ci95(s.omega_value(2, 2).unwrap(), s.se_omega_diag(2).unwrap(), false).unwrap();
+        let (log_lo, log_hi) = wald_ci95(s.omega_value(2, 2).unwrap(), s.se_omega_diag(2).unwrap(), true).unwrap();
+        assert!(nat_lo < 0.05 && log_lo > 0.12 && log_hi < 0.9, "{nat_lo} {log_lo} {log_hi}");
+    }
+}

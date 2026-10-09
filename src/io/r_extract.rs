@@ -394,7 +394,7 @@ attach_from_obs <- function(obs, sim_dat, col, context, fail) {
 # read.csv() can silently type a numeric column (e.g. DV with "." for missing
 # values on dose rows) as character, and the real risk this guards against is
 # missing a genuine mismatch when the wrong data file is selected.
-attach_from_raw <- function(obs, csv_path, col, context, fail) {
+attach_from_raw <- function(obs, csv_path, col, context, fail, numeric = TRUE) {
   raw <- tryCatch({ d <- read.csv(csv_path); names(d) <- tolower(names(d)); d },
                    error = function(e) NULL)
   if (is.null(raw))
@@ -434,6 +434,10 @@ attach_from_raw <- function(obs, csv_path, col, context, fail) {
         "the one the fit was built from."))
   }
 
+  if (!numeric) {            # categorical stratifier: keep the values as they are
+    obs[[col]] <- raw[[col]]
+    return(obs)
+  }
   covariate <- suppressWarnings(as.numeric(as.character(raw[[col]])))
   if (all(is.na(covariate)))
     fail(paste0(context, "_not_numeric"), paste0(
@@ -503,21 +507,19 @@ strat_arg <- NULL
 if (!is.null(cfg$stratify) && length(cfg$stratify) > 0) {
   strat_cols <- cfg$stratify[nchar(trimws(cfg$stratify)) > 0]
   if (length(strat_cols) > 0) {
-    orig <- tryCatch({ d <- read.csv(cfg$data_path); names(d) <- tolower(names(d)); d },
-                     error = function(e) NULL)
-    if (!is.null(orig)) {
-      for (col in strat_cols) {
-        if (col %in% names(orig)) {
-          if (!col %in% names(obs)) {
-            key <- intersect(c("id", "time"), names(orig))
-            m   <- unique(orig[, c(key, col), drop = FALSE])
-            obs     <- merge(obs,     m, by = key, all.x = TRUE, suffixes = c("", ".z"))
-            sim_dat <- merge(sim_dat, m, by = key, all.x = TRUE, suffixes = c("", ".z"))
-            names(obs)     <- gsub("\\.z$", "", names(obs))
-            names(sim_dat) <- gsub("\\.z$", "", names(sim_dat))
-          }
-        }
-      }
+    # Stratifiers come from the raw data BY ROW POSITION (verified against id/time/dv), never
+    # by merging on (id, time): that key is not unique when several observations share a TIME
+    # (e.g. PK/PD rows with different CMT), and a merge would fan rows out and mix up values.
+    raw_hdr <- tryCatch(tolower(names(read.csv(cfg$data_path, nrows = 1))), error = function(e) NULL)
+    for (col in strat_cols) {
+      n_obs0 <- nrow(obs); n_sim0 <- nrow(sim_dat)
+      if (!col %in% names(obs) && !is.null(raw_hdr) && col %in% raw_hdr)
+        obs <- attach_from_raw(obs, cfg$data_path, col, "strat", emit_error, numeric = FALSE)
+      if (col %in% names(obs) && !col %in% names(sim_dat))
+        sim_dat <- attach_from_obs(obs, sim_dat, col, "strat", emit_error)
+      if (nrow(obs) != n_obs0 || nrow(sim_dat) != n_sim0)
+        emit_error("strat_row_count_changed", paste0(
+          "Attaching stratifier '", col, "' changed the number of rows; refusing to continue."))
     }
     strat_arg <- strat_cols[strat_cols %in% names(obs) & strat_cols %in% names(sim_dat)]
     missing_cols <- setdiff(strat_cols, strat_arg)
@@ -1320,7 +1322,7 @@ fail <- function(kind, msg) stop(paste0("[", kind, "] ", msg))
 # read.csv() can silently type a numeric column (e.g. DV with "." for missing
 # values on dose rows) as character, and the real risk this guards against is
 # missing a genuine mismatch when the wrong data file is selected.
-attach_from_raw <- function(obs, csv_path, col, context, fail) {
+attach_from_raw <- function(obs, csv_path, col, context, fail, numeric = TRUE) {
   raw <- tryCatch({ d <- read.csv(csv_path); names(d) <- tolower(names(d)); d },
                    error = function(e) NULL)
   if (is.null(raw))
@@ -1360,6 +1362,10 @@ attach_from_raw <- function(obs, csv_path, col, context, fail) {
         "the one the fit was built from."))
   }
 
+  if (!numeric) {            # categorical stratifier: keep the values as they are
+    obs[[col]] <- raw[[col]]
+    return(obs)
+  }
   covariate <- suppressWarnings(as.numeric(as.character(raw[[col]])))
   if (all(is.na(covariate)))
     fail(paste0(context, "_not_numeric"), paste0(
@@ -1418,19 +1424,16 @@ strat_arg <- NULL
 if (!is.null(cfg$stratify) && length(cfg$stratify) > 0) {
   strat_cols <- cfg$stratify[nchar(trimws(cfg$stratify)) > 0]
   if (length(strat_cols) > 0) {
-    orig <- tryCatch({ d <- read.csv(cfg$data_path); names(d) <- tolower(names(d)); d },
-                     error = function(e) NULL)
-    if (!is.null(orig)) {
-      for (col in strat_cols) {
-        if (col %in% names(orig) && !col %in% names(obs)) {
-          key <- intersect(c("id", "time"), names(orig))
-          m   <- unique(orig[, c(key, col), drop = FALSE])
-          obs     <- merge(obs,     m, by = key, all.x = TRUE, suffixes = c("", ".z"))
-          sim_dat <- merge(sim_dat, m, by = key, all.x = TRUE, suffixes = c("", ".z"))
-          names(obs)     <- gsub("\\.z$", "", names(obs))
-          names(sim_dat) <- gsub("\\.z$", "", names(sim_dat))
-        }
-      }
+    raw_hdr <- tryCatch(tolower(names(read.csv(cfg$data_path, nrows = 1))), error = function(e) NULL)
+    for (col in strat_cols) {
+      n_obs0 <- nrow(obs); n_sim0 <- nrow(sim_dat)
+      if (!col %in% names(obs) && !is.null(raw_hdr) && col %in% raw_hdr)
+        obs <- attach_from_raw(obs, cfg$data_path, col, "strat", fail, numeric = FALSE)
+      if (col %in% names(obs) && !col %in% names(sim_dat))
+        sim_dat <- attach_from_obs(obs, sim_dat, col, "strat", fail)
+      if (nrow(obs) != n_obs0 || nrow(sim_dat) != n_sim0)
+        fail("strat_row_count_changed", paste0(
+          "Attaching stratifier '", col, "' changed the number of rows; refusing to continue."))
     }
     strat_arg <- strat_cols[strat_cols %in% names(obs) & strat_cols %in% names(sim_dat)]
     if (length(strat_arg) == 0) strat_arg <- NULL
