@@ -2426,3 +2426,49 @@ mod validate_live_tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
+
+#[cfg(test)]
+mod vpc_live_tests {
+    use super::*;
+    use crate::util::testsupport::{available, fixture, r_with_ferx};
+
+    fn base_cfg(model: &str, data: &str, fitrx: &str, stratify: &[&str], cache: Option<&Path>) -> crate::domain::VpcConfig {
+        crate::domain::VpcConfig {
+            model_path: fixture(model).to_string_lossy().into_owned(),
+            data_path: fixture(data).to_string_lossy().into_owned(),
+            fitrx_path: Some(fixture(fitrx).to_string_lossy().into_owned()),
+            cache_path: cache.map(|p| p.to_string_lossy().into_owned()),
+            cache_key: cache.map(|_| "test-key".to_string()),
+            n_sim: 50, seed: 7, pi_lo: 0.05, pi_hi: 0.95, ci_lo: 0.05, ci_hi: 0.95,
+            idv: "time".into(), bins_type: "time".into(), n_bins: 6, manual_bins: None,
+            log_y: false, smooth: false, show_points: false, band_color: "#3388cc".into(),
+            vpc_type: "continuous".into(), lloq: None, uloq: None,
+            pred_corr: false, pred_corr_lower_bnd: 0.0,
+            stratify: stratify.iter().map(|s| s.to_string()).collect(), facet: "wrap".into(),
+            obs_color: "#000000".into(), sim_pi_alpha: 0.3, sim_median_alpha: 0.3,
+            obs_median_linetype: "solid".into(), obs_median_linewidth: 1.0,
+            obs_ci_linetype: "dashed".into(), obs_ci_linewidth: 1.0,
+            bin_separators_color: String::new(), loq_color: "#cc0000".into(),
+        }
+    }
+
+    /// PK/PD data with CMT 2 and 3 observed at the same TIME: the old (id, time) merge fanned the
+    /// rows out; attaching by row position keeps the count and the right stratum per row.
+    #[test]
+    fn vpc_strat_cmt_keeps_row_count() {
+        if !available(r_with_ferx(), "Rscript with ferx and vpc") { return; }
+        let cfg = base_cfg("emax_pkpd.ferx", "emax_pkpd.csv", "emax_pkpd.fitrx", &["cmt"], None);
+        let res = compute_vpc(&cfg).expect("stratified VPC should run");
+        let strata: std::collections::BTreeSet<String> = res.vpc_dat.iter().map(|b| b.strat.clone()).collect();
+        assert_eq!(strata.len(), 2, "one stratum per CMT, got {strata:?}");
+        // Observed points per stratum equal the raw observation counts (no fan-out).
+        let raw = crate::io::dataset::read_dataset(&fixture("emax_pkpd.csv")).unwrap();
+        let (c_cmt, c_evid) = (raw.headers.iter().position(|h| h == "CMT").unwrap(),
+                               raw.headers.iter().position(|h| h == "EVID").unwrap());
+        let mut want = std::collections::BTreeMap::new();
+        for r in raw.rows.iter().filter(|r| r[c_evid] == "0") { *want.entry(r[c_cmt].clone()).or_insert(0usize) += 1; }
+        let total_obs: usize = want.values().sum();
+        let got_pts = res.obs_points.len();
+        assert_eq!(got_pts, total_obs, "observed points {got_pts} vs raw observations {total_obs}");
+    }
+}

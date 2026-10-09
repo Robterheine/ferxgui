@@ -42,6 +42,36 @@ where
     });
 }
 
+/// Test support: fixtures and live-R checks.
+#[cfg(test)]
+pub mod testsupport {
+    use std::path::PathBuf;
+
+    pub fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
+    }
+
+    /// True when a test that needs `what` should run. When it is unavailable the test is skipped,
+    /// unless `FERX_REQUIRE_FIXTURES=1` (set in CI), in which case that is a failure.
+    pub fn available(cond: bool, what: &str) -> bool {
+        if !cond && std::env::var("FERX_REQUIRE_FIXTURES").as_deref() == Ok("1") {
+            panic!("FERX_REQUIRE_FIXTURES=1 but {what} is not available");
+        }
+        cond
+    }
+
+    /// Rscript on PATH with the ferx and vpc packages installed.
+    pub fn r_with_ferx() -> bool {
+        use std::sync::OnceLock;
+        static OK: OnceLock<bool> = OnceLock::new();
+        *OK.get_or_init(|| {
+            std::process::Command::new("Rscript")
+                .args(["-e", "quit(status = !(requireNamespace('ferx', quietly=TRUE) && requireNamespace('vpc', quietly=TRUE)))"])
+                .output().map(|o| o.status.success()).unwrap_or(false)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
