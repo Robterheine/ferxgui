@@ -17,3 +17,16 @@ out <- list(
   chi2 = chi, t = tt, bh = bh, fisher = z, qnorm = qn
 )
 writeLines(toJSON(out, digits = NA, auto_unbox = TRUE, na = "null"), "tests/golden/stats.json")
+
+# ---- LOESS (ggplot2 geom_smooth default: degree 2, span 0.75, tricube, direct fit) ----
+set.seed(7)
+mk <- function(x, y) {
+  grid <- seq(min(x), max(x), length.out = 61)
+  f <- loess(y ~ x, span = 0.75, degree = 2, family = "gaussian",
+             control = loess.control(surface = "direct"))
+  list(x = x, y = y, grid = grid, fit = as.numeric(predict(f, data.frame(x = grid))))
+}
+x1 <- sort(runif(40, 0, 24)); y1 <- 3 * exp(-0.2 * x1) + rnorm(40, 0, 0.2)
+x2 <- rep(c(0.5, 1, 2, 4, 8, 12, 24), each = 6); y2 <- -0.2 * log(x2) + rnorm(42, 0, 0.5)
+out2 <- list(a = mk(x1, y1), b = mk(x2, y2))
+writeLines(toJSON(out2, digits = NA, auto_unbox = FALSE, na = "null"), "tests/golden/loess.json")

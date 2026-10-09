@@ -13,4 +13,5 @@ pub use model::*;
 pub use r_results::*;
 pub use run_record::*;
 pub use sim_types::*;
+pub mod smooth;
 pub mod stats;

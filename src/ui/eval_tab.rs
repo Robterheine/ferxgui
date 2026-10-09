@@ -363,45 +363,10 @@ mod mtime_cache_is_stale_tests {
 
 // ── LOESS helper ─────────────────────────────────────────────────────────────
 
-/// Gaussian-kernel locally-weighted smoother.  Returns ~60 (x, y) points
-/// spanning the data range.  `bandwidth_frac` controls the kernel width
-/// as a fraction of the x range (0.3 = 30% is a reasonable default).
-pub(crate) fn loess(points: &[[f64; 2]], bandwidth_frac: f64) -> Vec<[f64; 2]> {
-    if points.len() < 4 { return vec![]; }
-    let xs: Vec<f64> = points.iter().map(|p| p[0]).collect();
-    let ys: Vec<f64> = points.iter().map(|p| p[1]).collect();
-    let x_min = xs.iter().cloned().fold(f64::INFINITY,     f64::min);
-    let x_max = xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let range = x_max - x_min;
-    if range < 1e-10 { return vec![]; }
-    let h = range * bandwidth_frac;
-
-    (0..=60).filter_map(|i| {
-        let x0 = x_min + range * i as f64 / 60.0;
-        // Weighted sums for local linear regression.
-        let (mut sw, mut swx, mut swy, mut swxx, mut swxy) = (0.0, 0.0, 0.0, 0.0, 0.0);
-        for (&x, &y) in xs.iter().zip(ys.iter()) {
-            if y.is_finite() {
-                let d = (x - x0) / h;
-                let w = (-0.5 * d * d).exp();
-                sw   += w;
-                swx  += w * x;
-                swy  += w * y;
-                swxx += w * x * x;
-                swxy += w * x * y;
-            }
-        }
-        if sw < 1e-10 { return None; }
-        let denom = sw * swxx - swx * swx;
-        let y_fit = if denom.abs() < 1e-10 {
-            swy / sw
-        } else {
-            let b0 = (swxx * swy - swx * swxy) / denom;
-            let b1 = (sw  * swxy - swx * swy)  / denom;
-            b0 + b1 * x0
-        };
-        if y_fit.is_finite() { Some([x0, y_fit]) } else { None }
-    }).collect()
+/// LOESS smoother matching ggplot2's default `geom_smooth` (local quadratic, tricube,
+/// `span` = fraction of points per neighbourhood). See `domain::smooth`.
+pub(crate) fn loess(points: &[[f64; 2]], span: f64) -> Vec<[f64; 2]> {
+    crate::domain::smooth::loess(points, span)
 }
 
 // ── GOF 2×2 ──────────────────────────────────────────────────────────────────
@@ -697,13 +662,13 @@ pub(crate) fn scatter_grouped(
     if per_group_loess && work.len() > 1 {
         for (_, c, _, p) in &work {
             if p.len() >= 8 {
-                let l = loess(p, 0.5);
+                let l = loess(p, 0.75);
                 if l.len() > 1 { loess_lines.push((*c, l)); }
             }
         }
     } else {
         let all: Vec<[f64; 2]> = work.iter().flat_map(|(_, _, _, p)| p.iter().copied()).collect();
-        let l = loess(&all, 0.35);
+        let l = loess(&all, 0.75);
         if l.len() > 1 { loess_lines.push((loess_col, l)); }
     }
 

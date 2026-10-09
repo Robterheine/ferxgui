@@ -670,7 +670,7 @@ fn show_plot_view(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
 
     let xy_pts: Vec<[f64; 2]> = all_pts.iter().map(|&(x, y, _)| [x, y]).collect();
     let loess_line = if do_loess {
-        crate::ui::eval_tab::loess(&xy_pts, 0.35)
+        crate::ui::eval_tab::loess(&xy_pts, 0.75)
     } else {
         vec![]
     };
