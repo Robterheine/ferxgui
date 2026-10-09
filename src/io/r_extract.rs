@@ -2532,8 +2532,11 @@ mod sir_layout_tests {
         };
         assert!((q(0.025) - ci.lo).abs() < 1e-6, "{} vs {}", q(0.025), ci.lo);
         assert!((q(0.975) - ci.hi).abs() < 1e-6, "{} vs {}", q(0.975), ci.hi);
-        assert!((ci.lo - 0.01742748).abs() < 1e-6 && (ci.hi - 0.09309472).abs() < 1e-6,
+        // Plan §5.8 values (ferx 0.4.0.9000); a loose tolerance, since another ferx build may
+        // sample slightly differently. The decisive check is the quantile equality above.
+        assert!((ci.lo - 0.01742748).abs() < 5e-3 && (ci.hi - 0.09309472).abs() < 5e-3,
                 "plan §5.8 golden: {} {}", ci.lo, ci.hi);
+        assert!(ci.hi < 0.2, "an exp()-ed column would be ~1.0");
         // The log-packed thetas still match their ferx interval after exp().
         let cl = r.theta.iter().find(|c| c.name == "TVCL").unwrap();
         assert!(cl.lo > 0.0 && r.param_samples["TVCL"].iter().all(|v| *v > 0.0));
