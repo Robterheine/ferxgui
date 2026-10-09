@@ -311,6 +311,12 @@ fn show_diagnostics_section(ui: &mut egui::Ui, fit: &FitSummary, dark: bool) {
     }
 }
 
+/// The covariance matrix ferx returns is the inverse Hessian in the packed parameterisation
+/// (checked on the warfarin fixture: sqrt(diag) = SE/estimate for log-packed thetas).
+const PACKED_NOTE: &str = "Correlations are of the estimation (packed) parameters: log θ for positive thetas, \
+    log SD for ω and σ, raw Cholesky terms off the diagonal. They can differ from correlations of the \
+    natural-scale estimates.";
+
 const DW_NOTE: &str = "Descriptive: about 2 when residuals are uncorrelated, below 2 for positive and \
     above 2 for negative autocorrelation. No formal test is applied.";
 
@@ -329,6 +335,7 @@ fn show_param_corr_section(ui: &mut egui::Ui, fit: &FitSummary, dark: bool) {
     ui.label(egui::RichText::new(
         "Correlations close to ±1 indicate a structural identifiability problem.")
         .color(theme::fg2(dark)).size(11.0));
+    ui.label(egui::RichText::new(PACKED_NOTE).color(theme::fg3(dark)).size(10.0).italics());
     ui.add_space(4.0);
     crate::ui::sir_tab::correlation_heatmap(
         ui, &fit.cov_corr_names, &fit.cov_corr_flat, fit.cov_corr_n, dark);
@@ -701,6 +708,7 @@ fn generate_html(
     if fit.cov_corr_n > 0 {
         b.push_str("<section><h2>Parameter Correlations</h2>\n");
         b.push_str("<p>Correlations close to ±1 indicate a structural identifiability problem.</p>\n");
+        b.push_str(&format!("<p class=\"note\">{PACKED_NOTE}</p>\n"));
         b.push_str(&html_corr_matrix(&fit.cov_corr_names, &fit.cov_corr_flat, fit.cov_corr_n));
         b.push_str("</section>\n");
     }

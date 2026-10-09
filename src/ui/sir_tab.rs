@@ -169,18 +169,29 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         ui.add_space(12.0);
 
         // ── ESS ───────────────────────────────────────────────────────────
-        let ess_pct = if state.ui.sir_n_resamples > 0 {
-            sir.sir_ess / state.ui.sir_n_resamples as f64 * 100.0
-        } else { 0.0 };
+        // The settings stored with the result, not whatever the panel is set to now.
+        let n_res = sir.settings.as_ref().map(|s| s.resamples).unwrap_or(state.ui.sir_n_resamples);
+        let ess_pct = if n_res > 0 { sir.sir_ess / n_res as f64 * 100.0 } else { 0.0 };
         let ess_col = if ess_pct < 20.0 { theme::RED }
                       else if ess_pct < 40.0 { theme::ORANGE }
                       else { theme::GREEN };
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Effective sample size:").color(theme::fg2(dark)).size(12.0));
             ui.label(egui::RichText::new(
-                format!("{:.1}  /  {}  ({:.0}%)", sir.sir_ess, state.ui.sir_n_resamples, ess_pct))
+                format!("{:.1}  /  {}  ({:.0}%)", sir.sir_ess, n_res, ess_pct))
                 .color(ess_col).size(12.0).strong());
         });
+        if let Some(s) = &sir.settings {
+            ui.label(egui::RichText::new(format!(
+                "{} samples, {} resamples, seed {}", s.samples, s.resamples, s.seed))
+                .color(theme::fg3(dark)).size(10.5));
+        }
+        if sir.sir_resamples_n > 0 && !sir.hist_supported {
+            ui.label(egui::RichText::new(
+                "Histograms and correlations are hidden: the packed resample layout for block Ω/σ or IOV κ \
+                 models is not verified, so no column is guessed. The CI table below is ferx's own.")
+                .color(theme::ORANGE).size(11.0));
+        }
         if ess_pct < 20.0 {
             ui.label(egui::RichText::new(
                 "⚠  Low ESS — increase Samples, or the posterior departs strongly from normality.")
@@ -461,6 +472,10 @@ fn show_distributions(
     }
 
     let dim = theme::fg2(dark);
+    ui.label(egui::RichText::new(
+        "Resampled draws on the natural scale; their quantiles can differ from the interval ferx reports.")
+        .color(theme::fg3(dark)).size(10.5).italics());
+    ui.add_space(4.0);
 
     // Parameter picker.
     ui.horizontal(|ui| {
