@@ -88,9 +88,29 @@ pub struct FitSummary {
     #[serde(default)]
     pub etabar_pvalue: Vec<f64>,
 
-    /// Which theta/sigma parameters are at their lower bound.
+    /// ferx's own boundary verdict (`r_extras.estimate_near_boundary`). None when the
+    /// bundle does not carry it (older ferx), which is not the same as "no".
     #[serde(default)]
-    pub at_lower_bound: Vec<bool>,
+    pub near_boundary: Option<bool>,
+    /// `r_extras.stalled_at_init`: the optimiser never left the initial estimates.
+    #[serde(default)]
+    pub stalled_at_init: Option<bool>,
+    /// `r_extras.max_abs_correlation` between estimated parameters.
+    #[serde(default)]
+    pub max_abs_corr: Option<f64>,
+
+    /// SHA-256 of the model file the fit used (`model_hash` in fit.json).
+    #[serde(default)]
+    pub model_hash: Option<String>,
+    /// SHA-256 of the dataset the fit used (`data_hash` in fit.json).
+    #[serde(default)]
+    pub data_hash: Option<String>,
+
+    /// `theta.fixed` / `omega.fixed` from fit.json (empty when absent).
+    #[serde(default)]
+    pub theta_fixed: Vec<bool>,
+    #[serde(default)]
+    pub omega_fixed: Vec<bool>,
 
     /// Warnings emitted during the run (mirrors warnings.txt).
     #[serde(default)]
@@ -208,9 +228,36 @@ fn nan() -> f64 {
 }
 
 impl FitSummary {
-    /// Whether any parameter is at its lower bound.
+    /// ferx's verdict that an estimate sits at a bound. `false` when the bundle has no verdict.
     pub fn has_boundary_hit(&self) -> bool {
-        self.at_lower_bound.iter().any(|&b| b)
+        self.near_boundary == Some(true)
+    }
+
+    /// Whether theta `i` was declared FIX.
+    pub fn is_theta_fixed(&self, i: usize) -> bool {
+        self.theta_fixed.get(i).copied().unwrap_or(false)
+    }
+
+    /// True when the bundle records both hashes, so caches keyed on fit identity can be trusted.
+    pub fn has_identity(&self) -> bool {
+        self.model_hash.is_some() && self.data_hash.is_some()
+    }
+
+    /// Identity of this fit for cache keys: the model and data hashes plus a SHA-256 over the
+    /// estimates (theta, omega, sigma, kappa). Standard errors are deliberately excluded:
+    /// simulations do not depend on them, so a covariance recompute must not invalidate a cache.
+    /// None for legacy bundles without hashes (caching is then disabled).
+    pub fn estimates_fingerprint(&self) -> Option<String> {
+        use sha2::{Digest, Sha256};
+        let (m, d) = (self.model_hash.as_ref()?, self.data_hash.as_ref()?);
+        let mut h = Sha256::new();
+        h.update(m.as_bytes()); h.update(b"|"); h.update(d.as_bytes());
+        for (tag, v) in [("t", &self.theta), ("o", &self.omega), ("s", &self.sigma), ("k", &self.kappa)] {
+            h.update(tag.as_bytes());
+            for x in v.iter() { h.update(x.to_bits().to_le_bytes()); }
+        }
+        h.update(self.ferx_version.as_deref().unwrap_or("").as_bytes());
+        Some(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
     }
 
     /// RSE% for theta[i]:  |SE / estimate| × 100.

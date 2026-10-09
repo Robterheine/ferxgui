@@ -50,7 +50,7 @@ struct ThetaWire {
     #[serde(default)] se:        serde_json::Value,
     // Never read downstream (pre-existing); kept parse-safe for the same
     // single-theta collapse risk as the fields above.
-    #[serde(default)] #[allow(dead_code)] fixed: serde_json::Value,
+    #[serde(default)] fixed: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -67,6 +67,7 @@ struct OmegaWire {
     #[serde(default)] names:     serde_json::Value,
     #[serde(default)] se:        serde_json::Value,
     #[serde(default)] shrinkage: serde_json::Value,
+    #[serde(default)] fixed:     serde_json::Value,
 }
 
 /// The `iov` sub-object inside `fit.json` — present only for IOV models.
@@ -151,6 +152,11 @@ struct FitWire {
     #[serde(default)] ofv_data:          Option<f64>,
     #[serde(default)] ofv_prior:         Option<f64>,
     #[serde(default)] prior_summary:     serde_json::Value,
+    // Fit identity: SHA-256 of the model / data file bytes.
+    #[serde(default)] model_hash:        Option<String>,
+    #[serde(default)] data_hash:         Option<String>,
+    // ferx-r extras: boundary verdict, stall flag, max |correlation|.
+    #[serde(default)] r_extras:          serde_json::Value,
 }
 
 
@@ -208,6 +214,8 @@ pub enum FitrxError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("fit.json is missing the required key \"{0}\"")]
+    MissingKey(String),
     #[error("missing required entry: {0}")]
     MissingEntry(String),
 }
@@ -587,7 +595,9 @@ fn parse_trace_csv<R: Read>(reader: R) -> std::io::Result<Vec<TraceRow>> {
         })
     };
     let col_iter   = col(&["iter", "ITER", "ITERATION", "STEP"]).unwrap_or(0);
-    let col_ofv    = col(&["ofv",  "OFV",  "OBJV", "OBJECTIVE"]).unwrap_or(1);
+    let col_ofv    = col(&["ofv",  "OFV",  "OBJV", "OBJECTIVE"]).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "trace has no OFV column")
+    })?;
     let col_method = col(&["method"]);
     let col_phase  = col(&["phase"]);
     let col_grad   = col(&["grad_norm"]);
@@ -631,11 +641,19 @@ fn read_fit_json(zip: &mut zip::ZipArchive<std::fs::File>) -> Result<FitWire, Fi
     let mut entry = bound_entry("fit.json", entry)?;
     let mut buf = String::new();
     entry.read_to_string(&mut buf)?;
-    serde_json::from_str(&buf).map_err(|e| FitrxError::Json {
-        entry: "fit.json".to_string(),
-        source: e,
-    })
+    let json_err = |e| FitrxError::Json { entry: "fit.json".to_string(), source: e };
+    let raw: serde_json::Value = serde_json::from_str(&buf).map_err(json_err)?;
+    // A missing headline key must be an error, not a silent 0 / false / NaN.
+    for key in REQUIRED_FIT_KEYS {
+        if raw.get(*key).is_none() {
+            return Err(FitrxError::MissingKey((*key).to_string()));
+        }
+    }
+    serde_json::from_value(raw).map_err(json_err)
 }
+
+/// Keys whose absence would otherwise be read as a plausible value (OFV 0, not converged).
+const REQUIRED_FIT_KEYS: &[&str] = &["ofv", "aic", "bic", "converged", "method"];
 
 fn read_warnings(zip: &mut zip::ZipArchive<std::fs::File>) -> Option<Vec<String>> {
     let entry = zip.by_name("warnings.txt").ok()?;
@@ -842,6 +860,9 @@ fn wire_to_summary(w: FitWire, mut warnings: Vec<String>) -> FitSummary {
     // Eps shrinkage: scalar when there is one sigma component.
     let eps_shrinkage = to_pct(json_val_to_f64_vec(&w.shrinkage_eps));
 
+    let theta_fixed = json_val_to_bool_vec(&w.theta.fixed);
+    let omega_fixed = json_val_to_bool_vec(&w.omega.fixed);
+
     // Fitted block_sigma correlations (sigma.residual_correlations + .se_ + _fixed).
     let residual_correlations = parse_residual_correlations(&w.sigma);
 
@@ -929,7 +950,13 @@ fn wire_to_summary(w: FitWire, mut warnings: Vec<String>) -> FitSummary {
         eps_shrinkage,
         etabar:        vec![], // not in fit.json
         etabar_pvalue: vec![],
-        at_lower_bound: vec![], // not in fit.json
+        near_boundary:   w.r_extras.get("estimate_near_boundary").and_then(|v| v.as_bool()),
+        stalled_at_init: w.r_extras.get("stalled_at_init").and_then(|v| v.as_bool()),
+        max_abs_corr:    w.r_extras.get("max_abs_correlation").and_then(|v| v.as_f64()),
+        model_hash:      w.model_hash.filter(|v| !v.is_empty()),
+        data_hash:       w.data_hash.filter(|v| !v.is_empty()),
+        theta_fixed,
+        omega_fixed,
         warnings,
         trace_path: w.trace_path,
         dw_statistic: w.dw_statistic,
@@ -1399,5 +1426,82 @@ mod tests {
         assert!((s.eta_shrinkage[0] - 20.1).abs() < 1e-9);
         assert!((s.eps_shrinkage[0] - 11.17).abs() < 1e-9);
         assert!((s.kappa_shrinkage[0] - 37.4).abs() < 1e-9);
+    }
+
+    fn write_bundle(name: &str, fit_json: &str) -> PathBuf {
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!("ferxgui_{name}_{}.fitrx", std::process::id()));
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        zip.start_file("fit.json", zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(fit_json.as_bytes()).unwrap();
+        zip.finish().unwrap();
+        path
+    }
+
+    #[test]
+    fn missing_ofv_is_parse_error() {
+        let p = write_bundle("noofv", r#"{"method":"focei","aic":1,"bic":2,"converged":true}"#);
+        let r = read_fit_summary(&p);
+        let _ = std::fs::remove_file(&p);
+        match r {
+            Err(FitrxError::MissingKey(k)) => assert_eq!(k, "ofv"),
+            other => panic!("expected MissingKey(ofv), got {other:?}"),
+        }
+    }
+
+    const BASE: &str = r#""method":"focei","ofv":1.5,"aic":2,"bic":3,"converged":true"#;
+
+    #[test]
+    fn near_boundary_from_r_extras() {
+        let t = |extra: &str| {
+            let p = write_bundle("nb", &format!("{{{BASE}{extra}}}"));
+            let s = read_fit_summary(&p).unwrap();
+            let _ = std::fs::remove_file(&p);
+            s
+        };
+        let s = t(r#","r_extras":{"estimate_near_boundary":true,"stalled_at_init":false,"max_abs_correlation":0.93}"#);
+        assert_eq!(s.near_boundary, Some(true));
+        assert!(s.has_boundary_hit());
+        assert_eq!(s.stalled_at_init, Some(false));
+        assert_eq!(s.max_abs_corr, Some(0.93));
+        assert_eq!(t(r#","r_extras":{"estimate_near_boundary":false}"#).near_boundary, Some(false));
+        let absent = t("");
+        assert_eq!(absent.near_boundary, None, "absent must not read as false");
+        assert!(!absent.has_boundary_hit());
+    }
+
+    #[test]
+    fn fixed_flags_and_hashes_from_fit_json() {
+        let p = write_bundle("fx", &format!(
+            r#"{{{BASE},"model_hash":"aa","data_hash":"bb",
+               "theta":{{"estimates":[1,2],"names":["A","B"],"fixed":[false,true]}},
+               "omega":{{"names":["E"],"fixed":false}}}}"#));
+        let s = read_fit_summary(&p).unwrap();
+        let _ = std::fs::remove_file(&p);
+        assert_eq!(s.theta_fixed, vec![false, true]);
+        assert!(s.is_theta_fixed(1) && !s.is_theta_fixed(0));
+        assert_eq!(s.omega_fixed, vec![false]);
+        assert!(s.has_identity());
+        assert!(s.estimates_fingerprint().is_some());
+    }
+
+    #[test]
+    fn fingerprint_ignores_standard_error_changes() {
+        let mut a = FitSummary { model_hash: Some("m".into()), data_hash: Some("d".into()),
+            theta: vec![1.0, 2.0], se_theta: vec![0.1, 0.2], ..Default::default() };
+        let f1 = a.estimates_fingerprint().unwrap();
+        a.se_theta = vec![9.0, 9.0];
+        assert_eq!(f1, a.estimates_fingerprint().unwrap());
+        a.theta[0] = 1.0000001;
+        assert_ne!(f1, a.estimates_fingerprint().unwrap());
+        let legacy = FitSummary::default();
+        assert!(legacy.estimates_fingerprint().is_none());
+    }
+
+    #[test]
+    fn trace_without_ofv_is_error() {
+        let r = parse_trace_csv("iter,foo\n1,2\n".as_bytes());
+        assert!(r.is_err());
+        assert!(parse_trace_csv("iter,ofv\n1,2\n".as_bytes()).is_ok());
     }
 }

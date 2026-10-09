@@ -191,8 +191,7 @@ fn show_theta_section(ui: &mut egui::Ui, fit: &FitSummary, dark: bool) {
                 .unwrap_or_else(|| format!("THETA{}", i + 1));
             let est = fit.theta.get(i).copied().unwrap_or(f64::NAN);
             let se  = fit.se_theta.get(i).copied().unwrap_or(f64::NAN);
-            let at_b = fit.at_lower_bound.get(i).copied().unwrap_or(false);
-            param_row_fixed(ui, &name, est, se, at_b, dark);
+            param_row_fixed(ui, &name, est, se, fit.is_theta_fixed(i), dark);
         }
     });
 }
@@ -395,10 +394,10 @@ fn param_table(
 }
 
 fn param_row_fixed(
-    ui: &mut egui::Ui, name: &str, est: f64, se: f64, at_bound: bool, dark: bool,
+    ui: &mut egui::Ui, name: &str, est: f64, se: f64, fixed: bool, dark: bool,
 ) {
-    let nc = if at_bound { theme::ORANGE } else { theme::fg(dark) };
-    ui.label(egui::RichText::new(name).color(nc).size(12.0).monospace());
+    let label = if fixed { format!("{name}  FIX") } else { name.to_string() };
+    ui.label(egui::RichText::new(label).color(theme::fg(dark)).size(12.0).monospace());
     ui.label(egui::RichText::new(fmt_sig4(est)).color(theme::fg(dark)).size(12.0));
     ui.label(egui::RichText::new(fmt_sig4(se)).color(theme::fg2(dark)).size(12.0));
     let rse = rse_pct(est, se);
@@ -604,8 +603,7 @@ fn generate_html(
                 .unwrap_or_else(|| format!("THETA{}", i + 1));
             let est = fit.theta.get(i).copied().unwrap_or(f64::NAN);
             let se  = fit.se_theta.get(i).copied().unwrap_or(f64::NAN);
-            let at_b = fit.at_lower_bound.get(i).copied().unwrap_or(false);
-            b.push_str(&html_param_row_fixed(&name, est, se, at_b));
+            b.push_str(&html_param_row_fixed(&name, est, se, fit.is_theta_fixed(i)));
         }
         b.push_str("</table></section>\n");
     }
@@ -761,9 +759,10 @@ fn html_kv_raw(label: &str, value: &str) -> String {
     format!("<tr><td>{label}</td><td>{value}</td></tr>\n")
 }
 
-fn html_param_row_fixed(name: &str, est: f64, se: f64, at_bound: bool) -> String {
+fn html_param_row_fixed(name: &str, est: f64, se: f64, fixed: bool) -> String {
     let rse = rse_pct(est, se);
-    let cls = if at_bound { " class=\"warn\"" } else { "" };
+    let cls = "";
+    let name = &if fixed { format!("{name} (FIX)") } else { name.to_string() };
     let (lo, hi) = ci_pair(est, se);
     format!(
         "<tr{cls}><td class=\"mono\">{name}</td><td>{}</td><td>{}</td>\

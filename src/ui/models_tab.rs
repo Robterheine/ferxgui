@@ -3296,8 +3296,7 @@ fn show_params_pill(ui: &mut egui::Ui, state: &mut AppState) {
                     let init = params.theta_init_for(&name, i);
                     let est  = fit.theta.get(i).copied().unwrap_or(f64::NAN);
                     let se   = fit.se_theta.get(i).copied().unwrap_or(f64::NAN);
-                    let at_b = fit.at_lower_bound.get(i).copied().unwrap_or(false);
-                    theta_param_row(ui, &name, init, est, se, at_b, false);
+                    theta_param_row(ui, &name, init, est, se, fit.is_theta_fixed(i));
                 }
             });
 
@@ -3459,7 +3458,7 @@ fn show_params_pill(ui: &mut egui::Ui, state: &mut AppState) {
                     let init = params.sigma_init.get(i).copied().unwrap_or(f64::NAN);
                     let est  = fit.sigma.get(i).copied().unwrap_or(f64::NAN);
                     let se   = fit.se_sigma.get(i).copied().unwrap_or(f64::NAN);
-                    theta_param_row(ui, &name, init, est, se, false, false);
+                    theta_param_row(ui, &name, init, est, se, false);
                 }
             });
 
@@ -3744,13 +3743,12 @@ fn theta_param_row(
     initial: f64,
     estimate: f64,
     se: f64,
-    at_bound: bool,
     fixed: bool,
 ) {
     let dark = ui.visuals().dark_mode;
     ui.label(egui::RichText::new(name).color(theme::fg(dark)).size(12.0).monospace());
-    draw_init_final_cell(ui, initial, estimate, fixed, at_bound);
-    let est_color = if at_bound { theme::ORANGE } else { theme::fg(dark) };
+    draw_init_final_cell(ui, initial, estimate, fixed, false);
+    let est_color = theme::fg(dark);
     ui.label(egui::RichText::new(fmt_sig4(estimate)).color(est_color).size(12.0));
     ui.label(egui::RichText::new(fmt_sig4(se)).color(theme::fg2(dark)).size(12.0));
     let rse = rse_pct(estimate, se);
