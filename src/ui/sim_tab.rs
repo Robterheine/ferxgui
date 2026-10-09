@@ -853,7 +853,7 @@ fn run_computation(state: &mut AppState) {
     let filters    = state.sim.filters.clone();
     let mode       = state.sim.band_mode;
 
-    std::thread::spawn(move || {
+    crate::util::spawn_guarded("sim_tab:856", tx.clone(), move || {
         match compute_quantiles(&data, &x_col, &y_col, &rep_col, &band_pcts, &filters, mdv_filter, mode) {
             Ok(r)  => { let _ = tx.send(WorkerMsg::SimComplete { generation, result: Box::new(r) }); }
             Err(e) => { let _ = tx.send(WorkerMsg::SimError { generation, message: e }); }

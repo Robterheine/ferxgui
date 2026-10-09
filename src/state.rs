@@ -1522,7 +1522,7 @@ impl AppState {
                     (Some(app_dir), Some(ws)) => crate::io::persistence::load_model_meta(app_dir, ws),
                     _ => Default::default(),
                 };
-                std::thread::spawn(move || {
+                crate::util::spawn_guarded("state:1525", tx.clone(), move || {
                     std::thread::sleep(std::time::Duration::from_millis(400));
                     if let Some(d) = dir {
                         crate::workers::scan::scan_directory(d, meta, tx);
@@ -1533,7 +1533,7 @@ impl AppState {
                     let fitrx = record.directory.join(format!("{stem}.fitrx"));
                     let stem2 = stem.clone();
                     let tx2   = self.worker_tx.clone();
-                    std::thread::spawn(move || {
+                    crate::util::spawn_guarded("state:1536", tx2.clone(), move || {
                         std::thread::sleep(std::time::Duration::from_millis(500));
                         match crate::io::fitrx::extract_output_tables(&fitrx) {
                             Ok(paths) => {
@@ -1567,7 +1567,7 @@ impl AppState {
                     self.workspace.sir_error.remove(&stem);
                     self.ui.sir_popup_open      = true;
                     self.ui.sir_popup_last_stem = Some(stem.clone());
-                    std::thread::spawn(move || {
+                    crate::util::spawn_guarded("state:1570", tx_sir.clone(), move || {
                         // Cancellable wait for the .fitrx to be fully flushed.
                         // 8 × 100 ms = 800 ms total, but interrupts on cancel.
                         for _ in 0..8 {
@@ -1714,7 +1714,7 @@ impl AppState {
                         (Some(app_dir), Some(ws)) => crate::io::persistence::load_model_meta(app_dir, ws),
                         _ => Default::default(),
                     };
-                    std::thread::spawn(move || {
+                    crate::util::spawn_guarded("state:1717", tx.clone(), move || {
                         crate::workers::scan::scan_directory(dir, meta, tx);
                     });
                 }
@@ -1867,7 +1867,7 @@ impl AppState {
         };
         let tx = self.worker_tx.clone();
         self.workspace.scanning = true;
-        std::thread::spawn(move || {
+        crate::util::spawn_guarded("state:1870", tx.clone(), move || {
             crate::workers::scan::scan_directory(dir, meta_map, tx);
         });
     }

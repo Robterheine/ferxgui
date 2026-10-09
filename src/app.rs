@@ -229,7 +229,7 @@ impl FerxApp {
         if state.workspace.ferx_binary_source == crate::io::persistence::FerxBinarySource::Detecting {
             let tx  = state.worker_tx.clone();
             let ctx = cc.egui_ctx.clone();
-            std::thread::spawn(move || {
+            crate::util::spawn_guarded("app:232", tx.clone(), move || {
                 let result = crate::io::persistence::detect_ferx_from_r();
                 let _ = tx.send(crate::workers::messages::WorkerMsg::FerxBinaryDetected(result));
                 ctx.request_repaint();
@@ -385,7 +385,7 @@ impl eframe::App for FerxApp {
             self.state.ui.vpc_pkg_checking = true;
             let tx  = self.state.worker_tx.clone();
             let ctx2 = ctx.clone();
-            std::thread::spawn(move || {
+            crate::util::spawn_guarded("app:388", tx.clone(), move || {
                 let res = crate::io::r_extract::vpc_package_version();
                 let _ = tx.send(crate::workers::messages::WorkerMsg::VpcPkgStatus(res));
                 ctx2.request_repaint();
@@ -920,7 +920,7 @@ fn render_settings(ui: &mut egui::Ui, state: &mut AppState) {
                         state.workspace.ferx_binary_source = FerxBinarySource::Detecting;
                         let tx  = state.worker_tx.clone();
                         let ctx = ui.ctx().clone();
-                        std::thread::spawn(move || {
+                        crate::util::spawn_guarded("app:923", tx.clone(), move || {
                             let result = crate::io::persistence::detect_ferx_from_r();
                             let _ = tx.send(
                                 crate::workers::messages::WorkerMsg::FerxBinaryDetected(result)
@@ -997,7 +997,7 @@ fn render_settings(ui: &mut egui::Ui, state: &mut AppState) {
                         // Kick off background R detection
                         let tx  = state.worker_tx.clone();
                         let ctx = ui.ctx().clone();
-                        std::thread::spawn(move || {
+                        crate::util::spawn_guarded("app:1000", tx.clone(), move || {
                             let result = crate::io::persistence::detect_ferx_from_r();
                             let _ = tx.send(
                                 crate::workers::messages::WorkerMsg::FerxBinaryDetected(result)
@@ -1992,7 +1992,7 @@ fn trigger_r_inspect(state: &mut AppState, ctx: &egui::Context) {
     let tx  = state.worker_tx.clone();
     let ctx = ctx.clone();
 
-    std::thread::spawn(move || {
+    crate::util::spawn_guarded("app:1995", tx.clone(), move || {
         match crate::io::r_extract::inspect_model(&path) {
             Ok(info) => {
                 let _ = tx.send(crate::workers::messages::WorkerMsg::RInspectComplete {

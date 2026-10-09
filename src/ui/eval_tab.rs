@@ -771,7 +771,7 @@ fn show_npde(ui: &mut egui::Ui, state: &mut AppState, model_idx: usize, dark: bo
             let tx      = state.worker_tx.clone();
             let ctx     = ui.ctx().clone();
             let stem_cl = stem.clone();
-            std::thread::spawn(move || {
+            crate::util::spawn_guarded("eval_tab:774", tx.clone(), move || {
                 match crate::io::r_extract::compute_npde(&fitrx_path, nsim, seed) {
                     Ok(result) => {
                         let _ = tx.send(crate::workers::messages::WorkerMsg::NpdeComplete {
@@ -1475,7 +1475,7 @@ fn show_export_dialog(ctx: &egui::Context, state: &mut AppState, model_idx: usiz
             state.ui.status_message = "Exporting figure…".to_string();
             state.ui.eval_exporting = true;
 
-            std::thread::spawn(move || {
+            crate::util::spawn_guarded("eval_tab:1478", tx.clone(), move || {
                 let result = crate::io::r_extract::export_gof(
                     &tmp_csv, &out_path, &format, width,
                     &col1, &col2, loess, ci, export_color.as_ref(), y_token);
@@ -1680,7 +1680,7 @@ fn launch_eta_cov(state: &mut AppState, stem: &str, fitrx_path: &std::path::Path
     } else {
         state.workspace.eta_cov_loaded_mtime.remove(&stem_s);
     }
-    std::thread::spawn(move || {
+    crate::util::spawn_guarded("eval_tab:1683", tx.clone(), move || {
         match crate::io::r_extract::compute_eta_cov(&fitrx) {
             Ok(result) => {
                 let _ = tx.send(crate::workers::messages::WorkerMsg::EtaCovComplete {
@@ -1716,7 +1716,7 @@ fn launch_cov_screen(state: &mut AppState, stem: &str, fitrx_path: &std::path::P
     } else {
         state.workspace.cov_screen_loaded_mtime.remove(&stem_s);
     }
-    std::thread::spawn(move || {
+    crate::util::spawn_guarded("eval_tab:1719", tx.clone(), move || {
         match crate::io::r_extract::compute_cov_screen(&fitrx) {
             Ok(result) => {
                 let _ = tx.send(crate::workers::messages::WorkerMsg::CovScreenComplete {

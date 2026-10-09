@@ -780,7 +780,7 @@ fn start_compute(ui: &egui::Ui, state: &mut AppState, idx: usize, stem: &str) {
     let tx = state.worker_tx.clone();
     let ctx = ui.ctx().clone();
     let stem_cl = stem.to_string();
-    std::thread::spawn(move || {
+    crate::util::spawn_guarded("vpc_tab:783", tx.clone(), move || {
         match r_extract::compute_vpc(&cfg) {
             Ok(data) => { let _ = tx.send(WorkerMsg::RVpcComplete { stem: stem_cl, data: Box::new(data) }); }
             Err(e)   => { let _ = tx.send(WorkerMsg::RTaskError { context: format!("vpc {stem_cl}"), message: e }); }
@@ -814,7 +814,7 @@ fn start_export_from_ctx(ctx: &egui::Context, state: &mut AppState, idx: usize, 
     let tx      = state.worker_tx.clone();
     let ctx_cl  = ctx.clone();
     let stem_cl = stem.to_string();
-    std::thread::spawn(move || {
+    crate::util::spawn_guarded("vpc_tab:817", tx.clone(), move || {
         match r_extract::export_vpc_plot(&cfg, &png_path, &script) {
             Ok(()) => {
                 let _ = tx.send(WorkerMsg::VpcPlotExported { path: png_path.to_string_lossy().into_owned() });
@@ -832,7 +832,7 @@ fn ensure_pkg_check(ui: &egui::Ui, state: &mut AppState) {
     state.ui.vpc_pkg_checking = true;
     let tx = state.worker_tx.clone();
     let ctx = ui.ctx().clone();
-    std::thread::spawn(move || {
+    crate::util::spawn_guarded("vpc_tab:835", tx.clone(), move || {
         let res = r_extract::vpc_package_version();
         let _ = tx.send(WorkerMsg::VpcPkgStatus(res));
         ctx.request_repaint();

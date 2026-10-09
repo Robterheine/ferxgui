@@ -405,7 +405,7 @@ fn start_compute(ui: &egui::Ui, state: &mut AppState, idx: usize, stem: &str) {
     let tx = state.worker_tx.clone();
     let ctx = ui.ctx().clone();
     let stem_cl = stem.to_string();
-    std::thread::spawn(move || {
+    crate::util::spawn_guarded("simulate_tab:408", tx.clone(), move || {
         match r_extract::compute_simulation(&cfg) {
             Ok(result) => { let _ = tx.send(WorkerMsg::SimRunComplete { stem: stem_cl, result: Box::new(result) }); }
             Err(e)     => { let _ = tx.send(WorkerMsg::RTaskError { context: format!("simulate {stem_cl}"), message: e }); }
@@ -446,7 +446,7 @@ fn start_adaptive_compute(ui: &egui::Ui, state: &mut AppState, idx: usize, stem:
     let tx = state.worker_tx.clone();
     let ctx = ui.ctx().clone();
     let stem_cl = stem.to_string();
-    std::thread::spawn(move || {
+    crate::util::spawn_guarded("simulate_tab:449", tx.clone(), move || {
         match r_extract::compute_adaptive_sim(&model_path, &data_path, n_sim, seed, max_decisions, &out_path) {
             Ok(result) => { let _ = tx.send(WorkerMsg::AdaptiveSimComplete { stem: stem_cl, result: Box::new(result) }); }
             Err(e)     => { let _ = tx.send(WorkerMsg::RTaskError { context: format!("adaptive_sim {stem_cl}"), message: e }); }

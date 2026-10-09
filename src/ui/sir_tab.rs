@@ -105,7 +105,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                         let keep         = state.ui.sir_keep_samples;
                         let fitrx_cl     = fitrx_path.clone();
 
-                        std::thread::spawn(move || {
+                        crate::util::spawn_guarded("sir_tab:108", tx.clone(), move || {
                             match crate::io::r_extract::compute_sir(
                                 &fitrx_cl, n_samples, n_resamples, seed, keep)
                             {

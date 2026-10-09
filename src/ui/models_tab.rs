@@ -2200,7 +2200,7 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
                             let tx      = state.worker_tx.clone();
                             let ctx     = ui.ctx().clone();
                             let stem_cl = stem.clone();
-                            std::thread::spawn(move || {
+                            crate::util::spawn_guarded("models_tab:2203", tx.clone(), move || {
                                 match crate::io::r_extract::compute_check_init(&model_path, &dp) {
                                     Ok(result) => {
                                         let _ = tx.send(crate::workers::messages::WorkerMsg::RCheckInitComplete {
@@ -2368,7 +2368,7 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
                         let tx      = state.worker_tx.clone();
                         let ctx     = ui.ctx().clone();
                         let stem_cl = stem.clone();
-                        std::thread::spawn(move || {
+                        crate::util::spawn_guarded("models_tab:2371", tx.clone(), move || {
                             match crate::io::r_extract::compute_model_validate(&model_path, data_path.as_deref()) {
                                 Ok(result) => {
                                     let _ = tx.send(crate::workers::messages::WorkerMsg::ModelValidateComplete {
@@ -2894,7 +2894,7 @@ fn gate_on_validation(state: &mut AppState, idx: usize, queued: crate::domain::Q
     let data_path = Some(queued.data_path.clone());
     state.run.pending_validate.insert(stem.clone(), queued);
     let tx = state.worker_tx.clone();
-    std::thread::spawn(move || {
+    crate::util::spawn_guarded("models_tab:2897", tx.clone(), move || {
         match crate::io::r_extract::compute_model_validate(&model_path, data_path.as_deref()) {
             Ok(result) => {
                 let _ = tx.send(crate::workers::messages::WorkerMsg::ModelValidateComplete {
@@ -4913,7 +4913,7 @@ fn show_covariance_confirm_dialog(ctx: &egui::Context, state: &mut AppState) {
             let tx      = state.worker_tx.clone();
             let ctx_cl  = ctx.clone();
             let stem_cl = stem.clone();
-            std::thread::spawn(move || {
+            crate::util::spawn_guarded("models_tab:4916", tx.clone(), move || {
                 match crate::io::r_extract::compute_covariance(&fitrx_path, &method) {
                     Ok(covariance_status) => {
                         let _ = tx.send(crate::workers::messages::WorkerMsg::CovarianceComplete {
@@ -5039,7 +5039,7 @@ fn do_create_model(state: &mut AppState, ctx: &egui::Context) {
 
     state.ui.status_message = format!("Creating {stem}.ferx…");
 
-    std::thread::spawn(move || {
+    crate::util::spawn_guarded("models_tab:5042", tx.clone(), move || {
         match crate::io::r_extract::create_model_from_template(&path, &template) {
             Ok(()) => {
                 let _ = tx.send(crate::workers::messages::WorkerMsg::ModelCreated(stem));
