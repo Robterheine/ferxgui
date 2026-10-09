@@ -84,8 +84,8 @@ pub fn parse_fit_options(source: &str) -> FitOptions {
         if is_comment_line(trimmed) || trimmed.is_empty() {
             continue;
         }
-        if let Some(sec) = section_name(trimmed) {
-            in_section = sec == "fit_options";
+        if is_section_header(trimmed) {
+            in_section = section_name(trimmed) == Some("fit_options");
             continue;
         }
         if !in_section {
@@ -142,8 +142,8 @@ pub fn parse_data_path(source: &str) -> Option<String> {
         if is_comment_line(trimmed) || trimmed.is_empty() {
             continue;
         }
-        if let Some(sec) = section_name(trimmed) {
-            in_section = sec == "data";
+        if is_section_header(trimmed) {
+            in_section = section_name(trimmed) == Some("data");
             continue;
         }
         if !in_section {
@@ -174,11 +174,11 @@ fn parse_bool(s: &str) -> Option<bool> {
 /// when to reset `current_section`, independently of whether `section_name`
 /// knows the name inside the brackets.
 fn is_section_header(line: &str) -> bool {
-    line.starts_with('[') && line.ends_with(']')
+    super::ferx_grammar::section_header(line).is_some()
 }
 
 fn section_name(line: &str) -> Option<&'static str> {
-    let inner = line.strip_prefix('[')?.strip_suffix(']')?.trim();
+    let inner = super::ferx_grammar::section_header(line)?;
     match inner {
         "parameters" => Some("parameters"),
         "individual_parameters" => Some("individual_parameters"),
@@ -412,7 +412,7 @@ pub fn tokenise_line(line: &str) -> Vec<(usize, usize, TokenKind)> {
 
     // Section header `[…]`.
     if trimmed.starts_with('[') {
-        if let Some(end) = trimmed.find(']') {
+        if let (Some(_), Some(end)) = (super::ferx_grammar::section_header(trimmed), trimmed.find(']')) {
             out.push((indent, indent + end + 1, TokenKind::SectionHeader));
         }
         return out;
@@ -720,6 +720,41 @@ mod tests {
             ("  block_sigma (A, B) = [1, 0, 1]", TokenKind::ParamKeyword),
         ] {
             assert!(tokenise_line(line).iter().any(|t| t.2 == kind), "{line}");
+        }
+    }
+
+    const CORPUS_BODY: &str = "
+  theta TVCL(0.134, 0.001, 10.0)
+  theta TVV(8.0, 0.1, 500.0)
+  omega ETA_CL ~ 0.07
+  sigma PROP_ERR ~ 0.01
+[fit_options]HDR2
+  method = focei
+  covariance = false
+";
+
+    #[test]
+    fn header_corpus_matches_ferx() {
+        // (parameters header, fit_options header, ferx accepts, expected theta count)
+        let cases = [
+            ("[parameters]", "", true, 2),
+            ("[parameters]  # main", "  # opts", true, 2),
+            ("[parameters]  // main", "  // opts", true, 2),
+            ("[parameters]\t# main", "\t# opts", true, 2),
+            ("[parameters]#main", "#opts", true, 2),
+            ("[ parameters ]", "", false, 0),
+        ];
+        for (h, h2, ok, n) in cases {
+            let src = format!("{h}{}", CORPUS_BODY.replace("HDR2", h2));
+            let p = parse_params(&src);
+            assert_eq!(p.theta_names.len(), n, "theta count for {h:?}");
+            if ok {
+                assert_eq!(p.omega_names.len(), 1, "{h:?}");
+                assert_eq!(p.sigma_names.len(), 1, "{h:?}");
+                let o = parse_fit_options(&src);
+                assert_eq!(o.method.as_deref(), Some("focei"), "{h:?}");
+                assert_eq!(o.covariance, Some(false), "{h:?}");
+            }
         }
     }
 }

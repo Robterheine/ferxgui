@@ -1,4 +1,5 @@
 pub mod ferx_file;
+pub mod ferx_grammar;
 pub mod bundle;
 pub mod dataset;
 pub mod fitrx;
