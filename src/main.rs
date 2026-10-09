@@ -1,3 +1,7 @@
+// Immediate-mode draw helpers and process launchers legitimately take many parameters
+// (UI handle, state, flags, theme); bundling them into one-use structs would only add noise.
+#![allow(clippy::too_many_arguments)]
+
 mod app;
 mod domain;
 mod io;
@@ -6,62 +10,6 @@ mod state;
 mod util;
 mod ui;
 mod workers;
-
-#[cfg(test)]
-mod glyph_coverage_tests {
-    use std::path::Path;
-
-    /// U+2713 (✓ CHECK MARK) and U+2717 (✗ BALLOT X) are not covered by any
-    /// font bundled by egui's `default_fonts` feature — confirmed by direct
-    /// cmap inspection of the four font files it embeds (Ubuntu-Light,
-    /// NotoEmoji-Regular, emoji-icon-font, Hack-Regular). Any occurrence in
-    /// UI-rendered text shows as an empty "tofu" box (reported bug, found in
-    /// 7 files across the codebase). Use ✔ (U+2714 HEAVY CHECK MARK) / ✖
-    /// (U+2716 HEAVY MULTIPLICATION X) instead — both confirmed covered.
-    ///
-    /// `notify.rs` is exempt: it only builds strings for OS-native
-    /// notifications (osascript / notify-send / PowerShell toast), which
-    /// render with the OS's own fonts, not egui's — not subject to this gap.
-    #[test]
-    fn no_uncovered_check_or_cross_glyphs_in_ui_source() {
-        let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut offenders = Vec::new();
-        visit(&src_dir, &mut offenders);
-        assert!(
-            offenders.is_empty(),
-            "found uncovered U+2713 (✓) / U+2717 (✗) glyphs in: {offenders:#?}\n\
-             use ✔ (U+2714) / ✖ (U+2716) instead"
-        );
-    }
-
-    fn visit(dir: &Path, offenders: &mut Vec<String>) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                visit(&path, offenders);
-                continue;
-            }
-            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-                continue;
-            }
-            let file_name = path.file_name().and_then(|n| n.to_str());
-            // notify.rs: OS-native notification text, not egui-rendered (see
-            // doc comment above). main.rs: this test's own doc comment and
-            // assert message reference the glyphs by name for documentation
-            // purposes, which isn't a real occurrence to flag.
-            if file_name == Some("notify.rs") || file_name == Some("main.rs") {
-                continue;
-            }
-            let Ok(text) = std::fs::read_to_string(&path) else { continue };
-            for (i, line) in text.lines().enumerate() {
-                if line.contains('\u{2713}') || line.contains('\u{2717}') {
-                    offenders.push(format!("{}:{}", path.display(), i + 1));
-                }
-            }
-        }
-    }
-}
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -311,4 +259,60 @@ fn icon_blend(buf: &mut [u8], px: usize, py: usize, color: Rgb, a: f32) {
 fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+#[cfg(test)]
+mod glyph_coverage_tests {
+    use std::path::Path;
+
+    /// U+2713 (✓ CHECK MARK) and U+2717 (✗ BALLOT X) are not covered by any
+    /// font bundled by egui's `default_fonts` feature — confirmed by direct
+    /// cmap inspection of the four font files it embeds (Ubuntu-Light,
+    /// NotoEmoji-Regular, emoji-icon-font, Hack-Regular). Any occurrence in
+    /// UI-rendered text shows as an empty "tofu" box (reported bug, found in
+    /// 7 files across the codebase). Use ✔ (U+2714 HEAVY CHECK MARK) / ✖
+    /// (U+2716 HEAVY MULTIPLICATION X) instead — both confirmed covered.
+    ///
+    /// `notify.rs` is exempt: it only builds strings for OS-native
+    /// notifications (osascript / notify-send / PowerShell toast), which
+    /// render with the OS's own fonts, not egui's — not subject to this gap.
+    #[test]
+    fn no_uncovered_check_or_cross_glyphs_in_ui_source() {
+        let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders = Vec::new();
+        visit(&src_dir, &mut offenders);
+        assert!(
+            offenders.is_empty(),
+            "found uncovered U+2713 (✓) / U+2717 (✗) glyphs in: {offenders:#?}\n\
+             use ✔ (U+2714) / ✖ (U+2716) instead"
+        );
+    }
+
+    fn visit(dir: &Path, offenders: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                visit(&path, offenders);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let file_name = path.file_name().and_then(|n| n.to_str());
+            // notify.rs: OS-native notification text, not egui-rendered (see
+            // doc comment above). main.rs: this test's own doc comment and
+            // assert message reference the glyphs by name for documentation
+            // purposes, which isn't a real occurrence to flag.
+            if file_name == Some("notify.rs") || file_name == Some("main.rs") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            for (i, line) in text.lines().enumerate() {
+                if line.contains('\u{2713}') || line.contains('\u{2717}') {
+                    offenders.push(format!("{}:{}", path.display(), i + 1));
+                }
+            }
+        }
+    }
 }

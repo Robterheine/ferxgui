@@ -2,6 +2,7 @@
 name = "ferxgui"
 version = "0.9.26"
 edition = "2021"
+rust-version = "1.85"
 description = "FeRx GUI — desktop application for FeRx NLME modelling"
 license = "MIT"
 

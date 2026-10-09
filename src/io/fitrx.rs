@@ -1242,9 +1242,7 @@ mod tests {
     #[test]
     fn omega_index_round_trip() {
         // 3x3 lower triangle: [v00, v10, v11, v20, v21, v22]
-        let mut fit = FitSummary::default();
-        fit.omega = vec![1.0, 0.3, 0.5, 0.1, 0.2, 0.8];
-        fit.n_eta = 3;
+        let fit = FitSummary { omega: vec![1.0, 0.3, 0.5, 0.1, 0.2, 0.8], n_eta: 3, ..Default::default() };
         assert_eq!(fit.omega_value(0, 0), Some(1.0));
         assert_eq!(fit.omega_value(1, 0), Some(0.3));
         assert_eq!(fit.omega_value(2, 1), Some(0.2));

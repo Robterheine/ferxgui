@@ -169,6 +169,9 @@ pub fn n_from_r_p(r: f64, p: f64) -> Option<usize> {
 }
 
 /// Standard normal quantile (Wichura, AS 241 PPND16; ~1e-16 relative accuracy).
+// The coefficients are the published AS 241 constants verbatim; truncating them to satisfy
+// `excessive_precision` would mean re-typing a verified algorithm.
+#[allow(clippy::excessive_precision)]
 pub fn qnorm(p: f64) -> f64 {
     if !(0.0..=1.0).contains(&p) || p.is_nan() { return f64::NAN; }
     if p == 0.0 { return f64::NEG_INFINITY; }

@@ -1087,7 +1087,7 @@ fn format_y_tick(mark_value: f64, log_y: bool) -> String {
         return "0".to_string();
     }
     let abs = display.abs();
-    if abs >= 100_000.0 || abs < 0.001 {
+    if !(0.001..100_000.0).contains(&abs) {
         format!("{display:.2e}")
     } else {
         let s = format!("{display:.4}");

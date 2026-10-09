@@ -232,6 +232,19 @@ cargo build --release
 
 > **Linux SSH note:** If you use FeRx GUI over SSH/X11, model runs are spawned with `setsid()` so they are immune to SIGHUP. However, if your system uses `KillUserProcesses=yes` in `/etc/systemd/logind.conf`, background processes may be killed when your session ends. Ask your administrator to run `loginctl enable-linger <your-username>` to allow lingering processes.
 
+### Running downloaded release binaries (unsigned)
+
+The release binaries are **not signed or notarised** (no Apple Developer ID, no Windows code-signing certificate), so your operating system will warn the first time you open one.
+
+- **macOS (Gatekeeper):** right-click the `ferxgui` binary in Finder and choose **Open**, then confirm; or remove the quarantine attribute that the browser added:
+  ```bash
+  xattr -d com.apple.quarantine ./ferxgui
+  ```
+- **Windows (SmartScreen):** on "Windows protected your PC" click **More info**, then **Run anyway**.
+- **Linux:** the binary is built on Ubuntu 22.04 (glibc 2.35) and runs on that or newer. Mark it executable with `chmod +x ferxgui`.
+
+Building from source (above) avoids these prompts. The minimum supported Rust toolchain is recorded in `Cargo.toml` (`rust-version`) and checked in CI.
+
 ---
 
 ## Quick start

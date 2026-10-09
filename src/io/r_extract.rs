@@ -2090,21 +2090,39 @@ pub fn apply_no_window(cmd: std::process::Command) -> std::process::Command {
 /// inherit a bare PATH that usually omits the R install dir.  We therefore
 /// search PATH first, then `R_HOME`, then well-known per-platform locations.
 pub fn find_rscript() -> Option<std::path::PathBuf> {
+    if let Some(p) = CHOSEN_RSCRIPT.get() { return Some(p.clone()); }
+    rscript_candidates().into_iter().next()
+}
+
+/// The Rscript the startup probe chose (highest R that has a recent enough ferx). Once set,
+/// every helper uses it instead of whichever Rscript happens to come first on PATH.
+static CHOSEN_RSCRIPT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+pub fn set_chosen_rscript(p: std::path::PathBuf) { let _ = CHOSEN_RSCRIPT.set(p); }
+
+/// Every Rscript found, in search order (PATH, `R_HOME`, well-known locations), without duplicates.
+pub fn rscript_candidates() -> Vec<std::path::PathBuf> {
     let exe = rscript_exe_name();
-
-    // 1. On the current process PATH.
-    if let Some(p) = which_on_path(exe) { return Some(p); }
-
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    let mut push = |p: std::path::PathBuf| {
+        if p.is_file() {
+            let key = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+            if !out.iter().any(|q| std::fs::canonicalize(q).unwrap_or_else(|_| q.clone()) == key) { out.push(p); }
+        }
+    };
+    // 1. Every directory on the current process PATH.
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) { push(dir.join(exe)); }
+    }
     // 2. R_HOME/bin (and bin/x64 on Windows) if the env var is set.
     if let Some(home) = std::env::var_os("R_HOME") {
         let home = std::path::PathBuf::from(home);
-        for p in [home.join("bin").join(exe), home.join("bin").join("x64").join(exe)] {
-            if p.is_file() { return Some(p); }
-        }
+        push(home.join("bin").join(exe));
+        push(home.join("bin").join("x64").join(exe));
     }
-
     // 3. Per-platform well-known locations.
-    platform_rscript_candidates().into_iter().find(|p| p.is_file())
+    for p in platform_rscript_candidates() { push(p); }
+    out
 }
 
 #[cfg(windows)]
@@ -2142,16 +2160,6 @@ fn platform_rscript_candidates() -> Vec<std::path::PathBuf> {
         }
     }
     out
-}
-
-/// Walk PATH looking for `name`.
-fn which_on_path(name: &str) -> Option<std::path::PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
-        let p = dir.join(name);
-        if p.is_file() { return Some(p); }
-    }
-    None
 }
 
 #[cfg(test)]

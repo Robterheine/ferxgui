@@ -110,27 +110,71 @@ fn default_ferx_binary() -> Option<PathBuf> {
 /// Returns `(rscript_path, ferx_version, r_version)` when ferx is loadable.
 /// A single Rscript invocation returns both versions separated by `|`.
 pub fn detect_ferx_from_r() -> Option<(PathBuf, String, String)> {
-    let rscript = crate::io::r_extract::find_rscript()?;
+    let probes: Vec<RProbe> = crate::io::r_extract::rscript_candidates()
+        .into_iter().filter_map(|p| probe_rscript(&p)).collect();
+    let best = pick_best_r(probes)?;
+    crate::io::r_extract::set_chosen_rscript(best.rscript.clone());
+    Some((best.rscript, best.ferx, best.r))
+}
 
+/// Oldest ferx the GUI supports.
+pub const MIN_FERX: (u32, u32, u32) = (0, 4, 0);
+
+/// What one Rscript reported about itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RProbe { pub rscript: PathBuf, pub ferx: String, pub r: String }
+
+/// Highest R version among the installs that have ferx at or above `MIN_FERX`; failing that, the
+/// highest R that has any ferx (the caller then flags the old version). Ties keep search order.
+pub fn pick_best_r(probes: Vec<RProbe>) -> Option<RProbe> {
+    let r_ver = |p: &RProbe| {
+        let tail = p.r.trim_start_matches("R version ");
+        crate::domain::parse_version3(tail.split_whitespace().next().unwrap_or("")).unwrap_or((0, 0, 0))
+    };
+    let ferx_ok = |p: &RProbe| crate::domain::parse_version3(&p.ferx).is_some_and(|v| v >= MIN_FERX);
+    let best_of = |ok_only: bool, probes: &[RProbe]| -> Option<RProbe> {
+        let mut best: Option<&RProbe> = None;
+        for p in probes.iter().filter(|p| !ok_only || ferx_ok(p)) {
+            if best.is_none_or(|b| r_ver(p) > r_ver(b)) { best = Some(p); }
+        }
+        best.cloned()
+    };
+    best_of(true, &probes).or_else(|| best_of(false, &probes))
+}
+
+/// Runs `library(ferx)` in one Rscript (10 s timeout) and reads back both versions. A mere
+/// `requireNamespace` can pass while a broken shared library would fail at run time.
+fn probe_rscript(rscript: &std::path::Path) -> Option<RProbe> {
     let probe = "tryCatch({\
         suppressMessages(library(ferx)); \
         cat(as.character(packageVersion('ferx')), '|', R.version.string, sep='')\
     }, error = function(e) cat(''))";
-
-    let mut cmd = crate::io::r_extract::r_command(&rscript);
-    cmd.args(["--vanilla", "-e", probe]);
-    let output = cmd.output().ok()?;
-    if !output.status.success() { return None; }
-
-    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if raw.is_empty() { return None; }
-
+    let out_path = std::env::temp_dir().join(format!("ferxgui_probe_{}_{}.txt", std::process::id(),
+        rscript.to_string_lossy().bytes().fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(b as u64))));
+    let out_file = std::fs::File::create(&out_path).ok()?;
+    let mut cmd = crate::io::r_extract::r_command(rscript);
+    cmd.args(["--vanilla", "-e", probe]).stdin(std::process::Stdio::null())
+        .stdout(out_file).stderr(std::process::Stdio::null());
+    let mut child = cmd.spawn().ok()?;
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break Some(s),
+            Ok(None) if start.elapsed() > std::time::Duration::from_secs(10) => {
+                let _ = child.kill(); let _ = child.wait(); break None;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(_) => break None,
+        }
+    };
+    let raw = std::fs::read_to_string(&out_path).unwrap_or_default();
+    let _ = std::fs::remove_file(&out_path);
+    if !status?.success() { return None; }
+    let raw = raw.trim();
     let mut parts = raw.splitn(2, '|');
-    let ferx_ver = parts.next().unwrap_or("").trim().to_string();
-    let r_ver    = parts.next().unwrap_or("").trim().to_string();
-    if ferx_ver.is_empty() { return None; }
-
-    Some((rscript, ferx_ver, r_ver))
+    let ferx = parts.next().unwrap_or("").trim().to_string();
+    let r = parts.next().unwrap_or("").trim().to_string();
+    (!ferx.is_empty()).then(|| RProbe { rscript: rscript.to_path_buf(), ferx, r })
 }
 
 /// Describes how the ferx binary was located.  Not persisted to disk;
@@ -409,5 +453,31 @@ mod model_meta_tests {
 
         let loaded_b = load_model_meta(&s_a.app_dir, &s_b.workspace);
         assert!(loaded_b.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod r_discovery_tests {
+    use super::*;
+
+    fn probe(path: &str, ferx: &str, r: &str) -> RProbe {
+        RProbe { rscript: PathBuf::from(path), ferx: ferx.into(), r: r.into() }
+    }
+
+    #[test]
+    fn r_discovery_picks_the_newest_r_with_ferx() {
+        let best = pick_best_r(vec![
+            probe("/a/Rscript", "0.4.0", "R version 4.3.2 (2023-10-31)"),
+            probe("/b/Rscript", "0.4.0.9000", "R version 4.5.1 (2025-06-13)"),
+            probe("/c/Rscript", "0.3.9", "R version 4.6.0 (2026-04-24)"), // newest R, ferx too old
+        ]).unwrap();
+        assert_eq!(best.rscript, PathBuf::from("/b/Rscript"));
+        // Nothing meets the minimum: fall back to the newest R that has any ferx.
+        let fb = pick_best_r(vec![
+            probe("/a/Rscript", "0.3.0", "R version 4.3.2 (2023-10-31)"),
+            probe("/c/Rscript", "0.3.9", "R version 4.6.0 (2026-04-24)"),
+        ]).unwrap();
+        assert_eq!(fb.rscript, PathBuf::from("/c/Rscript"));
+        assert!(pick_best_r(vec![]).is_none());
     }
 }

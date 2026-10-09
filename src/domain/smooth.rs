@@ -11,7 +11,8 @@ fn solve3(mut a: [[f64; 3]; 3], mut b: [f64; 3]) -> Option<[f64; 3]> {
         a.swap(c, p); b.swap(c, p);
         for r in c + 1..3 {
             let f = a[r][c] / a[c][c];
-            for k in c..3 { a[r][k] -= f * a[c][k]; }
+            let pivot_row = a[c];
+            for (k, v) in a[r].iter_mut().enumerate().skip(c) { *v -= f * pivot_row[k]; }
             b[r] -= f * b[c];
         }
     }

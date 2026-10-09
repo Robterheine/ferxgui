@@ -358,11 +358,12 @@ impl eframe::App for FerxApp {
         // Intercept the main window's close request while the Files tab has
         // unsaved edits, so quitting can't silently discard them the same
         // way switching files could (see files_tab's own guard).
-        if ctx.input(|i| i.viewport().close_requested()) && !self.state.ui.quit_confirmed {
-            if self.state.ui.has_unsaved_edits() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                self.state.ui.quit_unsaved_dialog = true;
-            }
+        if ctx.input(|i| i.viewport().close_requested())
+            && !self.state.ui.quit_confirmed
+            && self.state.ui.has_unsaved_edits()
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.state.ui.quit_unsaved_dialog = true;
         }
         show_quit_unsaved_dialog(ctx, &mut self.state);
 
