@@ -405,6 +405,8 @@ pub struct UiState {
     pub editor_dirty: bool,
     /// Which model stem is currently loaded in the editor (used to detect selection change).
     pub editor_loaded_stem: Option<String>,
+    /// Validation findings for a just-created template, shown until dismissed.
+    pub new_model_notice: Option<(String, Vec<String>)>,
     /// The reference model is declared nested in the compared models (enables the LRT verdict).
     pub lrt_nested: bool,
     /// Model the user tried to switch to while the editor had unsaved edits (prompt pending).
@@ -757,6 +759,7 @@ impl Default for UiState {
             editor_buffer: String::new(),
             editor_dirty: false,
             lrt_nested: false,
+            new_model_notice: None,
             editor_switch_target: None,
             editor_overwrite_ok: false,
             last_draft_at: None,
@@ -1659,8 +1662,13 @@ impl AppState {
                 self.ui.status_message = format!("Simulation ready: {stem} ({} rows)", result.n_rows);
                 self.workspace.simrun_results.insert(stem, *result);
             }
-            ModelCreated(stem) => {
-                self.ui.status_message = format!("Created {stem}.ferx");
+            ModelCreated { stem, warnings } => {
+                self.ui.status_message = if warnings.is_empty() {
+                    format!("Created {stem}.ferx")
+                } else {
+                    format!("Created {stem}.ferx — ferx reports {} finding(s) for this template", warnings.len())
+                };
+                if !warnings.is_empty() { self.ui.new_model_notice = Some((stem, warnings)); }
                 self.trigger_scan();
             }
             RCheckInitComplete { stem, result } => {

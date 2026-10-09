@@ -140,22 +140,27 @@ pub struct CovTabData {
     pub covariate_names: Vec<String>,
     /// (id, time bit-pattern) → row index, built once so repeated per-point
     /// lookups while rendering plots don't rescan every row.
-    index: std::collections::HashMap<(String, u64), usize>,
+    index: std::collections::HashMap<(String, i64), usize>,
+}
+
+/// Tolerant time key: rounded to 1e-9 so `0.1 + 0.2` finds `0.3`, and `-0.0` is `0.0`.
+fn time_key(t: f64) -> i64 {
+    if t.is_finite() { (t * 1e9).round() as i64 } else { i64::MIN }
 }
 
 impl CovTabData {
     pub fn from_rows(rows: Vec<CovTabRow>, covariate_names: Vec<String>) -> Self {
         let index = rows.iter().enumerate()
-            .map(|(i, r)| ((r.id.clone(), r.time.to_bits()), i))
+            .map(|(i, r)| ((r.id.clone(), time_key(r.time)), i))
             .collect();
         Self { rows, covariate_names, index }
     }
 
-    /// Exact (ID, TIME) lookup of one covariate's value. `None` if no
+    /// (ID, TIME) lookup of one covariate's value; times match to 1e-9 and -0.0 equals 0.0. `None` if no
     /// covtab.csv row matches, or the value there didn't parse as a number —
     /// callers treat both the same as an unavailable/NaN value.
     pub fn lookup(&self, id: &str, time: f64, covariate: &str) -> Option<f64> {
-        self.index.get(&(id.to_string(), time.to_bits()))
+        self.index.get(&(id.to_string(), time_key(time)))
             .and_then(|&i| self.rows[i].values.get(covariate))
             .copied()
     }
@@ -181,6 +186,14 @@ mod covtab_tests {
         );
         assert_eq!(data.lookup("1", 0.0, "WT"), Some(70.0));
         assert_eq!(data.lookup("2", 0.0, "WT"), Some(55.0));
+    }
+
+    #[test]
+    fn lookup_tolerates_negative_zero_and_rounding_noise() {
+        let data = CovTabData::from_rows(vec![row("1", 0.3, &[("WT", 70.0)]), row("2", 0.0, &[("WT", 55.0)])],
+                                         vec!["WT".to_string()]);
+        assert_eq!(data.lookup("1", 0.1 + 0.2, "WT"), Some(70.0));
+        assert_eq!(data.lookup("2", -0.0, "WT"), Some(55.0));
     }
 
     #[test]

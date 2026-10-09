@@ -41,7 +41,7 @@ fn collect_models(dir: &Path, meta_map: &HashMap<String, ModelMeta>) -> Vec<Mode
     entries
 }
 
-fn build_entry(ferx_path: PathBuf, meta_map: &HashMap<String, ModelMeta>) -> Option<ModelEntry> {
+pub(crate) fn build_entry(ferx_path: PathBuf, meta_map: &HashMap<String, ModelMeta>) -> Option<ModelEntry> {
     let stem = ferx_path.file_stem()?.to_string_lossy().to_string();
     let bytes = std::fs::read(&ferx_path).ok()?;
     let source = String::from_utf8_lossy(&bytes).into_owned();

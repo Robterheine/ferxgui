@@ -288,6 +288,43 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.10.0 (2026-10-09) — remediation release: changes some numbers, parser rules and cache keys
+
+This release closes the findings of the adversarial audit (items A-01 … A-49). **Several changes alter numbers or behaviour a user might have relied on; each is listed.** The scientific choices below (§6b of the remediation plan) have **not** yet been reviewed by a practising pharmacometrician.
+
+**Changed numbers**
+- **Simulation plot bands are now prediction intervals** (percentiles over individuals within each replicate, then the median across replicates, exactly as `vpc` does; checked against `vpc::vpc()`). Previously each replicate was averaged first, which gave a much narrower band. The old behaviour remains as an opt-in, labelled "CI of mean profile". Simulation curves also no longer sort negative times after positive ones.
+- **95 % confidence intervals are on the log scale** for parameters that are positive by declaration (theta with a lower bound above zero, omega, sigma). Warfarin TVCL: [0.11879, 0.14661] becomes [0.11949, 0.14736]; the ETA_KA variance interval no longer extends below zero.
+- **ΔOFV is no longer coloured by a fixed −3.84.** It is shown uncoloured with ΔAIC and ΔBIC in the tooltip. Tick **Reference is nested** to get a likelihood-ratio verdict with df = the parameter difference, and only when both fits used the same data (by hash).
+- **Durbin-Watson / lag-1:** no pass/fail colour for DW (it has no test); the lag-1 flag level is 2/√n with n shown, instead of a fixed 0.2.
+- **ETA-covariate scan** shows ferx's raw p, a Benjamini-Hochberg adjusted p, and a Fisher-z CI for r. ferx's own `[!]` flag (|r| ≥ 0.3) is kept and labelled.
+- **On-screen LOESS** now matches ggplot's default (local quadratic, tricube, span 0.75) instead of a Gaussian-kernel local-linear fit. Exported figures are unchanged.
+- **NPDE** defaults to a fixed seed (1234, editable; 0 = random), stores nsim and seed with the result, and shows a Wilson interval on the |NPDE| > 1.96 / 2.58 proportions.
+- **ETAbar** (mean EBE with a t-test p) is now computed and shown. **CV%** is shown only for log-normal ETAs; additive ETAs show their SD.
+- **SIR:** identity-packed thetas (declared lower bound below zero) are no longer exponentiated in histograms and correlations; for block-omega, block-sigma and IOV models the histograms and correlation matrix are hidden (the packed layout is unverified) while ferx's CI table stays. ESS and the settings shown are those stored with the result. The parameter-correlation heatmap is labelled as being on the packed scale. R JSON output now carries full precision (it was rounded to 4 decimals, which distorted small variances and p-values).
+
+**Changed rules**
+- **Model parser** follows ferx's grammar exactly: `[parameters]  # comment`, `// comment`, a tab before the comment and `#comment` are accepted; `[ parameters ]` (rejected by ferx) is not. `[fit_options]` read from commented headers now works.
+- **`fit.json` must contain** `ofv`, `aic`, `bic`, `converged` and `method`; a bundle missing one is reported as unreadable instead of showing zeros. A trace without an OFV column is an error. `predictions.csv` must have TIME, DV, PRED and IPRED.
+- The boundary warning now uses ferx's own `estimate_near_boundary` verdict (absent in older bundles = no verdict, not "no"). FIXed parameters are tagged FIX.
+- Removed IV-bolus/infusion template keywords that ferx no longer accepts.
+
+**Changed cache keys and safety**
+- **Fit identity:** SIR results and the VPC simulation cache are keyed by the model and data hashes, the fitted estimates, the ferx version, n_sim and the seed (content, not file times). A SIR result from another fit is never reused for a simulation. A VPC is refused when the model or dataset differs from the fit's unless you tick "Use fitted estimates with the current files". Bundles written before ferx recorded hashes show "Re-fit to enable cache checks".
+- **Stratified VPC** attaches stratifiers by row position (verified against the data), not by merging on (ID, TIME), which fanned rows out when several observations shared a time (e.g. PK/PD with CMT 2 and 3).
+- **Data files:** the CSV editor refuses non-UTF-8 files with the line number (ferx refuses them too) and offers an explicit "Convert to UTF-8" that keeps a backup; untouched rows are written back byte for byte; saves are atomic with the last five `.bak-<time>` copies; an external change to the file prompts before overwriting. A tab- or semicolon-separated dataset is named as such. The Models editor asks before switching away from unsaved edits; the quit prompt covers it; unsaved text is also written to `~/.ferxgui/drafts/` every 30 s.
+- **Exports** (`_sdtab`/`_patab`) go to `ferx_outputs/` and never overwrite a file the app did not create. **Recomputing standard errors** writes a verified temporary bundle and keeps the old one as `.fitrx.bak`.
+- **Runs:** cancelling a run the GUI did not start (after a restart) now verifies the process identity (start time) first and refuses otherwise; PIDs outside 1…2³¹−1 are never signalled. A run that ends while the GUI is closed is classified from an exit-status file and a valid bundle: **Completed** only with both, otherwise **Unknown** (amber). Worker-thread panics are reported instead of leaving the UI waiting. Windows liveness no longer spawns `tasklist`.
+- R discovery probes every Rscript and picks the newest R that has ferx ≥ 0.4.0. The Windows toast script is a constant; text reaches PowerShell only through environment variables (best-effort: Windows may not show the toast). Release binaries are unsigned (see the README), Linux builds on Ubuntu 22.04. Colour palette now keeps ≥ 3:1 contrast on every surface in both themes and model status also shows a symbol.
+
+**Also fixed (0.9.26):** NaN-safe sorting, non-ASCII-safe truncation of R output, a log reader that survives bad bytes, files opened through the `open` crate, Windows Reveal.
+
+**Developer:** committed fixtures from ferx-r v0.4.0 with R-generated golden values (`tests/golden/make_golden.R`, `tests/fixtures/make_fixtures.R`); no test depends on a personal path any more; CI adds MSRV, clippy (`-D warnings`) and an R-bridge workflow (PRs touching the bridge, plus nightly). `FERX_REQUIRE_FIXTURES=1` turns a skipped live-R test into a failure.
+
+### v0.9.26 — hotfix batch (shipped inside 0.10.0)
+
+NaN-safe sorting, character-safe truncation, byte-tolerant log reader, `open` crate for opening files, negative-time ordering in the simulation plot, removed keywords ferx rejects.
+
 ### v0.9.25 (2026-10-08) — Files tab: .fitrx bundle inspector; fixed shrinkage shown 100x too small
 
 **Added: click a `.fitrx` in the Files tab to inspect it** (it used to show "No preview")

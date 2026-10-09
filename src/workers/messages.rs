@@ -57,7 +57,8 @@ pub enum WorkerMsg {
     VpcPlotExported { path: String },
 
     /// A new model file was created from a template; triggers a directory rescan.
-    ModelCreated(String),
+    /// A model was created from a template; `warnings` are ferx's validation findings for it.
+    ModelCreated { stem: String, warnings: Vec<String> },
 
     /// GOF figure export completed successfully.
     GofExportComplete { path: String },

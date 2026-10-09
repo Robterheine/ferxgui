@@ -21,9 +21,12 @@ pub mod theme {
     pub const FG2:     Color32 = Color32::from_rgb(0x9a, 0x9d, 0xb8);
     pub const FG3:     Color32 = Color32::from_rgb(0x6a, 0x6d, 0x88);
     pub const ACCENT:  Color32 = Color32::from_rgb(0x4c, 0x8a, 0xff);
-    pub const GREEN:   Color32 = Color32::from_rgb(0x3e, 0xc9, 0x7a);
-    pub const RED:     Color32 = Color32::from_rgb(0xe8, 0x55, 0x55);
-    pub const ORANGE:  Color32 = Color32::from_rgb(0xe8, 0x95, 0x40);
+    // Status colours sit between the dark and light surfaces in luminance (0.13–0.25), so each
+    // keeps at least 3:1 against the dark background AND against white / the light card fill.
+    // They always accompany a word or symbol, never carry meaning alone. See the palette tests.
+    pub const GREEN:   Color32 = Color32::from_rgb(0x27, 0x95, 0x5a);
+    pub const RED:     Color32 = Color32::from_rgb(0xd0, 0x40, 0x40);
+    pub const ORANGE:  Color32 = Color32::from_rgb(0xc9, 0x6d, 0x12);
     pub const YELLOW:  Color32 = Color32::from_rgb(0xd4, 0xc0, 0x60);
     pub const STAR:    Color32 = Color32::from_rgb(0xf0, 0xc0, 0x40);
 
@@ -144,6 +147,45 @@ mod theme_contrast_tests {
 
     // WCAG AA for normal-size text.
     const AA_NORMAL_TEXT: f64 = 4.5;
+    // WCAG 1.4.11 non-text contrast (also the AA floor for large text).
+    const AA_NON_TEXT: f64 = 3.0;
+
+    /// Status colours must stay readable on every surface they are painted on, in both themes.
+    #[test]
+    fn status_colours_keep_3_to_1_on_every_surface() {
+        use super::theme::*;
+        let surfaces = [
+            ("dark BG", BG), ("dark BG2", BG2), ("dark BG3", BG3),
+            ("light panel", Color32::from_gray(248)), ("light card", Color32::from_rgb(0xf5, 0xf6, 0xf9)),
+            ("white", Color32::WHITE),
+        ];
+        for (name, c) in [("GREEN", GREEN), ("RED", RED), ("ORANGE", ORANGE)] {
+            for (sname, s) in surfaces {
+                let r = contrast_ratio(c, s);
+                assert!(r >= AA_NON_TEXT, "{name} on {sname} is {r:.2}, below {AA_NON_TEXT}");
+            }
+        }
+    }
+
+    /// Text on a status-coloured fill: black on green/orange, white on red.
+    #[test]
+    fn text_on_status_fills_meets_aa() {
+        use super::theme::*;
+        assert!(contrast_ratio(Color32::BLACK, GREEN)  >= AA_NORMAL_TEXT);
+        assert!(contrast_ratio(Color32::BLACK, ORANGE) >= AA_NORMAL_TEXT);
+        assert!(contrast_ratio(Color32::WHITE, RED)    >= AA_NORMAL_TEXT);
+    }
+
+    /// Body and secondary text on their own surfaces.
+    #[test]
+    fn body_text_meets_aa_in_both_themes() {
+        use super::theme::*;
+        assert!(contrast_ratio(FG, BG) >= AA_NORMAL_TEXT);
+        assert!(contrast_ratio(FG2, BG) >= AA_NORMAL_TEXT);
+        assert!(contrast_ratio(fg(false), Color32::WHITE) >= AA_NORMAL_TEXT);
+        assert!(contrast_ratio(fg2(false), Color32::WHITE) >= AA_NORMAL_TEXT);
+        assert!(contrast_ratio(fg2(false), card_fill(false)) >= AA_NORMAL_TEXT);
+    }
 
     /// Regression test for the "light blue on blue" / hard-to-read report:
     /// `selection.stroke.color` is the text color `interact_selectable()`

@@ -61,6 +61,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     show_delete_dialog(ui.ctx(), state);
     show_covariance_confirm_dialog(ui.ctx(), state);
     show_new_model_dialog(ui.ctx(), state);
+    show_new_model_notice(ui.ctx(), state);
     show_compare_picker(ui.ctx(), state);
     show_compare_dialog(ui.ctx(), state);
 }
@@ -646,10 +647,19 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
                                 RunStatus::NotRun     => theme::fg2(dark),
                             };
                             // Build label text, appending a "(ref)" marker when relevant.
+                            // The status also appears as a symbol or word, so it never rests on
+                            // colour alone (colour-vision deficiency, low-contrast displays).
+                            let (pre, post) = match row.run_status {
+                                RunStatus::Converged  => ("✔ ", ""),
+                                RunStatus::Failed     => ("✖ ", ""),
+                                RunStatus::ParseError => ("✖ ", "  unreadable"),
+                                RunStatus::Stale      => ("", "  stale"),
+                                RunStatus::NotRun     => ("", ""),
+                            };
                             let label_text = if row.is_reference {
-                                format!("{} ◆", row.stem)
+                                format!("{pre}{} ◆{post}", row.stem)
                             } else {
-                                row.stem.clone()
+                                format!("{pre}{}{post}", row.stem)
                             };
                             let name_label = ui.add(
                                 egui::Label::new(
@@ -4765,10 +4775,7 @@ fn show_delete_dialog(ctx: &egui::Context, state: &mut AppState) {
         .get(del_idx)
         .map(|m| m.model.stem.clone())
         .unwrap_or_default();
-    let has_fitrx = state.workspace.models
-        .get(del_idx)
-        .and_then(|m| m.fitrx_path.as_ref())
-        .is_some();
+    let targets = state.workspace.models.get(del_idx).map(delete_targets).unwrap_or_default();
 
     // Block deletion while model is running.
     let is_running = state.run.active_runs.contains_key(&stem);
@@ -4793,17 +4800,18 @@ fn show_delete_dialog(ctx: &egui::Context, state: &mut AppState) {
             );
             ui.add_space(8.0);
             ui.label(
-                egui::RichText::new("This will permanently remove the .ferx model file.")
+                egui::RichText::new("These files will be permanently removed:")
                     .color(dim)
                     .size(12.0),
             );
-            if has_fitrx {
-                ui.label(
-                    egui::RichText::new("The .fitrx results bundle will also be deleted.")
-                        .color(dim)
-                        .size(12.0),
-                );
+            for t in &targets {
+                let name = t.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+                ui.label(egui::RichText::new(format!("•  {name}")).color(theme::fg(dark)).size(11.5).monospace());
             }
+            ui.label(
+                egui::RichText::new("and this model's saved notes (star, comment, reference flag).")
+                    .color(dim).size(11.0),
+            );
             if is_running {
                 ui.add_space(6.0);
                 ui.label(
@@ -4877,8 +4885,9 @@ fn show_covariance_confirm_dialog(ctx: &egui::Context, state: &mut AppState) {
             ui.label(
                 egui::RichText::new(
                     "This runs the covariance step against the existing fit — no \
-                     re-optimization — and overwrites the saved .fitrx bundle in place \
-                     with the refreshed standard errors.",
+                     re-optimization — and replaces the saved .fitrx bundle with one \
+                     holding the refreshed standard errors. The previous bundle is kept \
+                     as .fitrx.bak.",
                 )
                 .color(dim)
                 .size(12.0),
@@ -5025,6 +5034,26 @@ fn show_new_model_dialog(ctx: &egui::Context, state: &mut AppState) {
     }
 }
 
+/// ferx's validation findings for a template that was just created.
+fn show_new_model_notice(ctx: &egui::Context, state: &mut AppState) {
+    let Some((stem, warnings)) = state.ui.new_model_notice.clone() else { return };
+    let mut close = false;
+    egui::Window::new("Model created")
+        .collapsible(false).resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            ui.set_min_width(360.0);
+            ui.label(format!("{stem}.ferx was created. ferx reports:"));
+            ui.add_space(6.0);
+            for w in &warnings {
+                ui.label(egui::RichText::new(format!("•  {w}")).color(theme::ORANGE).size(11.5));
+            }
+            ui.add_space(10.0);
+            if ui.button("OK").clicked() { close = true; }
+        });
+    if close { state.ui.new_model_notice = None; }
+}
+
 /// Spawn a background thread to create the template file, keeping the UI responsive.
 /// `Rscript` startup can take 1–5 s; blocking the egui frame loop is not acceptable.
 fn do_create_model(state: &mut AppState, ctx: &egui::Context) {
@@ -5042,7 +5071,14 @@ fn do_create_model(state: &mut AppState, ctx: &egui::Context) {
     crate::util::spawn_guarded("models_tab:5042", tx.clone(), move || {
         match crate::io::r_extract::create_model_from_template(&path, &template) {
             Ok(()) => {
-                let _ = tx.send(crate::workers::messages::WorkerMsg::ModelCreated(stem));
+                // Ask ferx whether the fresh template is clean (the `ode` template is not).
+                let warnings = crate::io::r_extract::compute_model_validate(&path, None)
+                    .map(|r| r.diagnostics.iter()
+                        .filter(|d| d.severity == "warning" || d.severity == "error")
+                        .map(|d| format!("{}: {}", if d.code.is_empty() { &d.severity } else { &d.code }, d.message))
+                        .collect::<Vec<_>>())
+                    .unwrap_or_default();
+                let _ = tx.send(crate::workers::messages::WorkerMsg::ModelCreated { stem, warnings });
             }
             Err(e) => {
                 let _ = tx.send(crate::workers::messages::WorkerMsg::RTaskError {
@@ -5055,19 +5091,45 @@ fn do_create_model(state: &mut AppState, ctx: &egui::Context) {
     });
 }
 
+/// Every file that deleting a model removes: the model, its bundle (and `.bak`), the SIR cache,
+/// run log and exported tables. Only files that exist are listed, so the dialog shows exactly
+/// what will go.
+fn delete_targets(m: &crate::domain::ModelEntry) -> Vec<std::path::PathBuf> {
+    let ferx = m.model.path.clone();
+    let dir = ferx.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+    let stem = m.model.stem.clone();
+    let mut v = vec![ferx];
+    let mut add = |p: std::path::PathBuf| if p.is_file() && !v.contains(&p) { v.push(p) };
+    if let Some(f) = &m.fitrx_path {
+        add(f.clone());
+        add(std::path::PathBuf::from(format!("{}.bak", f.display())));
+    }
+    add(dir.join(format!("{stem}.sir.json")));
+    add(dir.join(format!("{stem}_run.log")));
+    let out = dir.join("ferx_outputs");
+    for suffix in ["_sdtab.csv", "_patab.csv", "_patab_kappa.csv"] {
+        add(out.join(format!("{stem}{suffix}")));
+        // Files from before exports moved into ferx_outputs/.
+        add(dir.join(format!("{stem}{suffix}")));
+    }
+    v
+}
+
 fn do_delete(state: &mut AppState, idx: usize) {
     let Some(model) = state.workspace.models.get(idx) else { return };
-    let ferx_path  = model.model.path.clone();
-    let fitrx_path = model.fitrx_path.clone();
-    let stem       = model.model.stem.clone();
+    let ferx_path = model.model.path.clone();
+    let stem      = model.model.stem.clone();
+    let targets   = delete_targets(model);
 
     if let Err(e) = std::fs::remove_file(&ferx_path) {
         state.ui.status_message = format!("Delete failed: {}", e);
         return;
     }
-    if let Some(p) = fitrx_path {
-        let _ = std::fs::remove_file(p); // best-effort
+    // The sidecars listed in the confirmation dialog (best effort).
+    for p in targets.iter().filter(|p| **p != ferx_path) {
+        let _ = std::fs::remove_file(p);
     }
+    state.workspace.sir_results.remove(&stem);
 
     // Adjust indices pointing past the removed entry.
     state.workspace.models.remove(idx);
@@ -5492,5 +5554,28 @@ mod editor_switch_tests {
         assert_eq!(switch_action(false, Some("a"), Some("b")), SwitchAction::Load);
         assert_eq!(switch_action(true, Some("a"), Some("a")), SwitchAction::Nothing);
         assert_eq!(switch_action(true, None, Some("a")), SwitchAction::Load);
+    }
+}
+
+#[cfg(test)]
+mod delete_targets_tests {
+    use super::*;
+
+    #[test]
+    fn delete_lists_every_sidecar_it_will_remove() {
+        let dir = std::env::temp_dir().join(format!("ferxgui_del_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("ferx_outputs")).unwrap();
+        for f in ["m.ferx", "m.fitrx", "m.fitrx.bak", "m.sir.json", "m_run.log", "other.ferx",
+                  "ferx_outputs/m_sdtab.csv", "ferx_outputs/m_patab.csv", "ferx_outputs/other_sdtab.csv"] {
+            std::fs::write(dir.join(f), b"x").unwrap();
+        }
+        let entry = crate::workers::scan::build_entry(dir.join("m.ferx"), &Default::default()).unwrap();
+        let names: std::collections::BTreeSet<String> = delete_targets(&entry).iter()
+            .map(|p| p.strip_prefix(&dir).unwrap().to_string_lossy().replace('\\', "/")).collect();
+        let want: std::collections::BTreeSet<String> = ["m.ferx", "m.fitrx", "m.fitrx.bak", "m.sir.json",
+            "m_run.log", "ferx_outputs/m_sdtab.csv", "ferx_outputs/m_patab.csv"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(names, want, "other models' files must not be listed");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
