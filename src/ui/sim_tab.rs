@@ -287,6 +287,17 @@ fn show_cards(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
             .size(9.5).color(dim).italics());
         ui.add_space(4.0);
         ui.checkbox(&mut state.sim.log_y, "Logarithmic Y-axis");
+        let mut ci_mode = state.sim.band_mode == crate::domain::BandMode::MeanProfileCi;
+        if ui.checkbox(&mut ci_mode, "Bands: CI of mean profile (not a prediction interval)")
+            .on_hover_text("Default bands are prediction intervals: percentiles over individuals within \
+                            each replicate, then the median across replicates (as vpc does). This option \
+                            instead takes percentiles of the replicates' mean profiles, which is much narrower.")
+            .changed()
+        {
+            state.sim.band_mode = if ci_mode { crate::domain::BandMode::MeanProfileCi }
+                                  else { crate::domain::BandMode::PredictionInterval };
+            state.sim.generation += 1;
+        }
         ui.horizontal(|ui| {
             ui.checkbox(&mut state.sim.smooth, "Smooth curves (LOESS)");
             if state.sim.smooth {
@@ -840,9 +851,10 @@ fn run_computation(state: &mut AppState) {
     let y_col      = state.sim.y_col.clone();
     let mdv_filter = state.sim.mdv_filter;
     let filters    = state.sim.filters.clone();
+    let mode       = state.sim.band_mode;
 
     std::thread::spawn(move || {
-        match compute_quantiles(&data, &x_col, &y_col, &rep_col, &band_pcts, &filters, mdv_filter) {
+        match compute_quantiles(&data, &x_col, &y_col, &rep_col, &band_pcts, &filters, mdv_filter, mode) {
             Ok(r)  => { let _ = tx.send(WorkerMsg::SimComplete { generation, result: Box::new(r) }); }
             Err(e) => { let _ = tx.send(WorkerMsg::SimError { generation, message: e }); }
         }
@@ -861,6 +873,7 @@ fn compute_quantiles(
     band_pcts:  &[(f64, f64)],
     filters:    &[FilterRow],
     mdv_filter: bool,
+    mode:       crate::domain::BandMode,
 ) -> Result<SimPlotResult, String> {
     let x_arr   = data.col_data.get(x_col).ok_or_else(|| format!("Column '{x_col}' not found"))?;
     let y_arr   = data.col_data.get(y_col).ok_or_else(|| format!("Column '{y_col}' not found"))?;
@@ -908,34 +921,29 @@ fn compute_quantiles(
 
     triples.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
 
-    let mut rep_x_means: Vec<(f64, f64)> = Vec::new();
+    // One group per (replicate, x): the individual values observed at that time in that replicate.
+    let mut groups: Vec<(f64, Vec<f64>)> = Vec::new(); // (x, ys)
     let mut i = 0;
     while i < triples.len() {
         let (rep, x, _) = triples[i];
-        let (mut sum, mut cnt) = (0.0f64, 0usize);
-        while i < triples.len() && triples[i].0 == rep && triples[i].1 == x {
-            sum += triples[i].2; cnt += 1; i += 1;
-        }
-        rep_x_means.push((x, sum / cnt as f64));
-    }
-
-    rep_x_means.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-
-    let mut times:  Vec<f64>      = Vec::new();
-    let mut all_ys: Vec<Vec<f64>> = Vec::new();
-    let mut j = 0;
-    while j < rep_x_means.len() {
-        let xb = rep_x_means[j].0;
         let mut ys = Vec::new();
-        while j < rep_x_means.len() && rep_x_means[j].0 == xb {
-            ys.push(rep_x_means[j].1); j += 1;
+        while i < triples.len() && triples[i].0 == rep && triples[i].1 == x {
+            ys.push(triples[i].2); i += 1;
         }
-        times.push(xb);
-        all_ys.push(ys);
+        groups.push((x, ys));
+    }
+    groups.sort_by(|a, b| a.0.total_cmp(&b.0)); // stable: replicate order kept within an x
+
+    let mut times: Vec<f64> = Vec::new();
+    // Per x: one sorted value list per replicate (PI mode), or the per-replicate means (CI mode).
+    let mut per_x: Vec<Vec<Vec<f64>>> = Vec::new();
+    for (x, ys) in groups {
+        if times.last() != Some(&x) { times.push(x); per_x.push(Vec::new()); }
+        let mut ys = ys;
+        ys.sort_unstable_by(f64::total_cmp);
+        per_x.last_mut().unwrap().push(ys);
     }
     if times.is_empty() { return Err("No valid data after grouping.".into()); }
-
-    for ys in &mut all_ys { ys.sort_unstable_by(f64::total_cmp); }
 
     let mut unique_pcts: Vec<f64> = vec![50.0];
     for (lo, hi) in band_pcts { unique_pcts.push(*lo); unique_pcts.push(*hi); }
@@ -943,7 +951,21 @@ fn compute_quantiles(
     unique_pcts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
 
     let pct_arrays: HashMap<u64, Vec<f64>> = unique_pcts.iter().map(|&p| {
-        let arr: Vec<f64> = all_ys.iter().map(|ys| percentile(ys, p / 100.0)).collect();
+        let arr: Vec<f64> = per_x.iter().map(|reps| match mode {
+            // Percentile over individuals inside each replicate, then the median over replicates.
+            crate::domain::BandMode::PredictionInterval => {
+                let mut per_rep: Vec<f64> = reps.iter().map(|ys| percentile(ys, p / 100.0)).collect();
+                per_rep.sort_unstable_by(f64::total_cmp);
+                percentile(&per_rep, 0.5)
+            }
+            // Mean profile of each replicate, then the percentile across replicates.
+            crate::domain::BandMode::MeanProfileCi => {
+                let mut means: Vec<f64> = reps.iter()
+                    .map(|ys| ys.iter().sum::<f64>() / ys.len() as f64).collect();
+                means.sort_unstable_by(f64::total_cmp);
+                percentile(&means, p / 100.0)
+            }
+        }).collect();
         (p.to_bits(), arr)
     }).collect();
 
@@ -1391,7 +1413,7 @@ mod order_tests {
     }
 
     fn run(d: &SimData) -> SimPlotResult {
-        compute_quantiles(d, "T", "Y", "R", &[(2.5, 97.5)], &[], false).unwrap()
+        compute_quantiles(d, "T", "Y", "R", &[(2.5, 97.5)], &[], false, crate::domain::BandMode::PredictionInterval).unwrap()
     }
 
     #[test]
@@ -1406,5 +1428,42 @@ mod order_tests {
         let r = run(&data(&[-0.0, 0.0, 1.0], &[1.0, 3.0, 5.0]));
         assert_eq!(r.times.len(), 2, "-0.0 and 0.0 must share one time point");
         assert_eq!(r.bands[0].med[0], 2.0);
+    }
+
+    #[test]
+    fn sim_band_two_subjects_is_prediction_interval() {
+        // One replicate, two subjects (10 and 30) at one time: type-7 percentiles.
+        let r = run(&data(&[1.0, 1.0], &[10.0, 30.0]));
+        assert!((r.bands[0].lo[0] - 10.5).abs() < 1e-12);
+        assert!((r.bands[0].med[0] - 20.0).abs() < 1e-12);
+        assert!((r.bands[0].hi[0] - 29.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn mean_profile_mode_is_narrower() {
+        let mut d = data(&[1.0, 1.0, 1.0, 1.0], &[10.0, 30.0, 12.0, 28.0]);
+        d.col_data.insert("R".into(), vec![1.0, 1.0, 2.0, 2.0]);
+        let pi = compute_quantiles(&d, "T", "Y", "R", &[(2.5, 97.5)], &[], false, crate::domain::BandMode::PredictionInterval).unwrap();
+        let ci = compute_quantiles(&d, "T", "Y", "R", &[(2.5, 97.5)], &[], false, crate::domain::BandMode::MeanProfileCi).unwrap();
+        assert!(pi.bands[0].hi[0] - pi.bands[0].lo[0] > 10.0 * (ci.bands[0].hi[0] - ci.bands[0].lo[0]) || ci.bands[0].hi[0] == ci.bands[0].lo[0]);
+    }
+
+    #[test]
+    fn sim_band_matches_vpc_golden() {
+        #[derive(serde::Deserialize)] struct S { rep: Vec<f64>, time: Vec<f64>, dv: Vec<f64> }
+        #[derive(serde::Deserialize)]
+        struct G { sim: S, lo: Vec<f64>, med: Vec<f64>, hi: Vec<f64>, times: Vec<f64> }
+        let g: G = serde_json::from_str(include_str!("../../tests/golden/simband.json")).unwrap();
+        let mut d = data(&g.sim.time, &g.sim.dv);
+        d.col_data.insert("R".into(), g.sim.rep.clone());
+        // vpc: 10th / 90th percentile bounds, band = median over replicates.
+        let r = compute_quantiles(&d, "T", "Y", "R", &[(10.0, 90.0)], &[], false,
+            crate::domain::BandMode::PredictionInterval).unwrap();
+        assert_eq!(r.times, g.times);
+        for k in 0..g.times.len() {
+            assert!((r.bands[0].lo[k] - g.lo[k]).abs() < 1e-9, "lo {k}: {} vs {}", r.bands[0].lo[k], g.lo[k]);
+            assert!((r.bands[0].med[k] - g.med[k]).abs() < 1e-9, "med {k}");
+            assert!((r.bands[0].hi[k] - g.hi[k]).abs() < 1e-9, "hi {k}");
+        }
     }
 }

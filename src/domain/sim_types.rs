@@ -82,6 +82,18 @@ pub struct SimPlotResult {
 // Tab state
 // ---------------------------------------------------------------------------
 
+/// How the simulation plot's bands are built from replicates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BandMode {
+    /// Percentiles over individuals within each replicate, summarised (median) across
+    /// replicates, as `vpc` does. The band answers "where do individual observations fall".
+    #[default]
+    PredictionInterval,
+    /// Percentiles across replicates of each replicate's mean profile: a CI of the mean
+    /// profile, not a prediction interval. Narrower; opt-in.
+    MeanProfileCi,
+}
+
 pub struct SimTabState {
     // Data
     pub file_path:  String,
@@ -110,6 +122,7 @@ pub struct SimTabState {
     pub median_lw:    f32,
     pub log_y:        bool,
     pub smooth:       bool,
+    pub band_mode: BandMode,
     pub smooth_frac:  f32,
 
     // Filters
@@ -166,7 +179,8 @@ impl Default for SimTabState {
             median_lw:    2.0,
             log_y:        false,
             smooth:       false,
-            smooth_frac:  0.30,
+            smooth_frac:  0.75,
+            band_mode:    BandMode::default(),
 
             mdv_filter: true,
             filters:    Vec::new(),

@@ -30,3 +30,20 @@ x1 <- sort(runif(40, 0, 24)); y1 <- 3 * exp(-0.2 * x1) + rnorm(40, 0, 0.2)
 x2 <- rep(c(0.5, 1, 2, 4, 8, 12, 24), each = 6); y2 <- -0.2 * log(x2) + rnorm(42, 0, 0.5)
 out2 <- list(a = mk(x1, y1), b = mk(x2, y2))
 writeLines(toJSON(out2, digits = NA, auto_unbox = FALSE, na = "null"), "tests/golden/loess.json")
+
+# ---- Simulation band: vpc::vpc() prediction bounds (median over replicates of per-replicate percentiles) ----
+suppressMessages(library(vpc))
+set.seed(3)
+ids <- 1:6; times <- c(1, 2, 4)
+obs <- expand.grid(id = ids, time = times); obs$dv <- rnorm(nrow(obs), 10, 2)
+sim <- do.call(rbind, lapply(1:5, function(s) {
+  d <- obs[, c("id", "time")]; d$sim <- s; d$dv <- rnorm(nrow(d), 10, 2); d }))
+sim <- sim[order(sim$sim, sim$id, sim$time), ]
+v <- suppressWarnings(suppressMessages(
+  vpc(sim = sim, obs = obs, bins = c(0.5, 1.5, 3, 5), pi = c(0.1, 0.9), ci = c(0.05, 0.95), vpcdb = TRUE)))
+d <- as.data.frame(v$vpc_dat)
+writeLines(toJSON(list(
+  vpc_version = as.character(packageVersion("vpc")),
+  sim = list(rep = sim$sim, time = sim$time, dv = sim$dv),
+  lo = d$q5.med, med = d$q50.med, hi = d$q95.med, times = times
+), digits = NA, auto_unbox = FALSE), "tests/golden/simband.json")
