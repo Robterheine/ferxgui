@@ -198,7 +198,7 @@ fn fresh_run_worker_inner(
 
         // ── Tail log every ~300 ms (3 × 100 ms ticks) ──────────────────
         tail_tick = tail_tick.wrapping_add(1);
-        if tail_tick % 3 == 0 {
+        if tail_tick.is_multiple_of(3) {
             log_reader.drain(&tx);
         }
 
@@ -287,13 +287,13 @@ fn orphan_worker_inner(
 
         // ── Tail log every ~500 ms (5 × 100 ms ticks) ──────────────────
         tick = tick.wrapping_add(1);
-        if tick % 5 == 0 {
+        if tick.is_multiple_of(5) {
             log_reader.drain(&tx);
         }
 
         // ── PID liveness check (every 5 ticks = 500 ms) ─────────────────
         // Throttled so Windows doesn't spawn `tasklist` at 10 Hz.
-        if tick % 5 == 0 && !RunManifest::is_pid_alive(pid) {
+        if tick.is_multiple_of(5) && !RunManifest::is_pid_alive(pid) {
             log_reader.drain(&tx);
             // We cannot read the exit code of a process we did not start; the run script wrote its
             // status to a file, and a completed run must also have left a valid bundle.
@@ -549,7 +549,7 @@ pub fn now_iso() -> String {
 }
 
 fn is_leap(y: u32) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
 }
 
 #[cfg(test)]

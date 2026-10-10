@@ -1376,10 +1376,12 @@ mod tests {
 
     #[test]
     fn bundle_is_written_next_to_the_model_with_the_same_stem() {
-        let p = bundle_path_for(Path::new("/proj/models/warfarin.ferx"));
-        assert_eq!(p, PathBuf::from("/proj/models/warfarin.fitrx"));
+        // Built from the temp dir so the path is absolute on every platform (`/proj` is not on Windows).
+        let root = std::env::temp_dir().join("proj").join("models");
+        let p = bundle_path_for(&root.join("warfarin.ferx"));
+        assert_eq!(p, root.join("warfarin.fitrx"));
         // Dotted stems keep everything before the final extension.
-        assert_eq!(bundle_path_for(Path::new("/p/m.v2.ferx")), PathBuf::from("/p/m.v2.fitrx"));
+        assert_eq!(bundle_path_for(&root.join("m.v2.ferx")), root.join("m.v2.fitrx"));
         // A relative model path still yields an absolute bundle path.
         assert!(bundle_path_for(Path::new("rel/m.ferx")).is_absolute());
     }

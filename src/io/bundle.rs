@@ -315,7 +315,7 @@ mod tests {
         assert_eq!(sha256_file(&empty).unwrap(),
                    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
 
-        let fit = FIT.replace("HASH_DATA", &hash).replace("DATAPATH", &data.display().to_string());
+        let fit = FIT.replace("HASH_DATA", &hash).replace("DATAPATH", &data.display().to_string().replace('\\', "\\\\")); // JSON-escape Windows backslashes
         let p = make_bundle(&d, "M", &fit);
         let info = inspect(&p).unwrap();
         assert!(matches!(verify_data(&info), FileCheck::Match(_)));

@@ -1,0 +1,2 @@
+# Fixture bytes are hashed (model_hash / data_hash); never convert line endings.
+tests/fixtures/* -text
