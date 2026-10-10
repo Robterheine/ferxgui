@@ -132,6 +132,18 @@ suppressMessages(library(ferx))
 suppressMessages(library(jsonlite))
 
 fit <- ferx_load_fit(fitrx_path)
+
+# A bundle records the dataset path it was fitted with. If the project folder has moved, fall back
+# to the same file name beside the bundle instead of failing.
+relocate_data <- function(fit, fitrx_path) {
+  dp <- tryCatch(fit$data_path, error = function(e) NULL)
+  if (is.character(dp) && length(dp) == 1 && nzchar(dp) && !file.exists(dp)) {
+    alt <- file.path(dirname(normalizePath(fitrx_path)), basename(dp))
+    if (file.exists(alt)) fit$data_path <- normalizePath(alt)
+  }
+  fit
+}
+fit <- relocate_data(fit, fitrx_path)
 fit <- ferx_calc_npde(fit, nsim = nsim, seed = seed)
 
 sd <- fit$sdtab
@@ -281,6 +293,18 @@ suppressMessages(library(ferx))
 suppressMessages(library(jsonlite))
 
 fit <- ferx_load_fit(fitrx_path)
+
+# A bundle records the dataset path it was fitted with. If the project folder has moved, fall back
+# to the same file name beside the bundle instead of failing.
+relocate_data <- function(fit, fitrx_path) {
+  dp <- tryCatch(fit$data_path, error = function(e) NULL)
+  if (is.character(dp) && length(dp) == 1 && nzchar(dp) && !file.exists(dp)) {
+    alt <- file.path(dirname(normalizePath(fitrx_path)), basename(dp))
+    if (file.exists(alt)) fit$data_path <- normalizePath(alt)
+  }
+  fit
+}
+fit <- relocate_data(fit, fitrx_path)
 fit <- ferx_covariance(fit, covariance_method = cov_method)
 # Write to a temporary bundle, prove it loads, keep the old one as .bak, then swap.
 tmp_path <- paste0(sub("\\.fitrx$", "", fitrx_path), ".tmp.fitrx")
@@ -778,6 +802,18 @@ suppressMessages(library(ferx))
 suppressMessages(library(jsonlite))
 
 fit     <- ferx_load_fit(fitrx_path)
+
+# A bundle records the dataset path it was fitted with. If the project folder has moved, fall back
+# to the same file name beside the bundle instead of failing.
+relocate_data <- function(fit, fitrx_path) {
+  dp <- tryCatch(fit$data_path, error = function(e) NULL)
+  if (is.character(dp) && length(dp) == 1 && nzchar(dp) && !file.exists(dp)) {
+    alt <- file.path(dirname(normalizePath(fitrx_path)), basename(dp))
+    if (file.exists(alt)) fit$data_path <- normalizePath(alt)
+  }
+  fit
+}
+fit <- relocate_data(fit, fitrx_path)
 sir_fit <- ferx_sir(fit,
   sir_samples      = sir_samples,
   sir_resamples    = sir_resamples,
