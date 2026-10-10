@@ -181,6 +181,10 @@ fn show_files_section(
 fn show_theta_section(ui: &mut egui::Ui, fit: &FitSummary, dark: bool) {
     section_header(ui, &format!("Fixed Effects — THETA  ({})", fit.theta.len()), dark);
     if fit.theta.is_empty() { return; }
+    ui.label(egui::RichText::new(CI_NOTE).color(theme::fg3(dark)).size(10.0).italics());
+    if fit.has_boundary_hit() {
+        ui.label(egui::RichText::new(BOUNDARY_NOTE).color(theme::ORANGE).size(10.5));
+    }
     param_table(ui, "rpt_theta", 6, dark, |ui| {
         for h in ["PARAM", "ESTIMATE", "SE", "RSE%", "95% CI LO", "95% CI HI"] {
             ui.label(egui::RichText::new(h).size(10.0).color(theme::fg3(dark)).strong());
@@ -191,7 +195,7 @@ fn show_theta_section(ui: &mut egui::Ui, fit: &FitSummary, dark: bool) {
                 .unwrap_or_else(|| format!("THETA{}", i + 1));
             let est = fit.theta.get(i).copied().unwrap_or(f64::NAN);
             let se  = fit.se_theta.get(i).copied().unwrap_or(f64::NAN);
-            param_row_fixed(ui, &name, est, se, fit.is_theta_fixed(i), fit.theta_is_positive(i), dark);
+            param_row_fixed(ui, &name, est, se, fit.is_theta_fixed(i), fit.theta_ci_scale(i), dark);
         }
     });
 }
@@ -227,7 +231,7 @@ fn show_kappa_section(ui: &mut egui::Ui, fit: &FitSummary, dark: bool) {
                 .unwrap_or_else(|| format!("KAPPA{}", i + 1));
             let est = fit.kappa_value(i, i).unwrap_or(f64::NAN);
             let se  = fit.se_kappa_diag(i).unwrap_or(f64::NAN);
-            param_row_fixed(ui, &name, est, se, false, true, dark);
+            param_row_fixed(ui, &name, est, se, false, true.into(), dark);
         }
     });
 }
@@ -317,6 +321,12 @@ const PACKED_NOTE: &str = "Correlations are of the estimation (packed) parameter
     log SD for ω and σ, raw Cholesky terms off the diagonal. They can differ from correlations of the \
     natural-scale estimates.";
 
+pub(crate) const CI_NOTE: &str = "95 % CI: approximate Wald interval from the covariance matrix, on the log scale for \
+    parameters that cannot be negative and the logit scale for unit-interval parameters. It is unreliable \
+    when an estimate sits at a bound and with few subjects; SIR or a bootstrap is the check.";
+
+pub(crate) const BOUNDARY_NOTE: &str = "ferx reports an estimate near a bound: Wald intervals are not valid for it.";
+
 const DW_NOTE: &str = "Descriptive: about 2 when residuals are uncorrelated, below 2 for positive and \
     above 2 for negative autocorrelation. No formal test is applied.";
 
@@ -396,7 +406,7 @@ fn param_table(
 }
 
 fn param_row_fixed(
-    ui: &mut egui::Ui, name: &str, est: f64, se: f64, fixed: bool, log_ci: bool, dark: bool,
+    ui: &mut egui::Ui, name: &str, est: f64, se: f64, fixed: bool, log_ci: crate::domain::stats::CiScale, dark: bool,
 ) {
     let label = if fixed { format!("{name}  FIX") } else { name.to_string() };
     ui.label(egui::RichText::new(label).color(theme::fg(dark)).size(12.0).monospace());
@@ -417,7 +427,7 @@ fn param_row_omega(
     ui.label(egui::RichText::new(fmt_sig4(se)).color(theme::fg2(dark)).size(12.0));
     let rse = rse_pct(est, se);
     ui.label(egui::RichText::new(fmt_rse(rse)).color(rse_color(rse)).size(12.0));
-    ci_cells(ui, est, se, true, dark);
+    ci_cells(ui, est, se, true.into(), dark);
     // Shrinkage column.
     if let Some(s) = shrinkage {
         let col = shrink_color(s);
@@ -448,7 +458,7 @@ fn kv_col(ui: &mut egui::Ui, label: &str, value: &str, col: egui::Color32, dark:
 }
 
 /// 95 % Wald interval cells; on the log scale for parameters that are positive by declaration.
-fn ci_cells(ui: &mut egui::Ui, est: f64, se: f64, log_ci: bool, dark: bool) {
+fn ci_cells(ui: &mut egui::Ui, est: f64, se: f64, log_ci: crate::domain::stats::CiScale, dark: bool) {
     if let Some((lo, hi)) = crate::domain::stats::wald_ci95(est, se, log_ci) {
         let c = theme::fg2(dark);
         ui.label(egui::RichText::new(fmt_sig4(lo)).color(c).size(11.0));
@@ -597,7 +607,8 @@ fn generate_html(
     // ── THETA ──
     if !fit.theta.is_empty() {
         b.push_str(&format!(
-            "<section><h2>Fixed Effects — THETA  ({})</h2>\n", fit.theta.len()));
+            "<section><h2>Fixed Effects — THETA  ({})</h2>\n<p class=\"note\">{CI_NOTE}</p>\n", fit.theta.len()));
+        if fit.has_boundary_hit() { b.push_str(&format!("<p class=\"warn\">{BOUNDARY_NOTE}</p>\n")); }
         b.push_str("<table class=\"params\"><tr>\
             <th>PARAM</th><th>ESTIMATE</th><th>SE</th>\
             <th>RSE%</th><th>95% CI LO</th><th>95% CI HI</th></tr>\n");
@@ -606,7 +617,7 @@ fn generate_html(
                 .unwrap_or_else(|| format!("THETA{}", i + 1));
             let est = fit.theta.get(i).copied().unwrap_or(f64::NAN);
             let se  = fit.se_theta.get(i).copied().unwrap_or(f64::NAN);
-            b.push_str(&html_param_row_fixed(&name, est, se, fit.is_theta_fixed(i), fit.theta_is_positive(i)));
+            b.push_str(&html_param_row_fixed(&name, est, se, fit.is_theta_fixed(i), fit.theta_ci_scale(i)));
         }
         b.push_str("</table></section>\n");
     }
@@ -641,7 +652,7 @@ fn generate_html(
                 .unwrap_or_else(|| format!("KAPPA{}", i + 1));
             let est = fit.kappa_value(i, i).unwrap_or(f64::NAN);
             let se  = fit.se_kappa_diag(i).unwrap_or(f64::NAN);
-            b.push_str(&html_param_row_fixed(&name, est, se, false, true));
+            b.push_str(&html_param_row_fixed(&name, est, se, false, true.into()));
         }
         b.push_str("</table></section>\n");
     }
@@ -746,7 +757,7 @@ fn html_kv_raw(label: &str, value: &str) -> String {
     format!("<tr><td>{label}</td><td>{value}</td></tr>\n")
 }
 
-fn html_param_row_fixed(name: &str, est: f64, se: f64, fixed: bool, log_ci: bool) -> String {
+fn html_param_row_fixed(name: &str, est: f64, se: f64, fixed: bool, log_ci: crate::domain::stats::CiScale) -> String {
     let rse = rse_pct(est, se);
     let cls = "";
     let name = &if fixed { format!("{name} (FIX)") } else { name.to_string() };
@@ -761,7 +772,7 @@ fn html_param_row_fixed(name: &str, est: f64, se: f64, fixed: bool, log_ci: bool
 
 fn html_param_row_omega(name: &str, est: f64, se: f64, shrink: Option<f64>) -> String {
     let rse = rse_pct(est, se);
-    let (lo, hi) = ci_pair(est, se, true);
+    let (lo, hi) = ci_pair(est, se, true.into());
     let shrink_str = match shrink {
         Some(s) => format!("<td class=\"{}\">{:.1}%</td>", shrink_html_class(s), s),
         None    => "<td>—</td>".to_string(),
@@ -827,7 +838,7 @@ fn corr_rgb(r: f64) -> (u8, u8, u8) {
     }
 }
 
-fn ci_pair(est: f64, se: f64, log_ci: bool) -> (String, String) {
+fn ci_pair(est: f64, se: f64, log_ci: crate::domain::stats::CiScale) -> (String, String) {
     if let Some((lo, hi)) = crate::domain::stats::wald_ci95(est, se, log_ci) {
         (fmt_sig4(lo), fmt_sig4(hi))
     } else {

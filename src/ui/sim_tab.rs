@@ -287,16 +287,35 @@ fn show_cards(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
             .size(9.5).color(dim).italics());
         ui.add_space(4.0);
         ui.checkbox(&mut state.sim.log_y, "Logarithmic Y-axis");
-        let mut ci_mode = state.sim.band_mode == crate::domain::BandMode::MeanProfileCi;
-        if ui.checkbox(&mut ci_mode, "Bands: CI of mean profile (not a prediction interval)")
-            .on_hover_text("Default bands are prediction intervals: percentiles over individuals within \
-                            each replicate, then the median across replicates (as vpc does). This option \
-                            instead takes percentiles of the replicates' mean profiles, which is much narrower.")
-            .changed()
         {
-            state.sim.band_mode = if ci_mode { crate::domain::BandMode::MeanProfileCi }
-                                  else { crate::domain::BandMode::PredictionInterval };
-            state.sim.generation += 1;
+            let before = state.sim.band_mode;
+            egui::ComboBox::from_label("Band")
+                .selected_text(state.sim.band_mode.label())
+                .show_ui(ui, |ui| {
+                    for m in [crate::domain::BandMode::Pooled, crate::domain::BandMode::PerReplicate,
+                              crate::domain::BandMode::MeanProfileCi] {
+                        ui.selectable_value(&mut state.sim.band_mode, m, m.label());
+                    }
+                })
+                .response.on_hover_text(
+                    "Pooled: percentiles of every individual value at each x across all replicates (default).\n\
+                     Per replicate: the vpc convention (percentile inside each replicate, then the median); \
+                     noisy with few individuals per replicate.\n\
+                     CI of the mean profile: much narrower, not a prediction interval.");
+            if state.sim.band_mode != before { state.sim.generation += 1; }
+        }
+        // Say what the plotted column is: it decides what the band means.
+        let y_note = match state.sim.y_col.to_ascii_uppercase().as_str() {
+            "IPRED" => Some(("IPRED: individual predictions, no residual error (between-subject variability).", false)),
+            "PRED" => Some(("PRED: population prediction (typical individual).", false)),
+            "DV_SIM" => Some(("DV_SIM: simulated observations, including residual error.", false)),
+            "DV" => Some(("DV is the observed value copied from the input data: it is identical in every \
+                           replicate, so bands over it are not simulation results. Use IPRED or DV_SIM.", true)),
+            _ => None,
+        };
+        if let Some((txt, warn)) = y_note {
+            ui.label(egui::RichText::new(txt).size(9.5).italics()
+                .color(if warn { theme::ORANGE } else { dim }));
         }
         ui.horizontal(|ui| {
             ui.checkbox(&mut state.sim.smooth, "Smooth curves (LOESS)");
@@ -809,7 +828,7 @@ fn populate_columns(state: &mut AppState, data: &SimData) {
             .cloned().unwrap_or_else(|| cols.first().cloned().unwrap_or_default());
     }
     if !cols.contains(&state.sim.y_col) {
-        state.sim.y_col = ["IPRED", "DV", "PRED"].iter()
+        state.sim.y_col = ["IPRED", "DV_SIM", "PRED", "DV"].iter()
             .find_map(|cand| cols.iter().find(|c| c.eq_ignore_ascii_case(cand)))
             .cloned()
             .unwrap_or_else(|| cols.get(1).cloned().unwrap_or_default());
@@ -952,8 +971,14 @@ fn compute_quantiles(
 
     let pct_arrays: HashMap<u64, Vec<f64>> = unique_pcts.iter().map(|&p| {
         let arr: Vec<f64> = per_x.iter().map(|reps| match mode {
+            // Every individual value at this x, pooled over all replicates.
+            crate::domain::BandMode::Pooled => {
+                let mut all: Vec<f64> = reps.iter().flatten().copied().collect();
+                all.sort_unstable_by(f64::total_cmp);
+                percentile(&all, p / 100.0)
+            }
             // Percentile over individuals inside each replicate, then the median over replicates.
-            crate::domain::BandMode::PredictionInterval => {
+            crate::domain::BandMode::PerReplicate => {
                 let mut per_rep: Vec<f64> = reps.iter().map(|ys| percentile(ys, p / 100.0)).collect();
                 per_rep.sort_unstable_by(f64::total_cmp);
                 percentile(&per_rep, 0.5)
@@ -1413,7 +1438,7 @@ mod order_tests {
     }
 
     fn run(d: &SimData) -> SimPlotResult {
-        compute_quantiles(d, "T", "Y", "R", &[(2.5, 97.5)], &[], false, crate::domain::BandMode::PredictionInterval).unwrap()
+        compute_quantiles(d, "T", "Y", "R", &[(2.5, 97.5)], &[], false, crate::domain::BandMode::Pooled).unwrap()
     }
 
     #[test]
@@ -1443,7 +1468,7 @@ mod order_tests {
     fn mean_profile_mode_is_narrower() {
         let mut d = data(&[1.0, 1.0, 1.0, 1.0], &[10.0, 30.0, 12.0, 28.0]);
         d.col_data.insert("R".into(), vec![1.0, 1.0, 2.0, 2.0]);
-        let pi = compute_quantiles(&d, "T", "Y", "R", &[(2.5, 97.5)], &[], false, crate::domain::BandMode::PredictionInterval).unwrap();
+        let pi = compute_quantiles(&d, "T", "Y", "R", &[(2.5, 97.5)], &[], false, crate::domain::BandMode::Pooled).unwrap();
         let ci = compute_quantiles(&d, "T", "Y", "R", &[(2.5, 97.5)], &[], false, crate::domain::BandMode::MeanProfileCi).unwrap();
         assert!(pi.bands[0].hi[0] - pi.bands[0].lo[0] > 10.0 * (ci.bands[0].hi[0] - ci.bands[0].lo[0]) || ci.bands[0].hi[0] == ci.bands[0].lo[0]);
     }
@@ -1458,7 +1483,7 @@ mod order_tests {
         d.col_data.insert("R".into(), g.sim.rep.clone());
         // vpc: 10th / 90th percentile bounds, band = median over replicates.
         let r = compute_quantiles(&d, "T", "Y", "R", &[(10.0, 90.0)], &[], false,
-            crate::domain::BandMode::PredictionInterval).unwrap();
+            crate::domain::BandMode::PerReplicate).unwrap();
         assert_eq!(r.times, g.times);
         for k in 0..g.times.len() {
             assert!((r.bands[0].lo[k] - g.lo[k]).abs() < 1e-9, "lo {k}: {} vs {}", r.bands[0].lo[k], g.lo[k]);
@@ -1466,4 +1491,35 @@ mod order_tests {
             assert!((r.bands[0].hi[k] - g.hi[k]).abs() < 1e-9, "hi {k}");
         }
     }
+
+    #[test]
+    fn pooled_is_the_default_and_differs_from_the_vpc_convention() {
+        assert_eq!(crate::domain::BandMode::default(), crate::domain::BandMode::Pooled);
+        // Two replicates, two individuals each, one time point.
+        let mut d = data(&[1.0, 1.0, 1.0, 1.0], &[10.0, 30.0, 12.0, 28.0]);
+        d.col_data.insert("R".into(), vec![1.0, 1.0, 2.0, 2.0]);
+        let run = |m| compute_quantiles(&d, "T", "Y", "R", &[(2.5, 97.5)], &[], false, m).unwrap();
+        let pooled = run(crate::domain::BandMode::Pooled);
+        let per_rep = run(crate::domain::BandMode::PerReplicate);
+        // Pooled: type-7 2.5 % of {10, 12, 28, 30} = 10 + 0.075 * 2.
+        assert!((pooled.bands[0].lo[0] - 10.15).abs() < 1e-12);
+        assert!((pooled.bands[0].med[0] - 20.0).abs() < 1e-12);
+        // Per replicate: median of {10.5, 12.4}.
+        assert!((per_rep.bands[0].lo[0] - 11.45).abs() < 1e-12);
+    }
+
+    #[test]
+    fn default_y_column_is_never_the_observed_dv() {
+        let mut st = crate::state::AppState::new();
+        let cols: Vec<String> = ["ID", "TIME", "DV", "SIM", "IPRED", "DV_SIM"].iter().map(|s| s.to_string()).collect();
+        let data = SimData { columns: cols.clone(), col_data: Default::default(), n_rows: 0 };
+        st.sim.y_col.clear();
+        populate_columns(&mut st, &data);
+        assert_eq!(st.sim.y_col, "IPRED");
+        let no_ipred: Vec<String> = ["ID", "TIME", "DV", "SIM", "DV_SIM"].iter().map(|s| s.to_string()).collect();
+        st.sim.y_col.clear();
+        populate_columns(&mut st, &SimData { columns: no_ipred, col_data: Default::default(), n_rows: 0 });
+        assert_eq!(st.sim.y_col, "DV_SIM");
+    }
 }
+

@@ -1,6 +1,6 @@
 [package]
 name = "ferxgui"
-version = "0.10.1"
+version = "0.10.2"
 edition = "2021"
 rust-version = "1.88"
 description = "FeRx GUI — desktop application for FeRx NLME modelling"

@@ -288,6 +288,12 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.10.2 (2026-10-10) — simulation bands, interval scales, verified data fallback
+
+- **Simulation plot:** the default band is now the **pooled percentiles of every individual value across all replicates**. The 0.10.0 default (percentile inside each replicate, then the median, the `vpc` convention) is noisy and biased inward when each replicate has few individuals; it remains available as "Per replicate", next to "CI of the mean profile". The plot says what the Y column means (IPRED: no residual error; DV_SIM: with residual error), warns that `DV` is the observed value copied into every replicate, and no longer defaults to `DV`.
+- **Intervals:** thetas declared within 0…1 (fractions) get logit-scale intervals that stay inside the unit interval. Tables are labelled "approximate Wald", and a warning shows when ferx reports an estimate near a bound. The SIR histogram's asymptotic curve is now a lognormal for positive parameters, matching its dashed interval lines. Checked live: a theta with a lower bound of exactly 0 is log-packed by ferx, so its interval is on the log scale.
+- **Moved projects:** when the dataset recorded in a bundle is missing, SIR, NPDE and the covariance recompute use the same-named file beside the bundle **only if its SHA-256 matches the hash recorded at fit time**; an edited or unverifiable file is refused with a message. A substituted path is never written back into the bundle.
+
 ### v0.10.1 (2026-10-10) — SIR asymptotic intervals can no longer go negative; relocated projects
 
 - **SIR tab:** the asymptotic 95 % interval (comparison table and the dashed lines on the histograms) is now a log-scale Wald interval for ω², σ and thetas that cannot be negative, matching the Models and Report tables. It was still estimate ± 1.96 × SE and could fall below zero.

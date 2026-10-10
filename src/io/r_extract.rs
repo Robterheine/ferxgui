@@ -119,7 +119,30 @@ pub fn compute_model_validate(model_path: &Path, data_path: Option<&Path>) -> Re
     Ok(res)
 }
 
-/// Simulation-based NPDE/NPD diagnostics. Args: <fitrx_path> [nsim] [seed]
+/// The dataset a bridge script should use when the path recorded in the bundle no longer exists:
+/// the same-named file beside the bundle, but ONLY if its SHA-256 equals the `data_hash` recorded at
+/// fit time. Returns "" when the recorded path is fine (or nothing can be found, so R reports its
+/// own error) and an error when a same-named file exists but is not the data the fit used.
+pub fn verified_data_override(fitrx_path: &Path) -> Result<String, String> {
+    let Ok(fit) = crate::io::fitrx::read_fit_summary(fitrx_path) else { return Ok(String::new()) };
+    let Some(recorded) = fit.data_path.as_deref().filter(|p| !p.is_empty()) else { return Ok(String::new()) };
+    if Path::new(recorded).exists() { return Ok(String::new()); }
+    let Some(name) = Path::new(recorded).file_name() else { return Ok(String::new()) };
+    let alt = fitrx_path.parent().unwrap_or(Path::new(".")).join(name);
+    if !alt.is_file() { return Ok(String::new()); }
+    match (fit.data_hash.as_deref(), crate::io::fsutil::sha256_file_cached(&alt)) {
+        (Some(want), Some(got)) if want == got => Ok(alt.to_string_lossy().into_owned()),
+        (Some(_), _) => Err(format!(
+            "the dataset recorded for this fit is missing ({recorded}); {} exists beside the bundle but \
+             its content differs from the data used for the fit, so it was not used", alt.display())),
+        (None, _) => Err(format!(
+            "the dataset recorded for this fit is missing ({recorded}); {} exists beside the bundle but \
+             this bundle has no data hash to verify it against, so it was not used. Re-fit to enable this.",
+            alt.display())),
+    }
+}
+
+/// Simulation-based NPDE/NPD diagnostics. Args: <fitrx_path> [nsim] [seed] [data_override]
 /// (empty string = use the function's own defaults, nsim=1000).
 const NPDE_R: &str = r#"
 args <- commandArgs(trailingOnly = TRUE)
@@ -133,17 +156,16 @@ suppressMessages(library(jsonlite))
 
 fit <- ferx_load_fit(fitrx_path)
 
-# A bundle records the dataset path it was fitted with. If the project folder has moved, fall back
-# to the same file name beside the bundle instead of failing.
-relocate_data <- function(fit, fitrx_path) {
-  dp <- tryCatch(fit$data_path, error = function(e) NULL)
-  if (is.character(dp) && length(dp) == 1 && nzchar(dp) && !file.exists(dp)) {
-    alt <- file.path(dirname(normalizePath(fitrx_path)), basename(dp))
-    if (file.exists(alt)) fit$data_path <- normalizePath(alt)
-  }
+# A bundle records the dataset path it was fitted with. When the project folder has moved, the GUI
+# finds the same-named file beside the bundle, VERIFIES its SHA-256 against the hash recorded at fit
+# time, and passes it here; R never guesses.
+relocate_data <- function(fit, data_override) {
+  if (is.character(data_override) && length(data_override) == 1 && nzchar(data_override) &&
+      file.exists(data_override)) fit$data_path <- data_override
   fit
 }
-fit <- relocate_data(fit, fitrx_path)
+data_override <- if (length(args) >= 4 && nchar(args[4]) > 0) args[4] else NULL
+fit <- relocate_data(fit, data_override)
 fit <- ferx_calc_npde(fit, nsim = nsim, seed = seed)
 
 sd <- fit$sdtab
@@ -193,10 +215,12 @@ pub fn compute_adaptive_sim(
 pub fn compute_npde(fitrx_path: &Path, nsim: u32, seed: Option<u32>) -> Result<NpdeResult, String> {
     let nsim_str = nsim.to_string();
     let seed_str = seed.map(|s| s.to_string()).unwrap_or_default();
+    let data_override = verified_data_override(fitrx_path)?;
     let json = run_script(NPDE_R, &[
         path_as_str(fitrx_path)?,
         &nsim_str,
         &seed_str,
+        &data_override,
     ])?;
     let mut r: NpdeResult = serde_json::from_str(&json)
         .map_err(|e| format!("npde JSON parse error: {e}\nR output: {}", crate::util::truncate_chars(&json, 500)))?;
@@ -294,18 +318,20 @@ suppressMessages(library(jsonlite))
 
 fit <- ferx_load_fit(fitrx_path)
 
-# A bundle records the dataset path it was fitted with. If the project folder has moved, fall back
-# to the same file name beside the bundle instead of failing.
-relocate_data <- function(fit, fitrx_path) {
-  dp <- tryCatch(fit$data_path, error = function(e) NULL)
-  if (is.character(dp) && length(dp) == 1 && nzchar(dp) && !file.exists(dp)) {
-    alt <- file.path(dirname(normalizePath(fitrx_path)), basename(dp))
-    if (file.exists(alt)) fit$data_path <- normalizePath(alt)
-  }
+# A bundle records the dataset path it was fitted with. When the project folder has moved, the GUI
+# finds the same-named file beside the bundle, VERIFIES its SHA-256 against the hash recorded at fit
+# time, and passes it here; R never guesses.
+relocate_data <- function(fit, data_override) {
+  if (is.character(data_override) && length(data_override) == 1 && nzchar(data_override) &&
+      file.exists(data_override)) fit$data_path <- data_override
   fit
 }
-fit <- relocate_data(fit, fitrx_path)
+orig_data_path <- tryCatch(fit$data_path, error = function(e) NULL)  # recorded path, restored before saving
+data_override <- if (length(args) >= 3 && nchar(args[3]) > 0) args[3] else NULL
+fit <- relocate_data(fit, data_override)
 fit <- ferx_covariance(fit, covariance_method = cov_method)
+# A path substituted for this computation must not be written into the bundle.
+if (!is.null(orig_data_path)) fit$data_path <- orig_data_path
 # Write to a temporary bundle, prove it loads, keep the old one as .bak, then swap.
 tmp_path <- paste0(sub("\\.fitrx$", "", fitrx_path), ".tmp.fitrx")
 on.exit(unlink(tmp_path), add = TRUE)
@@ -803,17 +829,16 @@ suppressMessages(library(jsonlite))
 
 fit     <- ferx_load_fit(fitrx_path)
 
-# A bundle records the dataset path it was fitted with. If the project folder has moved, fall back
-# to the same file name beside the bundle instead of failing.
-relocate_data <- function(fit, fitrx_path) {
-  dp <- tryCatch(fit$data_path, error = function(e) NULL)
-  if (is.character(dp) && length(dp) == 1 && nzchar(dp) && !file.exists(dp)) {
-    alt <- file.path(dirname(normalizePath(fitrx_path)), basename(dp))
-    if (file.exists(alt)) fit$data_path <- normalizePath(alt)
-  }
+# A bundle records the dataset path it was fitted with. When the project folder has moved, the GUI
+# finds the same-named file beside the bundle, VERIFIES its SHA-256 against the hash recorded at fit
+# time, and passes it here; R never guesses.
+relocate_data <- function(fit, data_override) {
+  if (is.character(data_override) && length(data_override) == 1 && nzchar(data_override) &&
+      file.exists(data_override)) fit$data_path <- data_override
   fit
 }
-fit <- relocate_data(fit, fitrx_path)
+data_override <- if (length(args) >= 8 && nchar(args[8]) > 0) args[8] else NULL
+fit <- relocate_data(fit, data_override)
 sir_fit <- ferx_sir(fit,
   sir_samples      = sir_samples,
   sir_resamples    = sir_resamples,
@@ -1245,9 +1270,11 @@ pub fn compute_check_init(model_path: &Path, data_path: &Path) -> Result<CheckIn
 /// `condition_number_from_covariance`, etc.).
 /// Blocking — run from a background thread.
 pub fn compute_covariance(fitrx_path: &Path, covariance_method: &str) -> Result<String, String> {
+    let data_override = verified_data_override(fitrx_path)?;
     let json = run_script(COVARIANCE_R, &[
         path_as_str(fitrx_path)?,
         covariance_method,
+        &data_override,
     ])?;
     #[derive(serde::Deserialize)]
     struct Out { covariance_status: String }
@@ -1686,6 +1713,7 @@ pub fn compute_sir(
         if keep_samples { "true" } else { "false" },
         &theta_lower,
         if layout_ok { "true" } else { "false" },
+        &verified_data_override(fitrx_path)?,
     ])?;
     let mut result = parse_sir_result(&json)
         .map_err(|e| format!("SIR JSON parse error: {e}\nR output: {}", crate::util::truncate_chars(&json, 500)))?;
@@ -2578,3 +2606,44 @@ mod sir_layout_tests {
         assert!(cl.lo > 0.0 && r.param_samples["TVCL"].iter().all(|v| *v > 0.0));
     }
 }
+
+#[cfg(test)]
+mod data_fallback_tests {
+    use super::*;
+    use crate::util::testsupport::fixture;
+
+    fn staged(name: &str, csv: Option<&[u8]>) -> Option<std::path::PathBuf> {
+        let fit = crate::io::fitrx::read_fit_summary(&fixture("warfarin.fitrx")).unwrap();
+        if Path::new(fit.data_path.as_deref().unwrap_or("")).exists() { return None; } // path still valid here
+        let d = std::env::temp_dir().join(format!("ferxgui_fb_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::copy(fixture("warfarin.fitrx"), d.join("warfarin.fitrx")).unwrap();
+        if let Some(b) = csv { std::fs::write(d.join("warfarin.csv"), b).unwrap(); }
+        Some(d.join("warfarin.fitrx"))
+    }
+
+    #[test]
+    fn fallback_uses_the_file_only_when_its_hash_matches() {
+        let Some(b) = staged("ok", Some(&std::fs::read(fixture("warfarin.csv")).unwrap())) else { return };
+        let got = verified_data_override(&b).unwrap();
+        assert!(got.ends_with("warfarin.csv"), "{got}");
+        let _ = std::fs::remove_dir_all(b.parent().unwrap());
+    }
+
+    #[test]
+    fn fallback_refuses_an_edited_dataset() {
+        let Some(b) = staged("edited", Some(b"ID,TIME,DV\n1,0,1\n")) else { return };
+        let e = verified_data_override(&b).unwrap_err();
+        assert!(e.contains("differs"), "{e}");
+        let _ = std::fs::remove_dir_all(b.parent().unwrap());
+    }
+
+    #[test]
+    fn nothing_beside_the_bundle_leaves_the_original_error_to_r() {
+        let Some(b) = staged("none", None) else { return };
+        assert_eq!(verified_data_override(&b).unwrap(), "");
+        let _ = std::fs::remove_dir_all(b.parent().unwrap());
+    }
+}
+

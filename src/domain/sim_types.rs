@@ -85,13 +85,28 @@ pub struct SimPlotResult {
 /// How the simulation plot's bands are built from replicates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BandMode {
-    /// Percentiles over individuals within each replicate, summarised (median) across
-    /// replicates, as `vpc` does. The band answers "where do individual observations fall".
+    /// Percentiles of ALL individual values at each x, pooled over every replicate. The best
+    /// estimate of the population percentile, and the right default for "what does the model
+    /// predict across individuals".
     #[default]
-    PredictionInterval,
-    /// Percentiles across replicates of each replicate's mean profile: a CI of the mean
-    /// profile, not a prediction interval. Narrower; opt-in.
+    Pooled,
+    /// The `vpc` convention: the percentile over individuals inside each replicate, then the
+    /// median across replicates. It answers "what would a study of this size show", and is noisy
+    /// and biased inward when each replicate has few individuals.
+    PerReplicate,
+    /// Percentiles across replicates of each replicate's mean profile: a CI of the mean profile,
+    /// not a prediction interval. Much narrower.
     MeanProfileCi,
+}
+
+impl BandMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            BandMode::Pooled => "Pooled percentiles (all replicates)",
+            BandMode::PerReplicate => "Per replicate, median across (vpc convention)",
+            BandMode::MeanProfileCi => "CI of the mean profile",
+        }
+    }
 }
 
 pub struct SimTabState {

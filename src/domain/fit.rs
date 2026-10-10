@@ -255,6 +255,18 @@ impl FitSummary {
         Some(self.iwres_lag1_r?.abs() > self.lag1_threshold()?)
     }
 
+    /// Scale for theta `i`'s Wald interval from its declared bounds: logit for a unit-interval
+    /// parameter (bounds within 0…1), log when it cannot be negative, otherwise symmetric.
+    pub fn theta_ci_scale(&self, i: usize) -> super::stats::CiScale {
+        use super::stats::CiScale;
+        let (lo, hi) = (self.theta_lower.get(i).copied(), self.theta_upper.get(i).copied());
+        match (lo, hi) {
+            (Some(l), Some(h)) if l >= 0.0 && h <= 1.0 && h > l => CiScale::Logit { lo: l, hi: h },
+            _ if self.theta_is_positive(i) => CiScale::Log,
+            _ => CiScale::Natural,
+        }
+    }
+
     /// Whether theta `i` was declared FIX.
     pub fn is_theta_fixed(&self, i: usize) -> bool {
         self.theta_fixed.get(i).copied().unwrap_or(false)
@@ -500,4 +512,19 @@ mod positive_theta_tests {
         assert!(!f.theta_is_positive(3), "unbounded theta may be negative");
         assert!(!f.theta_is_positive(9), "unknown bound stays on the natural scale");
     }
+
+    #[test]
+    fn ci_scale_follows_the_declared_bounds() {
+        use super::super::stats::CiScale;
+        let f = FitSummary {
+            theta_lower: vec![0.001, 0.0, -0.1, f64::NEG_INFINITY],
+            theta_upper: vec![10.0, 1.0, 0.1, f64::INFINITY],
+            ..Default::default()
+        };
+        assert_eq!(f.theta_ci_scale(0), CiScale::Log, "a loose box bound (0.001-10) is not a unit interval");
+        assert_eq!(f.theta_ci_scale(1), CiScale::Logit { lo: 0.0, hi: 1.0 }, "a fraction stays inside 0-1");
+        assert_eq!(f.theta_ci_scale(2), CiScale::Natural);
+        assert_eq!(f.theta_ci_scale(3), CiScale::Natural);
+    }
 }
+

@@ -3366,6 +3366,10 @@ fn show_params_pill(ui: &mut egui::Ui, state: &mut AppState) {
         .show(ui, |ui| {
             // ── THETA ──
             section_header(ui, &format!("THETA  ({})", fit.theta.len()));
+            ui.label(egui::RichText::new(crate::ui::report::CI_NOTE).color(theme::fg3(dark)).size(10.0).italics());
+            if fit.has_boundary_hit() {
+                ui.label(egui::RichText::new(crate::ui::report::BOUNDARY_NOTE).color(theme::ORANGE).size(10.5));
+            }
             params_table(ui, 7, |ui| {
                 theta_table_header(ui);
                 for i in 0..fit.theta.len() {
@@ -3374,7 +3378,7 @@ fn show_params_pill(ui: &mut egui::Ui, state: &mut AppState) {
                     let init = params.theta_init_for(&name, i);
                     let est  = fit.theta.get(i).copied().unwrap_or(f64::NAN);
                     let se   = fit.se_theta.get(i).copied().unwrap_or(f64::NAN);
-                    theta_param_row(ui, &name, init, est, se, fit.is_theta_fixed(i), fit.theta_is_positive(i));
+                    theta_param_row(ui, &name, init, est, se, fit.is_theta_fixed(i), fit.theta_ci_scale(i));
                 }
             });
 
@@ -3536,7 +3540,7 @@ fn show_params_pill(ui: &mut egui::Ui, state: &mut AppState) {
                     let init = params.sigma_init.get(i).copied().unwrap_or(f64::NAN);
                     let est  = fit.sigma.get(i).copied().unwrap_or(f64::NAN);
                     let se   = fit.se_sigma.get(i).copied().unwrap_or(f64::NAN);
-                    theta_param_row(ui, &name, init, est, se, false, true);
+                    theta_param_row(ui, &name, init, est, se, false, true.into());
                 }
             });
 
@@ -3822,7 +3826,7 @@ fn theta_param_row(
     estimate: f64,
     se: f64,
     fixed: bool,
-    log_ci: bool,
+    log_ci: crate::domain::stats::CiScale,
 ) {
     let dark = ui.visuals().dark_mode;
     ui.label(egui::RichText::new(name).color(theme::fg(dark)).size(12.0).monospace());
@@ -3876,7 +3880,7 @@ fn omega_param_row(
     }
     let rse = rse_pct(estimate, se);
     ui.label(egui::RichText::new(fmt_f64_1dp(rse)).color(rse_color(rse)).size(12.0));
-    ci_cells(ui, estimate, se, true);
+    ci_cells(ui, estimate, se, true.into());
     ui.end_row();
 }
 
@@ -3894,7 +3898,7 @@ fn rse_color(rse: f64) -> egui::Color32 {
 }
 
 /// 95 % Wald interval cells; on the log scale for parameters that are positive by declaration.
-fn ci_cells(ui: &mut egui::Ui, estimate: f64, se: f64, log_ci: bool) {
+fn ci_cells(ui: &mut egui::Ui, estimate: f64, se: f64, log_ci: crate::domain::stats::CiScale) {
     let dark = ui.visuals().dark_mode;
     if let Some((lo, hi)) = crate::domain::stats::wald_ci95(estimate, se, log_ci) {
         let ci_color = theme::fg2(dark);

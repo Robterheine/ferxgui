@@ -126,17 +126,45 @@ pub fn benjamini_hochberg(p: &[f64]) -> Vec<f64> {
     out
 }
 
-/// 95 % Wald interval. With `log_scale` the interval is built on ln(estimate) by the delta
-/// method (SE of ln est = SE / est) and back-transformed, so it stays positive; it falls back
-/// to the natural scale when the estimate is not positive. None when either input is not finite.
-pub fn wald_ci95(est: f64, se: f64, log_scale: bool) -> Option<(f64, f64)> {
+/// Scale on which a Wald interval is built, chosen from how the parameter is bounded.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CiScale {
+    /// Symmetric: estimate ± z·SE. For parameters that may be negative.
+    Natural,
+    /// Delta method on ln(estimate). For parameters that cannot be negative (θ with a lower bound
+    /// of 0 or more, ω², σ).
+    Log,
+    /// Delta method on logit((estimate − lo) / (hi − lo)). For parameters on a unit interval
+    /// (declared bounds within 0…1, e.g. a bioavailability fraction), so the interval stays inside.
+    Logit { lo: f64, hi: f64 },
+}
+
+impl From<bool> for CiScale {
+    /// `true` = log scale. Kept so callers that only distinguish positive from unrestricted stay simple.
+    fn from(log_scale: bool) -> Self { if log_scale { CiScale::Log } else { CiScale::Natural } }
+}
+
+/// 95 % Wald interval on the given scale, back-transformed. Falls back to the natural scale when the
+/// estimate is outside what the scale allows (not positive; not strictly inside the bounds). None
+/// when either input is not finite. Approximate: it assumes the likelihood is near-normal on that
+/// scale and is unreliable for estimates at a bound or with few subjects.
+pub fn wald_ci95(est: f64, se: f64, scale: impl Into<CiScale>) -> Option<(f64, f64)> {
     if !est.is_finite() || !se.is_finite() { return None; }
     let z = qnorm(0.975);
-    if log_scale && est > 0.0 {
-        let h = z * se / est;
-        Some((est * (-h).exp(), est * h.exp()))
-    } else {
-        Some((est - z * se, est + z * se))
+    match scale.into() {
+        CiScale::Log if est > 0.0 => {
+            let h = z * se / est;
+            Some((est * (-h).exp(), est * h.exp()))
+        }
+        CiScale::Logit { lo, hi } if lo.is_finite() && hi.is_finite() && hi > lo && est > lo && est < hi => {
+            let w = hi - lo;
+            let p = (est - lo) / w;
+            let t = (p / (1.0 - p)).ln();
+            let h = z * se / ((est - lo) * (hi - est) / w);
+            let back = |x: f64| lo + w / (1.0 + (-x).exp());
+            Some((back(t - h), back(t + h)))
+        }
+        _ => Some((est - z * se, est + z * se)),
     }
 }
 
@@ -337,4 +365,19 @@ mod tests {
         }
         assert_eq!(n_from_r_p(0.3, 0.5), None);
     }
+
+    #[test]
+    fn logit_interval_stays_inside_the_unit_interval() {
+        // A fraction near 1 with a large SE: the symmetric interval exceeds 1, the logit one cannot.
+        let (nat_lo, nat_hi) = wald_ci95(0.9, 0.1, CiScale::Natural).unwrap();
+        assert!(nat_hi > 1.0 && nat_lo < 0.9);
+        let (lo, hi) = wald_ci95(0.9, 0.1, CiScale::Logit { lo: 0.0, hi: 1.0 }).unwrap();
+        assert!(lo > 0.0 && hi < 1.0 && lo < 0.9 && hi > 0.9, "{lo} {hi}");
+        // Symmetric on the logit scale around the estimate's logit.
+        let t = |x: f64| (x / (1.0 - x)).ln();
+        assert!(((t(hi) - t(0.9)) - (t(0.9) - t(lo))).abs() < 1e-9);
+        // An estimate on the bound falls back to natural rather than producing NaN.
+        assert!(wald_ci95(1.0, 0.1, CiScale::Logit { lo: 0.0, hi: 1.0 }).unwrap().0.is_finite());
+    }
 }
+

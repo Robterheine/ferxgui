@@ -273,8 +273,8 @@ fn show_ci_comparison(
                     let se      = ses.get(i).copied().unwrap_or(f64::NAN);
                     // Log-scale Wald interval for parameters that are positive by declaration
                     // (ω², σ, thetas bounded at 0 or above), so it cannot go negative.
-                    let log_ci = section_title != "THETA" || fit.theta_is_positive(i);
-                    let (asym_lo, asym_hi) = crate::domain::stats::wald_ci95(est, se, log_ci)
+                    let scale = if section_title == "THETA" { fit.theta_ci_scale(i) } else { true.into() };
+                    let (asym_lo, asym_hi) = crate::domain::stats::wald_ci95(est, se, scale)
                         .unwrap_or((f64::NAN, f64::NAN));
 
                     ui.label(egui::RichText::new(&ci.name).color(theme::fg(dark)).size(12.0).monospace());
@@ -301,7 +301,7 @@ fn show_ci_comparison(
         ui.add_space(8.0);
     }
     ui.label(egui::RichText::new(
-        "Asymptotic: 95 % Wald interval from the covariance matrix (log scale for positive parameters)   |   SIR: non-parametric 2.5% – 97.5%")
+        "Asymptotic: approximate 95 % Wald interval from the covariance matrix (log scale for positive parameters; unreliable at a bound or with few subjects)   |   SIR: non-parametric 2.5% – 97.5%")
         .color(theme::fg3(dark)).size(10.0));
 }
 
@@ -504,8 +504,8 @@ fn show_distributions(
     let (est, se) = find_estimate_se(fit, param);
     let sir_ci    = find_sir_ci(sir, param);
     // Same rule as the table: log-scale unless the parameter is a theta that may be negative.
-    let log_ci = fit.theta_names.iter().position(|n| n == param)
-        .is_none_or(|i| fit.theta_is_positive(i));
+    let log_ci: crate::domain::stats::CiScale = fit.theta_names.iter().position(|n| n == param)
+        .map_or(true.into(), |i| fit.theta_ci_scale(i));
     let asym_ci = match (est, se) {
         (Some(mu), Some(s)) => crate::domain::stats::wald_ci95(mu, s, log_ci),
         _ => None,
@@ -540,12 +540,15 @@ fn show_distributions(
         .collect();
 
     // Asymptotic normal overlay (when SE available).
+    // Matches the interval's scale: a lognormal for positive parameters (same delta-method
+    // approximation as the dashed 95 % lines), a normal otherwise; nothing for logit-scale ones.
     let normal_pts: Option<Vec<[f64; 2]>> = if let (Some(mu), Some(se_v)) = (est, se) {
-        if se_v.is_finite() && se_v > 0.0 {
+        if se_v.is_finite() && se_v > 0.0 && !matches!(log_ci, crate::domain::stats::CiScale::Logit { .. }) {
+            let is_log = log_ci == crate::domain::stats::CiScale::Log && mu > 0.0;
             let pts: Vec<[f64; 2]> = (0..=120)
                 .map(|i| {
                     let x = x_lo + (x_hi - x_lo) * i as f64 / 120.0;
-                    let y = normal_pdf(x, mu, se_v);
+                    let y = if is_log { lognormal_pdf(x, mu, se_v / mu) } else { normal_pdf(x, mu, se_v) };
                     [x, y]
                 })
                 .collect();
@@ -573,7 +576,7 @@ fn show_distributions(
                     .color(egui::Color32::from_rgba_unmultiplied(180, 180, 180, 220))
                     .width(1.5)
                     .style(egui_plot::LineStyle::Dashed { length: 8.0 })
-                    .name("Asymptotic normal"));
+                    .name(if log_ci == crate::domain::stats::CiScale::Log { "Asymptotic (lognormal)" } else { "Asymptotic normal" }));
             }
 
             // Point estimate (solid dark line).
@@ -642,6 +645,13 @@ fn find_sir_ci(sir: &SirResult, name: &str) -> Option<(f64, f64)> {
 fn normal_pdf(x: f64, mean: f64, std: f64) -> f64 {
     let z = (x - mean) / std;
     (1.0 / (std * (TAU / 2.0).sqrt() * std::f64::consts::SQRT_2)) * (-0.5 * z * z).exp()
+}
+
+/// Density of a lognormal with median `median` and log-scale SD `sd_log`; 0 for x ≤ 0.
+fn lognormal_pdf(x: f64, median: f64, sd_log: f64) -> f64 {
+    if x <= 0.0 || sd_log <= 0.0 { return 0.0; }
+    let z = (x.ln() - median.ln()) / sd_log;
+    (-0.5 * z * z).exp() / (x * sd_log * (2.0 * std::f64::consts::PI).sqrt())
 }
 
 fn sir_section_header(ui: &mut egui::Ui, title: &str, dark: bool) {
