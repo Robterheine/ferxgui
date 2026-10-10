@@ -271,8 +271,11 @@ fn show_ci_comparison(
                 for (i, ci) in cis.iter().enumerate() {
                     let est     = ests.get(i).copied().unwrap_or(f64::NAN);
                     let se      = ses.get(i).copied().unwrap_or(f64::NAN);
-                    let asym_lo = if se.is_finite() { est - 1.96 * se } else { f64::NAN };
-                    let asym_hi = if se.is_finite() { est + 1.96 * se } else { f64::NAN };
+                    // Log-scale Wald interval for parameters that are positive by declaration
+                    // (ω², σ, thetas bounded at 0 or above), so it cannot go negative.
+                    let log_ci = section_title != "THETA" || fit.theta_is_positive(i);
+                    let (asym_lo, asym_hi) = crate::domain::stats::wald_ci95(est, se, log_ci)
+                        .unwrap_or((f64::NAN, f64::NAN));
 
                     ui.label(egui::RichText::new(&ci.name).color(theme::fg(dark)).size(12.0).monospace());
                     ui.label(egui::RichText::new(fmt4(est)).color(theme::fg(dark)).size(11.0));
@@ -298,7 +301,7 @@ fn show_ci_comparison(
         ui.add_space(8.0);
     }
     ui.label(egui::RichText::new(
-        "Asymptotic: estimate ± 1.96 × SE   |   SIR: non-parametric 2.5% – 97.5%")
+        "Asymptotic: 95 % Wald interval from the covariance matrix (log scale for positive parameters)   |   SIR: non-parametric 2.5% – 97.5%")
         .color(theme::fg3(dark)).size(10.0));
 }
 
@@ -500,6 +503,13 @@ fn show_distributions(
     // Look up estimate + SE + SIR CI for this parameter.
     let (est, se) = find_estimate_se(fit, param);
     let sir_ci    = find_sir_ci(sir, param);
+    // Same rule as the table: log-scale unless the parameter is a theta that may be negative.
+    let log_ci = fit.theta_names.iter().position(|n| n == param)
+        .is_none_or(|i| fit.theta_is_positive(i));
+    let asym_ci = match (est, se) {
+        (Some(mu), Some(s)) => crate::domain::stats::wald_ci95(mu, s, log_ci),
+        _ => None,
+    };
 
     let n = samples.len();
     let n_bins = ((n as f64).sqrt() as usize).clamp(8, 40);
@@ -575,17 +585,15 @@ fn show_distributions(
             }
 
             // Asymptotic 95% CI (dashed gray).
-            if let (Some(mu), Some(se_v)) = (est, se) {
-                if se_v.is_finite() {
-                    let gray = egui::Color32::from_rgba_unmultiplied(150, 150, 150, 200);
-                    p.vline(VLine::new(mu - 1.96 * se_v)
-                        .color(gray).width(1.2)
-                        .style(egui_plot::LineStyle::Dashed { length: 6.0 })
-                        .name("Asym 95% CI"));
-                    p.vline(VLine::new(mu + 1.96 * se_v)
-                        .color(gray).width(1.2)
-                        .style(egui_plot::LineStyle::Dashed { length: 6.0 }));
-                }
+            if let Some((lo, hi)) = asym_ci {
+                let gray = egui::Color32::from_rgba_unmultiplied(150, 150, 150, 200);
+                p.vline(VLine::new(lo)
+                    .color(gray).width(1.2)
+                    .style(egui_plot::LineStyle::Dashed { length: 6.0 })
+                    .name("Asym 95% CI"));
+                p.vline(VLine::new(hi)
+                    .color(gray).width(1.2)
+                    .style(egui_plot::LineStyle::Dashed { length: 6.0 }));
             }
 
             // SIR 95% CI (solid orange).

@@ -233,10 +233,11 @@ impl FitSummary {
         self.near_boundary == Some(true)
     }
 
-    /// True when theta `i` is positive by declaration (lower bound above zero), so its
+    /// True when theta `i` cannot be negative by declaration (lower bound of zero or above; ferx packs
+    /// these as log), so its
     /// confidence interval is built on the log scale.
     pub fn theta_is_positive(&self, i: usize) -> bool {
-        self.theta_lower.get(i).is_some_and(|&l| l > 0.0)
+        self.theta_lower.get(i).is_some_and(|&l| l >= 0.0)
     }
 
     /// Number of within-subject consecutive residual pairs (n_obs - n_subjects): the n behind the
@@ -484,5 +485,19 @@ mod lag_tests {
         assert!((small.lag1_threshold().unwrap() - 2.0 / 20f64.sqrt()).abs() < 1e-12);
         assert_eq!(small.lag1_flagged(), Some(false)); // 0.3 < 0.447: not flagged with few pairs
         assert_eq!(FitSummary::default().lag1_flagged(), None);
+    }
+}
+
+#[cfg(test)]
+mod positive_theta_tests {
+    use super::*;
+
+    #[test]
+    fn zero_lower_bound_is_log_packed_and_positive() {
+        let f = FitSummary { theta_lower: vec![0.0, 0.001, -0.1, f64::NEG_INFINITY], ..Default::default() };
+        assert!(f.theta_is_positive(0) && f.theta_is_positive(1));
+        assert!(!f.theta_is_positive(2), "negative lower bound is identity-packed");
+        assert!(!f.theta_is_positive(3), "unbounded theta may be negative");
+        assert!(!f.theta_is_positive(9), "unknown bound stays on the natural scale");
     }
 }
