@@ -288,6 +288,12 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.10.1 (2026-10-10) — SIR asymptotic intervals can no longer go negative; relocated projects
+
+- **SIR tab:** the asymptotic 95 % interval (comparison table and the dashed lines on the histograms) is now a log-scale Wald interval for ω², σ and thetas that cannot be negative, matching the Models and Report tables. It was still estimate ± 1.96 × SE and could fall below zero.
+- A theta with a declared lower bound of exactly 0 (packed as log by ferx) now counts as positive for this purpose. Thetas with no or a negative lower bound keep the symmetric interval.
+- **R bridge:** if the dataset path recorded in a bundle no longer exists (project folder moved or copied), SIR, NPDE and the covariance recompute use the file with the same name beside the bundle instead of failing.
+
 ### v0.10.0 (2026-10-09) — remediation release: changes some numbers, parser rules and cache keys
 
 This release closes the findings of the adversarial audit (items A-01 … A-49). **Several changes alter numbers or behaviour a user might have relied on; each is listed.** The scientific choices below (§6b of the remediation plan) have **not** yet been reviewed by a practising pharmacometrician.
