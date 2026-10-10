@@ -119,6 +119,19 @@ pub fn compute_model_validate(model_path: &Path, data_path: Option<&Path>) -> Re
     Ok(res)
 }
 
+/// A model without random effects (a logistic regression, say) needs ferx-r #553 to load its bundle and
+/// to run SIR / covariance / NPDE on it; older builds fail with an error that says nothing about why
+/// (e.g. "'data' must be of a vector type, was 'NULL'"). Decided from the bundle's structure, not the
+/// message text, so it holds when ferx rewords the error: any failure on a fit with no ETAs gets the hint.
+pub fn no_eta_hint(fitrx_path: &Path, err: String) -> String {
+    let no_eta = crate::io::fitrx::read_fit_summary(fitrx_path).is_ok_and(|f| f.n_eta == 0);
+    if no_eta {
+        format!("{err}\n\nThis model has no random effects. Loading its bundle and running SIR, the \
+                 covariance step or NPDE on it needs a newer ferx-r (fix: ferx-r #553). If your ferx-r is \
+                 older, update it and try again.")
+    } else { err }
+}
+
 /// The dataset a bridge script should use when the path recorded in the bundle no longer exists:
 /// the same-named file beside the bundle, but ONLY if its SHA-256 equals the `data_hash` recorded at
 /// fit time. Returns "" when the recorded path is fine (or nothing can be found, so R reports its
@@ -221,7 +234,7 @@ pub fn compute_npde(fitrx_path: &Path, nsim: u32, seed: Option<u32>) -> Result<N
         &nsim_str,
         &seed_str,
         &data_override,
-    ])?;
+    ]).map_err(|e| no_eta_hint(fitrx_path, e))?;
     let mut r: NpdeResult = serde_json::from_str(&json)
         .map_err(|e| format!("npde JSON parse error: {e}\nR output: {}", crate::util::truncate_chars(&json, 500)))?;
     r.nsim = nsim;
@@ -1275,7 +1288,7 @@ pub fn compute_covariance(fitrx_path: &Path, covariance_method: &str) -> Result<
         path_as_str(fitrx_path)?,
         covariance_method,
         &data_override,
-    ])?;
+    ]).map_err(|e| no_eta_hint(fitrx_path, e))?;
     #[derive(serde::Deserialize)]
     struct Out { covariance_status: String }
     let out: Out = serde_json::from_str(&json)
@@ -1714,7 +1727,7 @@ pub fn compute_sir(
         &theta_lower,
         if layout_ok { "true" } else { "false" },
         &verified_data_override(fitrx_path)?,
-    ])?;
+    ]).map_err(|e| no_eta_hint(fitrx_path, e))?;
     let mut result = parse_sir_result(&json)
         .map_err(|e| format!("SIR JSON parse error: {e}\nR output: {}", crate::util::truncate_chars(&json, 500)))?;
     result.fingerprint = fit.as_ref().and_then(|f| f.estimates_fingerprint());
@@ -1786,13 +1799,13 @@ fn parse_sir_result(json: &str) -> Result<SirResult, serde_json::Error> {
 /// Call `ferx_eta_cov()` via R to screen EBE ETAs against dataset covariates.
 /// Blocking — run from a background thread.
 pub fn compute_eta_cov(fitrx_path: &Path) -> Result<EtaCovResult, String> {
-    let json = run_script(ETA_COV_R, &[path_as_str(fitrx_path)?])?;
+    let json = run_script(ETA_COV_R, &[path_as_str(fitrx_path)?]).map_err(|e| no_eta_hint(fitrx_path, e))?;
     serde_json::from_str(&json)
         .map_err(|e| format!("eta_cov JSON parse error: {e}\nR output: {}", crate::util::truncate_chars(&json, 500)))
 }
 
 pub fn compute_cov_screen(fitrx_path: &Path) -> Result<CovScreenResult, String> {
-    let json = run_script(COV_SCREEN_R, &[path_as_str(fitrx_path)?])?;
+    let json = run_script(COV_SCREEN_R, &[path_as_str(fitrx_path)?]).map_err(|e| no_eta_hint(fitrx_path, e))?;
     serde_json::from_str(&json)
         .map_err(|e| format!("cov_screen JSON parse error: {e}\nR output: {}", crate::util::truncate_chars(&json, 500)))
 }
@@ -2699,6 +2712,37 @@ mod covariance_recompute_tests {
         assert!(s.covariance_ok && s.has_identity());
         // The recorded dataset path (a missing absolute path here) is not rewritten.
         assert_eq!(s.data_path, crate::io::fitrx::read_fit_summary(&fixture("warfarin.fitrx")).unwrap().data_path);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
+mod no_eta_hint_tests {
+    use super::*;
+    use crate::util::testsupport::fixture;
+
+    #[test]
+    fn hint_is_added_only_for_models_without_random_effects() {
+        let e = "'data' must be of a vector type, was 'NULL'".to_string();
+        let with = no_eta_hint(&fixture("binary_logistic.fitrx"), e.clone());
+        assert!(with.starts_with(&e) && with.contains("ferx-r #553"), "{with}");
+        assert_eq!(no_eta_hint(&fixture("warfarin.fitrx"), e.clone()), e, "ordinary fits keep ferx's message");
+        assert_eq!(no_eta_hint(Path::new("/no/such.fitrx"), e.clone()), e, "unreadable bundle: unchanged");
+    }
+
+    /// On a ferx without the fix the real failure carries the hint; with the fix the call succeeds.
+    #[test]
+    fn old_ferx_failure_on_a_fixed_effects_fit_is_explained() {
+        use crate::util::testsupport::{ferx_supports_no_eta, r_with_ferx};
+        if !r_with_ferx() || ferx_supports_no_eta() { return; }
+        let d = std::env::temp_dir().join(format!("ferxgui_hint_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        for f in ["binary_logistic.fitrx", "binary_logistic.csv", "binary_logistic.ferx"] {
+            std::fs::copy(fixture(f), d.join(f)).unwrap();
+        }
+        let e = compute_sir(&d.join("binary_logistic.fitrx"), 100, 50, 1, true).unwrap_err();
+        assert!(e.contains("ferx-r #553"), "{e}");
         let _ = std::fs::remove_dir_all(&d);
     }
 }
