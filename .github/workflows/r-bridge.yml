@@ -20,8 +20,10 @@ env:
   CARGO_TERM_COLOR: always
   # Missing R, ferx or fixtures is a failure here, never a silent skip.
   FERX_REQUIRE_FIXTURES: '1'
-  # The tag pins the engine: ferx-r ships src/rust/Cargo.lock, which pins ferx-core.
-  FERX_R_REF: v0.4.0
+  # A commit pins the engine (ferx-r ships src/rust/Cargo.lock, which pins ferx-core). It is the first
+  # with SIR draws saved in bundles and SIR/covariance on fixed-effects fits (ferx-r #552, #553);
+  # move to the release tag that contains them once one exists.
+  FERX_R_REF: 67e075ea2a4166280af85d8ef3dc9f872a88aff9
 
 jobs:
   r-bridge:

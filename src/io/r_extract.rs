@@ -337,7 +337,7 @@ tmp_path <- paste0(sub("\\.fitrx$", "", fitrx_path), ".tmp.fitrx")
 on.exit(unlink(tmp_path), add = TRUE)
 ferx_save_fit(fit, tmp_path)
 invisible(ferx_load_fit(tmp_path))
-file.copy(fitrx_path, paste0(fitrx_path, ".bak"), overwrite = TRUE)
+invisible(file.copy(fitrx_path, paste0(fitrx_path, ".bak"), overwrite = TRUE))  # invisible: a stray "[1] TRUE" would corrupt the JSON on stdout
 if (!file.rename(tmp_path, fitrx_path)) stop("could not replace the bundle")
 
 cat(toJSON(list(covariance_status = fit$covariance_status), auto_unbox = TRUE, digits = NA))
@@ -2644,6 +2644,62 @@ mod data_fallback_tests {
         let Some(b) = staged("none", None) else { return };
         assert_eq!(verified_data_override(&b).unwrap(), "");
         let _ = std::fs::remove_dir_all(b.parent().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod no_eta_live_tests {
+    use super::*;
+    use crate::util::testsupport::{fixture, ferx_supports_no_eta, r_with_ferx};
+
+    /// SIR and the covariance recompute on a fixed-effects fit (no random effects). They failed
+    /// before ferx-r #553; on older builds this test skips.
+    #[test]
+    fn sir_and_covariance_run_on_a_fixed_effects_fit() {
+        if !r_with_ferx() || !ferx_supports_no_eta() { return; }
+        let d = std::env::temp_dir().join(format!("ferxgui_noeta_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        for f in ["binary_logistic.fitrx", "binary_logistic.csv", "binary_logistic.ferx"] {
+            std::fs::copy(fixture(f), d.join(f)).unwrap();
+        }
+        let b = d.join("binary_logistic.fitrx");
+        let sir = compute_sir(&b, 200, 100, 1, true).expect("SIR on a no-eta fit");
+        assert_eq!(sir.theta.len(), 3);
+        assert!(sir.hist_supported && sir.omega.is_empty());
+        assert_eq!(sir.corr_names.len(), 3);
+        let status = compute_covariance(&b, "r").expect("covariance on a no-eta fit");
+        assert_eq!(status, "computed");
+        assert!(crate::io::fitrx::read_fit_summary(&b).unwrap().covariance_ok);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
+mod covariance_recompute_tests {
+    use super::*;
+    use crate::util::testsupport::{available, fixture, r_with_ferx};
+
+    /// The recompute must hand back clean JSON (a stray "[1] TRUE" from an R call once broke the
+    /// parse after the bundle had already been replaced), keep the previous bundle as .bak, and leave
+    /// no temporary file behind.
+    #[test]
+    fn covariance_recompute_returns_clean_json_and_keeps_a_backup() {
+        if !available(r_with_ferx(), "Rscript with ferx") { return; }
+        let d = std::env::temp_dir().join(format!("ferxgui_covre_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        for f in ["warfarin.fitrx", "warfarin.csv", "warfarin.ferx"] { std::fs::copy(fixture(f), d.join(f)).unwrap(); }
+        let b = d.join("warfarin.fitrx");
+        let before = std::fs::read(&b).unwrap();
+        assert_eq!(compute_covariance(&b, "r").expect("recompute"), "computed");
+        assert_eq!(std::fs::read(d.join("warfarin.fitrx.bak")).unwrap(), before, "previous bundle kept");
+        assert!(!d.join("warfarin.tmp.fitrx").exists());
+        let s = crate::io::fitrx::read_fit_summary(&b).unwrap();
+        assert!(s.covariance_ok && s.has_identity());
+        // The recorded dataset path (a missing absolute path here) is not rewritten.
+        assert_eq!(s.data_path, crate::io::fitrx::read_fit_summary(&fixture("warfarin.fitrx")).unwrap().data_path);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
 

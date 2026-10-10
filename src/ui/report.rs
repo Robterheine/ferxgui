@@ -893,3 +893,25 @@ footer{margin-top:32px;padding-top:8px;border-top:1px solid #ddd;
 .explain{font-size:10px;color:#777;font-style:italic;margin-top:2px;font-weight:normal}
 "#
 }
+
+#[cfg(test)]
+mod no_eta_report_tests {
+    use super::*;
+
+    /// The run report for a fixed-effects fit (no omega, no ETAs) builds without panicking.
+    #[test]
+    fn report_builds_for_a_no_eta_fit() {
+        let fx = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let d = std::env::temp_dir().join(format!("ferxgui_rep_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        for f in ["binary_logistic.ferx", "binary_logistic.fitrx", "binary_logistic.csv"] {
+            std::fs::copy(fx.join(f), d.join(f)).unwrap();
+        }
+        let entry = crate::workers::scan::build_entry(d.join("binary_logistic.ferx"), &Default::default()).unwrap();
+        let fit = entry.fit.clone().expect("fit parsed");
+        let html = generate_html(&fit, &entry, None, "test");
+        assert!(html.contains("THETA") && html.contains("TH0"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}

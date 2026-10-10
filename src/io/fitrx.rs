@@ -1593,3 +1593,26 @@ mod fixture_tests {
         assert!(nat_lo < 0.05 && log_lo > 0.12 && log_hi < 0.9, "{nat_lo} {log_lo} {log_hi}");
     }
 }
+
+#[cfg(test)]
+mod no_eta_tests {
+    use super::*;
+
+    /// A fixed-effects fit (binary logistic, no random effects), written by ferx-r >= 67e075e.
+    #[test]
+    fn no_eta_bundle_reads_cleanly() {
+        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/binary_logistic.fitrx");
+        let s = read_fit_summary(&p).expect("a no-eta bundle must parse");
+        assert_eq!(s.n_eta, 0);
+        assert!(s.omega.is_empty() && s.eta_shrinkage.is_empty());
+        assert!(s.etabar.is_empty(), "no ETAs, so no ETAbar rows");
+        assert_eq!(s.theta.len(), 3);
+        assert!(s.ofv.is_finite());
+        assert!(s.covariance_ok);
+        // ebes.csv has one row per subject and no ETA columns.
+        let e = read_ebes(&p).unwrap().expect("ebes.csv present");
+        assert_eq!(e.rows.len(), s.n_subjects);
+        assert!(e.eta_names.is_empty() && e.eta_bar().is_empty());
+        assert!(s.has_identity());
+    }
+}

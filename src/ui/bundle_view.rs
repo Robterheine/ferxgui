@@ -830,4 +830,16 @@ mod tests {
         assert!(h.query_by_label_contains("ETA_KA").is_some(), "ETAs listed with their shrinkage");
         assert!(h.query_all_by_label_contains("%").count() >= 1, "shrinkage shown as percent");
     }
+
+    /// A fixed-effects fit (no random effects, empty omega) renders every section without panicking.
+    #[test]
+    fn a_no_eta_bundle_renders_every_section() {
+        let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/binary_logistic.fitrx");
+        for sec in [BundleSection::Overview, BundleSection::Parameters, BundleSection::Model,
+                    BundleSection::Contents, BundleSection::FitJson] {
+            let h = render(sec, &p);
+            assert!(h.query_by_label_contains("Overview").is_some());
+        }
+    }
 }
+

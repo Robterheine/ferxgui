@@ -39,3 +39,8 @@ ferx_save_fit(ferx_fit(file.path(d, "warfarin_prior.ferx"), file.path(d, "warfar
 # IOV (kappa) fit.
 ferx_save_fit(ferx_fit(file.path(d, "warfarin_iov.ferx"), file.path(d, "warfarin_iov.csv"),
                        method = "focei", covariance = TRUE), file.path(d, "warfarin_iov.fitrx"))
+
+# Fixed-effects (no random effects) logistic fit. Needs ferx-r >= 67e075e (loads/saves no-eta
+# bundles; SIR and covariance run on them). Written to the same folder as the other fixtures.
+ferx_save_fit(ferx_fit(file.path(d, "binary_logistic.ferx"), file.path(d, "binary_logistic.csv"),
+                       method = "focei", covariance = TRUE), file.path(d, "binary_logistic.fitrx"))

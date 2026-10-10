@@ -60,6 +60,20 @@ pub mod testsupport {
         cond
     }
 
+    /// True when the installed ferx-r handles fits without random effects (ferx-r #553: SIR and
+    /// covariance on a fixed-effects fit, no-eta bundles). Older builds do not read `fit$subject_ids` in `.ferx_fit_subject_ids`;
+    /// tests that need the fix skip on them, even under FERX_REQUIRE_FIXTURES, since the app supports
+    /// older ferx versions too.
+    pub fn ferx_supports_no_eta() -> bool {
+        use std::sync::OnceLock;
+        static OK: OnceLock<bool> = OnceLock::new();
+        *OK.get_or_init(|| {
+            std::process::Command::new("Rscript")
+                .args(["-e", "ns <- asNamespace('ferx'); quit(status = !(exists('.ferx_fit_subject_ids', envir = ns) && any(grepl('subject_ids', deparse(get('.ferx_fit_subject_ids', envir = ns))))))"])
+                .output().map(|o| o.status.success()).unwrap_or(false)
+        })
+    }
+
     /// Rscript on PATH with the ferx and vpc packages installed.
     pub fn r_with_ferx() -> bool {
         use std::sync::OnceLock;

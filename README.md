@@ -288,6 +288,14 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.10.3 (2026-10-10) — fixed "Recompute standard errors"; fixed-effects models; ferx-r #552/#553
+
+- **Fixed: Recompute standard errors reported a JSON parse error.** Since 0.10.0 the script printed a stray `[1] TRUE` (from backing up the old bundle) ahead of its result, so the app showed an error even though the bundle had been replaced and the old one kept as `.fitrx.bak`. The covariance recompute is now covered by a live test.
+- **Models without random effects** (e.g. a logistic regression with `[binary_model]`): the app reads their bundles, shows the report and runs SIR and the covariance recompute. This needs a ferx-r that includes [ferx-r #553](https://github.com/FeRx-NLME/ferx-r/commit/67e075ea2a4166280af85d8ef3dc9f872a88aff9) (SIR and covariance on a fit without `fit$ebe_etas`, loading no-eta bundles); on older builds ferx itself fails, as before.
+- **ferx-r #552 (SIR draws saved in `.fitrx` bundles, `sir_ci_*` names kept on load) is compatible**: the app keeps using its own fingerprint-checked SIR results, and tested against that build. SIR histograms for block-omega and IOV models stay hidden until ferx documents the packed column order (ferx-core #1863, #1864).
+- Tested against ferx-r `67e075e`; the R-bridge CI workflow now installs that commit instead of the `v0.4.0` tag.
+- A fixed-effects fixture (`binary_logistic`) and tests for its bundle, report and SIR/covariance runs were added. Note that ferx writes `n_obs = 0` for binary models, so n_obs-based figures (the lag-1 flag level) are unavailable for them.
+
 ### v0.10.2 (2026-10-10) — simulation bands, interval scales, verified data fallback
 
 - **Simulation plot:** the default band is now the **pooled percentiles of every individual value across all replicates**. The 0.10.0 default (percentile inside each replicate, then the median, the `vpc` convention) is noisy and biased inward when each replicate has few individuals; it remains available as "Per replicate", next to "CI of the mean profile". The plot says what the Y column means (IPRED: no residual error; DV_SIM: with residual error), warns that `DV` is the observed value copied into every replicate, and no longer defaults to `DV`.
