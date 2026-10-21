@@ -288,6 +288,11 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.10.4 (2026-10-21) — Files tab: way back out of a folder, axis limits, figure export
+
+- **Fixed: no way to leave a sub-folder in the Files tab.** The back button was labelled with an arrow that the bundled fonts draw as an empty box. It now reads **Back**, and a new **Up** button goes to the parent folder (never above the project folder).
+- **Files plot:** X and Y range fields (data units, blank = automatic, **Auto** clears them) and an **Export figure…** button that saves a PNG (2400 × 1500, white background) with the same data, colours, scales and limits as on screen. **Log X / Log Y now use log10** (the axis is labelled `log10(…)`); they used the natural log before, so the displayed axis values change.
+
 ### v0.10.3 (2026-10-10) — fixed "Recompute standard errors"; fixed-effects models; ferx-r #552/#553
 
 - **Fixed: Recompute standard errors reported a JSON parse error.** Since 0.10.0 the script printed a stray `[1] TRUE` (from backing up the old bundle) ahead of its result, so the app showed an error even though the bundle had been replaced and the old one kept as `.fitrx.bak`. The covariance recompute is now covered by a live test.
