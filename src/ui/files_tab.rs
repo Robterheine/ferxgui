@@ -102,18 +102,30 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
 
 fn show_nav_bar(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
     ui.horizontal_wrapped(|ui| {
-        // ← Back button.
+        // Text labels, not arrow glyphs: the bundled fonts draw "←" as an empty box, which hid the
+        // only way back (reported: no way to leave a sub-folder).
         let can_back = !state.ui.files_back_stack.is_empty();
-        if ui.add_enabled(
-            can_back,
-            egui::Button::new("←").min_size(egui::vec2(26.0, 22.0)),
-        )
-        .on_hover_text("Go to previous directory")
-        .clicked()
+        if ui.add_enabled(can_back, egui::Button::new("Back").min_size(egui::vec2(40.0, 22.0)))
+            .on_hover_text("Go to the previous directory")
+            .clicked()
         {
             if let Some(prev) = state.ui.files_back_stack.pop() {
                 state.ui.files_cwd      = Some(prev);
                 state.ui.files_selected = None;
+                state.ui.files_view_mode = FilesViewMode::Empty;
+            }
+        }
+
+        // Up: the parent folder, never above the project folder.
+        let parent = parent_within_root(state.ui.files_cwd.as_deref(), state.workspace.directory.as_deref());
+        if ui.add_enabled(parent.is_some(), egui::Button::new("Up").min_size(egui::vec2(34.0, 22.0)))
+            .on_hover_text("Go up one folder")
+            .clicked()
+        {
+            if let (Some(up), Some(cwd)) = (parent, state.ui.files_cwd.clone()) {
+                state.ui.files_back_stack.push(cwd);
+                state.ui.files_cwd       = Some(up);
+                state.ui.files_selected  = None;
                 state.ui.files_view_mode = FilesViewMode::Empty;
             }
         }
@@ -1090,6 +1102,13 @@ fn fmt_mtime(t: std::time::SystemTime) -> String {
     crate::workers::run::unix_to_datetime(secs)
 }
 
+/// The parent of `cwd`, when `cwd` is inside the project folder and is not the project folder itself.
+fn parent_within_root(cwd: Option<&std::path::Path>, root: Option<&std::path::Path>) -> Option<PathBuf> {
+    let (cwd, root) = (cwd?, root?);
+    if cwd == root || !cwd.starts_with(root) { return None; }
+    cwd.parent().map(|p| p.to_path_buf())
+}
+
 fn breadcrumb_text(cwd: Option<&std::path::Path>, root: Option<&std::path::Path>) -> String {
     let cwd  = match cwd  { Some(p) => p, None => return "—".to_string() };
     let root = match root { Some(p) => p, None => return cwd.display().to_string() };
@@ -1107,5 +1126,23 @@ fn breadcrumb_text(cwd: Option<&std::path::Path>, root: Option<&std::path::Path>
             format!("{}  /  {}", root_name, parts.join("  /  "))
         }
         Err(_) => cwd.display().to_string(),
+    }
+}
+
+#[cfg(test)]
+mod up_tests {
+    use super::parent_within_root;
+    use std::path::Path;
+
+    #[test]
+    fn up_goes_to_the_parent_but_never_above_the_project_folder() {
+        let root = Path::new("/p/POPCORN");
+        assert_eq!(parent_within_root(Some(Path::new("/p/POPCORN/ferx_outputs")), Some(root)),
+                   Some(root.to_path_buf()));
+        assert_eq!(parent_within_root(Some(Path::new("/p/POPCORN/a/b")), Some(root)),
+                   Some(Path::new("/p/POPCORN/a").to_path_buf()));
+        assert_eq!(parent_within_root(Some(root), Some(root)), None, "already at the project folder");
+        assert_eq!(parent_within_root(Some(Path::new("/elsewhere")), Some(root)), None);
+        assert_eq!(parent_within_root(None, Some(root)), None);
     }
 }
