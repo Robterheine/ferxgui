@@ -288,6 +288,10 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.10.5 (2026-10-21) — Files plot: linear trendline
+
+- **Files plot:** a **Linear fit** option next to LOESS draws an ordinary least-squares line through the plotted points, with its equation, R² and n in the legend (fitted on the log10 values when an axis is log). It is included in the exported figure. It needs at least 3 points with some spread in X.
+
 ### v0.10.4 (2026-10-21) — Files tab: way back out of a folder, axis limits, figure export
 
 - **Fixed: no way to leave a sub-folder in the Files tab.** The back button was labelled with an arrow that the bundled fonts draw as an empty box. It now reads **Back**, and a new **Up** button goes to the parent folder (never above the project folder).
