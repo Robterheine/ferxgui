@@ -730,6 +730,7 @@ pub struct UiState {
     pub files_plot_color_col: String,
     pub files_plot_unity:     bool,
     pub files_plot_loess:     bool,
+    pub files_plot_linear:    bool,
     pub files_plot_log_x:     bool,
     pub files_plot_log_y:     bool,
     /// Axis limits in data units; blank = automatic. Applied to the screen plot and the export.
@@ -901,6 +902,7 @@ impl Default for UiState {
             files_plot_color_col: String::new(),
             files_plot_unity:     false,
             files_plot_loess:     false,
+            files_plot_linear:    false,
             files_plot_log_x:     false,
             files_plot_log_y:     false,
             files_plot_xmin:      String::new(),

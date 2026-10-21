@@ -616,6 +616,9 @@ fn show_plot_view(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
         ui.add_space(4.0);
         ui.checkbox(&mut state.ui.files_plot_loess, "LOESS");
         ui.add_space(4.0);
+        ui.checkbox(&mut state.ui.files_plot_linear, "Linear fit")
+            .on_hover_text("Ordinary least-squares line through the plotted points (on the log scale when an axis is log)");
+        ui.add_space(4.0);
         ui.checkbox(&mut state.ui.files_plot_log_x, "Log X");
         ui.add_space(4.0);
         ui.checkbox(&mut state.ui.files_plot_log_y, "Log Y");
@@ -703,6 +706,7 @@ fn show_plot_view(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
     };
 
     let xy_pts: Vec<[f64; 2]> = all_pts.iter().map(|&(x, y, _)| [x, y]).collect();
+    let linear = if state.ui.files_plot_linear { linear_fit(&xy_pts) } else { None };
     let loess_line = if do_loess {
         crate::ui::eval_tab::loess(&xy_pts, 0.75)
     } else {
@@ -740,6 +744,7 @@ fn show_plot_view(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
             x_label: x_label.clone(), y_label: y_label.clone(), x_range, y_range,
             unity: unity.then(|| [x_min.min(y_min), x_max.max(y_max)]),
             loess: loess_line.clone(),
+            linear: linear.map(|f| (f.line(x_min, x_max), f.label())),
         };
         let default_name = format!("{}_vs_{}.png", y_col, x_col);
         if let Some(path) = rfd::FileDialog::new().set_file_name(default_name)
@@ -790,6 +795,10 @@ fn show_plot_view(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
                 p.line(Line::new(PlotPoints::new(loess_line.clone()))
                     .color(theme::ORANGE).width(2.0).name("LOESS"));
             }
+            if let Some(f) = &linear {
+                p.line(Line::new(PlotPoints::new(f.line(x_min, x_max).to_vec()))
+                    .color(LINEAR_COLOR).width(2.0).name(f.label()));
+            }
         });
 }
 
@@ -821,6 +830,40 @@ fn axis_range(data: (f64, f64), user_lo: Option<f64>, user_hi: Option<f64>) -> (
     if l < h { (l, h) } else { (auto_lo, auto_hi) }
 }
 
+/// Colour of the linear trendline (distinct from the LOESS orange and the category palette).
+const LINEAR_COLOR: egui::Color32 = egui::Color32::from_rgb(0xd6, 0x3b, 0x8f);
+
+/// Ordinary least-squares line y = intercept + slope · x through the plotted points.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LinearFit { intercept: f64, slope: f64, r2: f64, n: usize }
+
+impl LinearFit {
+    fn line(&self, x0: f64, x1: f64) -> [[f64; 2]; 2] {
+        [[x0, self.intercept + self.slope * x0], [x1, self.intercept + self.slope * x1]]
+    }
+    fn label(&self) -> String {
+        let sign = if self.intercept < 0.0 { '-' } else { '+' };
+        format!("Linear: y = {:.4} x {sign} {:.4}  (R² = {:.3}, n = {})",
+                self.slope, self.intercept.abs(), self.r2, self.n)
+    }
+}
+
+/// OLS fit of finite points; None with fewer than 3 points or no spread in x.
+fn linear_fit(pts: &[[f64; 2]]) -> Option<LinearFit> {
+    let p: Vec<&[f64; 2]> = pts.iter().filter(|p| p[0].is_finite() && p[1].is_finite()).collect();
+    let n = p.len();
+    if n < 3 { return None; }
+    let nf = n as f64;
+    let (mx, my) = (p.iter().map(|q| q[0]).sum::<f64>() / nf, p.iter().map(|q| q[1]).sum::<f64>() / nf);
+    let sxx: f64 = p.iter().map(|q| (q[0] - mx).powi(2)).sum();
+    if sxx <= 0.0 { return None; }
+    let sxy: f64 = p.iter().map(|q| (q[0] - mx) * (q[1] - my)).sum();
+    let syy: f64 = p.iter().map(|q| (q[1] - my).powi(2)).sum();
+    let slope = sxy / sxx;
+    let r2 = if syy > 0.0 { sxy * sxy / (sxx * syy) } else { 1.0 };
+    Some(LinearFit { intercept: my - slope * mx, slope, r2, n })
+}
+
 /// Everything needed to draw the figure outside egui.
 struct FilesPlotSpec {
     groups:  Vec<(String, Vec<[f64; 2]>, egui::Color32)>,
@@ -830,6 +873,8 @@ struct FilesPlotSpec {
     y_range: (f64, f64),
     unity:   Option<[f64; 2]>,
     loess:   Vec<[f64; 2]>,
+    /// Linear trendline endpoints and its legend text.
+    linear:  Option<([[f64; 2]; 2], String)>,
 }
 
 /// Renders the scatter plot to a PNG (2400 × 1500, white background) with `plotters`: same data,
@@ -875,6 +920,12 @@ fn export_files_plot_png(spec: &FilesPlotSpec, path: &std::path::Path) -> Result
         chart.draw_series(LineSeries::new(spec.loess.iter().map(|p| (p[0], p[1])), orange.stroke_width(5)))
             .map_err(|e| e.to_string())?.label("LOESS")
             .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 24, y)], orange.stroke_width(5)));
+    }
+    if let Some((ends, label)) = &spec.linear {
+        let c = RGBColor(LINEAR_COLOR.r(), LINEAR_COLOR.g(), LINEAR_COLOR.b());
+        chart.draw_series(LineSeries::new(ends.iter().map(|p| (p[0], p[1])), c.stroke_width(5)))
+            .map_err(|e| e.to_string())?.label(label.as_str())
+            .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 24, y)], c.stroke_width(5)));
     }
     chart.configure_series_labels()
         .background_style(WHITE.mix(0.85)).border_style(BLACK.mix(0.25))
@@ -1336,6 +1387,7 @@ mod axis_tests {
             x_label: "SMICR".into(), y_label: "CL".into(),
             x_range: (0.05, 0.3), y_range: (4.0, 7.0), // the third point is outside and must be clipped
             unity: Some([0.0, 10.0]), loess: vec![[0.1, 5.0], [0.2, 6.0]],
+            linear: Some(([[0.1, 5.0], [0.2, 6.0]], "Linear".into())),
         };
         let p = std::env::temp_dir().join(format!("ferxgui_fig_{}.png", std::process::id()));
         export_files_plot_png(&spec, &p).unwrap();
@@ -1344,4 +1396,18 @@ mod axis_tests {
         assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
         assert!(bytes.len() > 5_000, "{} bytes", bytes.len());
     }
+
+    #[test]
+    fn linear_fit_recovers_a_known_line_and_rejects_degenerate_input() {
+        let pts: Vec<[f64; 2]> = (0..10).map(|i| [i as f64, 2.0 + 0.5 * i as f64]).collect();
+        let f = linear_fit(&pts).unwrap();
+        assert!((f.slope - 0.5).abs() < 1e-12 && (f.intercept - 2.0).abs() < 1e-12 && (f.r2 - 1.0).abs() < 1e-12);
+        // Matches R lm(y ~ x): x = 1..5, y = 2,1,4,3,5 -> slope 0.8, intercept 0.6, R² = 0.64.
+        let g = linear_fit(&[[1.0, 2.0], [2.0, 1.0], [3.0, 4.0], [4.0, 3.0], [5.0, 5.0]]).unwrap();
+        assert!((g.slope - 0.8).abs() < 1e-12 && (g.intercept - 0.6).abs() < 1e-12 && (g.r2 - 0.64).abs() < 1e-12);
+        assert!(linear_fit(&[[1.0, 1.0], [1.0, 2.0], [1.0, 3.0]]).is_none(), "no spread in x");
+        assert!(linear_fit(&[[1.0, 1.0], [2.0, 2.0]]).is_none(), "too few points");
+        assert!(g.label().contains("R² = 0.640") && g.label().contains("n = 5"));
+    }
 }
+
