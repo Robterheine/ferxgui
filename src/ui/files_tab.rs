@@ -621,6 +621,28 @@ fn show_plot_view(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
         ui.checkbox(&mut state.ui.files_plot_log_y, "Log Y");
     });
 
+    // Axis limits (data units, blank = automatic) and figure export.
+    let mut export_clicked = false;
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("X range:").color(dim).size(12.0));
+        limit_field(ui, &mut state.ui.files_plot_xmin, "min");
+        ui.label(egui::RichText::new("to").color(dim).size(12.0));
+        limit_field(ui, &mut state.ui.files_plot_xmax, "max");
+        ui.add_space(10.0);
+        ui.label(egui::RichText::new("Y range:").color(dim).size(12.0));
+        limit_field(ui, &mut state.ui.files_plot_ymin, "min");
+        ui.label(egui::RichText::new("to").color(dim).size(12.0));
+        limit_field(ui, &mut state.ui.files_plot_ymax, "max");
+        if ui.small_button("Auto").on_hover_text("Clear all limits").clicked() {
+            for s in [&mut state.ui.files_plot_xmin, &mut state.ui.files_plot_xmax,
+                      &mut state.ui.files_plot_ymin, &mut state.ui.files_plot_ymax] { s.clear(); }
+        }
+        ui.add_space(10.0);
+        if ui.button("Export figure…").on_hover_text("Save the plot as a PNG (white background, 2400 × 1500)").clicked() {
+            export_clicked = true;
+        }
+    });
+
     // ── Parse plot data ───────────────────────────────────────────────────────
     let x_col    = state.ui.files_plot_x_col.clone();
     let y_col    = state.ui.files_plot_y_col.clone();
@@ -649,8 +671,8 @@ fn show_plot_view(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
         let xv = row.get(xi).and_then(|s| s.trim().parse::<f64>().ok());
         let yv = row.get(yi).and_then(|s| s.trim().parse::<f64>().ok());
         if let (Some(x), Some(y)) = (xv, yv) {
-            let lx = if log_x { x.ln() } else { x };
-            let ly = if log_y { y.ln() } else { y };
+            let lx = if log_x { x.log10() } else { x };
+            let ly = if log_y { y.log10() } else { y };
             if lx.is_finite() && ly.is_finite() {
                 let cat = ci.and_then(|c| row.get(c)).cloned().unwrap_or_default();
                 all_pts.push((lx, ly, cat));
@@ -692,9 +714,43 @@ fn show_plot_view(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
     let y_min = xy_pts.iter().fold(f64::INFINITY,     |a, p| a.min(p[1]));
     let y_max = xy_pts.iter().fold(f64::NEG_INFINITY, |a, p| a.max(p[1]));
 
-    let x_label = if log_x { format!("ln({x_col})") } else { x_col.clone() };
-    let y_label = if log_y { format!("ln({y_col})") } else { y_col.clone() };
+    let x_label = if log_x { format!("log10({x_col})") } else { x_col.clone() };
+    let y_label = if log_y { format!("log10({y_col})") } else { y_col.clone() };
     let plot_id  = format!("files_scatter_{}_{}", x_col, y_col);
+
+    // Limits are typed in data units; on a log axis they are converted to log10 (and must be > 0).
+    let xlo = parse_limit(&state.ui.files_plot_xmin, log_x);
+    let xhi = parse_limit(&state.ui.files_plot_xmax, log_x);
+    let ylo = parse_limit(&state.ui.files_plot_ymin, log_y);
+    let yhi = parse_limit(&state.ui.files_plot_ymax, log_y);
+    let any_limit = xlo.is_some() || xhi.is_some() || ylo.is_some() || yhi.is_some();
+    let x_range = axis_range((x_min, x_max), xlo, xhi);
+    let y_range = axis_range((y_min, y_max), ylo, yhi);
+
+    let colors: Vec<egui::Color32> = (0..groups.len()).map(|i| {
+        if ci.is_none() {
+            if dark { egui::Color32::from_rgba_unmultiplied(76, 138, 255, 200) }
+            else    { egui::Color32::from_rgba_unmultiplied(30, 90, 210, 180) }
+        } else { CAT_COLORS[i % CAT_COLORS.len()] }
+    }).collect();
+    if export_clicked {
+        let spec = FilesPlotSpec {
+            groups: groups.iter().zip(&colors)
+                .map(|((l, p), c)| (if l.is_empty() { y_col.clone() } else { l.clone() }, p.clone(), *c)).collect(),
+            x_label: x_label.clone(), y_label: y_label.clone(), x_range, y_range,
+            unity: unity.then(|| [x_min.min(y_min), x_max.max(y_max)]),
+            loess: loess_line.clone(),
+        };
+        let default_name = format!("{}_vs_{}.png", y_col, x_col);
+        if let Some(path) = rfd::FileDialog::new().set_file_name(default_name)
+            .add_filter("PNG image", &["png"]).save_file()
+        {
+            state.ui.status_message = match export_files_plot_png(&spec, &path) {
+                Ok(()) => format!("Figure saved to {}", path.display()),
+                Err(e) => format!("Figure export failed: {e}"),
+            };
+        }
+    }
 
     // ── Plot ──────────────────────────────────────────────────────────────────
     Plot::new(plot_id)
@@ -702,6 +758,11 @@ fn show_plot_view(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
         .y_axis_label(y_label)
         .legend(egui_plot::Legend::default())
         .show(ui, |p| {
+            // With any limit set, the view is pinned to the requested range.
+            if any_limit {
+                p.set_plot_bounds(egui_plot::PlotBounds::from_min_max(
+                    [x_range.0, y_range.0], [x_range.1, y_range.1]));
+            }
             for (i, (label, pts)) in groups.iter().enumerate() {
                 let col = if ci.is_none() {
                     if dark { egui::Color32::from_rgba_unmultiplied(76, 138, 255, 200) }
@@ -730,6 +791,97 @@ fn show_plot_view(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
                     .color(theme::ORANGE).width(2.0).name("LOESS"));
             }
         });
+}
+
+/// A small min/max entry; blank means automatic. Invalid text is shown in red and ignored.
+fn limit_field(ui: &mut egui::Ui, text: &mut String, hint: &str) {
+    let bad = !text.trim().is_empty() && text.trim().parse::<f64>().is_err();
+    let mut te = egui::TextEdit::singleline(text).desired_width(54.0).hint_text(hint);
+    if bad { te = te.text_color(theme::RED); }
+    ui.add(te).on_hover_text("Axis limit in data units (blank = automatic)");
+}
+
+/// An axis limit typed in data units, as a plotted coordinate: None when blank or not a number;
+/// on a log axis it must be positive and is converted to log10.
+fn parse_limit(text: &str, log: bool) -> Option<f64> {
+    let v: f64 = text.trim().parse().ok()?;
+    if !v.is_finite() { return None; }
+    if log { (v > 0.0).then(|| v.log10()) } else { Some(v) }
+}
+
+/// The plotted range of an axis: user limits where given, otherwise the data extent padded by 5 %.
+/// A user pair that is not increasing falls back to the automatic range.
+fn axis_range(data: (f64, f64), user_lo: Option<f64>, user_hi: Option<f64>) -> (f64, f64) {
+    let (mut lo, mut hi) = data;
+    if !lo.is_finite() || !hi.is_finite() { lo = 0.0; hi = 1.0; }
+    if (hi - lo).abs() < 1e-12 { lo -= 0.5; hi += 0.5; }
+    let pad = (hi - lo) * 0.05;
+    let (auto_lo, auto_hi) = (lo - pad, hi + pad);
+    let (l, h) = (user_lo.unwrap_or(auto_lo), user_hi.unwrap_or(auto_hi));
+    if l < h { (l, h) } else { (auto_lo, auto_hi) }
+}
+
+/// Everything needed to draw the figure outside egui.
+struct FilesPlotSpec {
+    groups:  Vec<(String, Vec<[f64; 2]>, egui::Color32)>,
+    x_label: String,
+    y_label: String,
+    x_range: (f64, f64),
+    y_range: (f64, f64),
+    unity:   Option<[f64; 2]>,
+    loess:   Vec<[f64; 2]>,
+}
+
+/// Renders the scatter plot to a PNG (2400 × 1500, white background) with `plotters`: same data,
+/// colours, scales and limits as on screen. Points outside the limits are clipped by the chart.
+fn export_files_plot_png(spec: &FilesPlotSpec, path: &std::path::Path) -> Result<(), String> {
+    use plotters::prelude::*;
+    const UBUNTU_LIGHT: &[u8] =
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/fonts/Ubuntu-Light.ttf"));
+    static FONT: std::sync::Once = std::sync::Once::new();
+    FONT.call_once(|| {
+        let _ = plotters::style::register_font("sans-serif", plotters::style::FontStyle::Normal, UBUNTU_LIGHT);
+    });
+
+    let root = BitMapBackend::new(path, (2400, 1500)).into_drawing_area();
+    root.fill(&WHITE).map_err(|e| e.to_string())?;
+    let mut chart = ChartBuilder::on(&root)
+        .margin(60).x_label_area_size(90).y_label_area_size(100)
+        .build_cartesian_2d(spec.x_range.0..spec.x_range.1, spec.y_range.0..spec.y_range.1)
+        .map_err(|e| e.to_string())?;
+    chart.configure_mesh()
+        .x_desc(spec.x_label.as_str()).y_desc(spec.y_label.as_str())
+        .label_style(("sans-serif", 28)).axis_desc_style(("sans-serif", 32))
+        .x_labels(8).y_labels(8)
+        .draw().map_err(|e| e.to_string())?;
+
+    let (xr, yr) = (spec.x_range, spec.y_range);
+    for (name, pts, c) in &spec.groups {
+        let col = RGBColor(c.r(), c.g(), c.b());
+        let inside: Vec<(f64, f64)> = pts.iter().map(|p| (p[0], p[1]))
+            .filter(|&(x, y)| x >= xr.0 && x <= xr.1 && y >= yr.0 && y <= yr.1).collect();
+        chart.draw_series(inside.iter().map(|&(x, y)| Circle::new((x, y), 7, col.mix(0.75).filled())))
+            .map_err(|e| e.to_string())?
+            .label(name.as_str())
+            .legend(move |(x, y)| Circle::new((x + 12, y), 7, col.mix(0.75).filled()));
+    }
+    if let Some([lo, hi]) = spec.unity {
+        chart.draw_series(LineSeries::new(vec![(lo, lo), (hi, hi)], BLACK.mix(0.45).stroke_width(3)))
+            .map_err(|e| e.to_string())?.label("Unity")
+            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 24, y)], BLACK.mix(0.45).stroke_width(3)));
+    }
+    if spec.loess.len() > 1 {
+        let orange = RGBColor(0xe8, 0x95, 0x40);
+        chart.draw_series(LineSeries::new(spec.loess.iter().map(|p| (p[0], p[1])), orange.stroke_width(5)))
+            .map_err(|e| e.to_string())?.label("LOESS")
+            .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 24, y)], orange.stroke_width(5)));
+    }
+    chart.configure_series_labels()
+        .background_style(WHITE.mix(0.85)).border_style(BLACK.mix(0.25))
+        .label_font(("sans-serif", 28)).position(SeriesLabelPosition::UpperRight)
+        .draw().map_err(|e| e.to_string())?;
+    root.present().map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 // ── Placeholder views ─────────────────────────────────────────────────────────
@@ -1144,5 +1296,52 @@ mod up_tests {
         assert_eq!(parent_within_root(Some(root), Some(root)), None, "already at the project folder");
         assert_eq!(parent_within_root(Some(Path::new("/elsewhere")), Some(root)), None);
         assert_eq!(parent_within_root(None, Some(root)), None);
+    }
+}
+
+#[cfg(test)]
+mod axis_tests {
+    use super::*;
+
+    #[test]
+    fn limits_parse_in_data_units_and_log_needs_positive() {
+        assert_eq!(parse_limit(" 2.5 ", false), Some(2.5));
+        assert_eq!(parse_limit("-3", false), Some(-3.0));
+        assert_eq!(parse_limit("", false), None);
+        assert_eq!(parse_limit("abc", false), None);
+        assert_eq!(parse_limit("100", true), Some(2.0));
+        assert_eq!(parse_limit("0", true), None);
+        assert_eq!(parse_limit("-5", true), None);
+    }
+
+    #[test]
+    fn range_uses_user_limits_else_padded_data() {
+        let (lo, hi) = axis_range((0.0, 10.0), None, None);
+        assert!((lo + 0.5).abs() < 1e-12 && (hi - 10.5).abs() < 1e-12);
+        assert_eq!(axis_range((0.0, 10.0), Some(2.0), Some(8.0)), (2.0, 8.0));
+        let (lo, hi) = axis_range((0.0, 10.0), Some(2.0), None);
+        assert_eq!(lo, 2.0); assert!((hi - 10.5).abs() < 1e-12);
+        // Reversed or equal limits are ignored; a single-valued axis still has a width.
+        assert_eq!(axis_range((0.0, 10.0), Some(8.0), Some(2.0)), axis_range((0.0, 10.0), None, None));
+        let (lo, hi) = axis_range((5.0, 5.0), None, None);
+        assert!(lo < 5.0 && hi > 5.0);
+        let (lo, hi) = axis_range((f64::INFINITY, f64::NEG_INFINITY), None, None);
+        assert!(lo < hi);
+    }
+
+    #[test]
+    fn export_writes_a_png() {
+        let spec = FilesPlotSpec {
+            groups: vec![("CL".into(), vec![[0.1, 5.0], [0.2, 6.0], [9.0, 99.0]], egui::Color32::from_rgb(76, 138, 255))],
+            x_label: "SMICR".into(), y_label: "CL".into(),
+            x_range: (0.05, 0.3), y_range: (4.0, 7.0), // the third point is outside and must be clipped
+            unity: Some([0.0, 10.0]), loess: vec![[0.1, 5.0], [0.2, 6.0]],
+        };
+        let p = std::env::temp_dir().join(format!("ferxgui_fig_{}.png", std::process::id()));
+        export_files_plot_png(&spec, &p).unwrap();
+        let bytes = std::fs::read(&p).unwrap();
+        let _ = std::fs::remove_file(&p);
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+        assert!(bytes.len() > 5_000, "{} bytes", bytes.len());
     }
 }

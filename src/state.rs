@@ -732,6 +732,11 @@ pub struct UiState {
     pub files_plot_loess:     bool,
     pub files_plot_log_x:     bool,
     pub files_plot_log_y:     bool,
+    /// Axis limits in data units; blank = automatic. Applied to the screen plot and the export.
+    pub files_plot_xmin:      String,
+    pub files_plot_xmax:      String,
+    pub files_plot_ymin:      String,
+    pub files_plot_ymax:      String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -898,6 +903,10 @@ impl Default for UiState {
             files_plot_loess:     false,
             files_plot_log_x:     false,
             files_plot_log_y:     false,
+            files_plot_xmin:      String::new(),
+            files_plot_xmax:      String::new(),
+            files_plot_ymin:      String::new(),
+            files_plot_ymax:      String::new(),
         }
     }
 }
