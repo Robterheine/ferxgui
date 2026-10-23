@@ -288,6 +288,12 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.10.7 (2026-10-23) — unlimited concurrent runs
+
+- **Run as many fits at once as you like.** *Settings → Concurrent Runs → Max concurrent fits* now has an **Unlimited** option (type `0` or `u`), and a number can go up to 64 (it was capped at 16). Fresh installs start Unlimited; an existing settings file keeps its saved value, so **set it to Unlimited in Settings** if it was 1. When the limit is reached the greyed-out Run button now says where to raise it.
+- With Unlimited, the "runs slower together" warning explains the cost (each fit on `auto` threads may claim up to cores − 1, capped at 8) and suggests a per-run thread count on the Run tab.
+- A single model still has one run at a time (its runs share one results file and log); duplicate the model to run variants side by side.
+
 ### v0.10.6 (2026-10-23) — Linux: folder dialog no longer freezes over X forwarding
 
 - **Fixed (Linux): choosing a working directory froze the program over X forwarding** (MobaXterm, `ssh -X`). The default dialog backend needs a D-Bus session and portal service, which are absent there, and the call blocked the whole window. File dialogs now use GTK 3 on Linux (`libgtk-3-0` must be installed; Ubuntu desktops have it), and the folder chooser runs on a worker thread, so a dialog that does not appear cannot freeze the window.
