@@ -34,7 +34,10 @@ sha2 = "0.10"
 rayon = "1.10"
 
 # Native file / folder dialogs
-rfd = "0.15"
+# On Linux use GTK dialogs. The default XDG-portal backend needs a D-Bus session and portal service;
+# over X forwarding (MobaXterm, ssh -X) there is none and the blocking dialog call hung the whole UI.
+# macOS and Windows use their native dialogs whatever the features say.
+rfd = { version = "0.15", default-features = false, features = ["gtk3"] }
 
 # Open files / folders in OS default app
 open = "5"

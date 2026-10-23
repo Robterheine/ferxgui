@@ -405,6 +405,11 @@ pub struct UiState {
     pub editor_dirty: bool,
     /// Which model stem is currently loaded in the editor (used to detect selection change).
     pub editor_loaded_stem: Option<String>,
+    /// A folder dialog is open (Linux runs it on a worker thread so a dialog that never appears
+    /// cannot freeze the window); ignore further clicks until it returns.
+    pub folder_dialog_open: bool,
+    /// Text of the "type a folder path" fallback.
+    pub dir_path_input: String,
     /// Validation findings for a just-created template, shown until dismissed.
     pub new_model_notice: Option<(String, Vec<String>)>,
     /// The reference model is declared nested in the compared models (enables the LRT verdict).
@@ -766,6 +771,8 @@ impl Default for UiState {
             editor_dirty: false,
             lrt_nested: false,
             new_model_notice: None,
+            folder_dialog_open: false,
+            dir_path_input: String::new(),
             editor_switch_target: None,
             editor_overwrite_ok: false,
             last_draft_at: None,
@@ -1780,7 +1787,12 @@ impl AppState {
                 self.ui.status_message = format!("Covariate screen ready: {stem}");
                 self.workspace.cov_screen_results.insert(stem, *result);
             }
+            FolderPicked(dir) => {
+                self.ui.folder_dialog_open = false;
+                if let Some(d) = dir { self.set_directory(d); }
+            }
             RTaskError { context, message } => {
+                if context == "pick_folder" { self.ui.folder_dialog_open = false; }
                 // Clean up in-flight tracking if stem is encoded in the context.
                 // For inspect, also mark as failed so we don't auto-retry every frame.
                 if let Some(stem) = context.strip_prefix("inspect ") {
@@ -1889,6 +1901,43 @@ impl AppState {
         crate::util::spawn_guarded("state:1870", tx.clone(), move || {
             crate::workers::scan::scan_directory(dir, meta_map, tx);
         });
+    }
+
+    /// Ask the user for a working directory. On Linux the dialog runs on a worker thread and the
+    /// result arrives as `FolderPicked`; a dialog that fails to appear (no GTK, no display) leaves
+    /// the window responsive. Elsewhere the native dialog is used directly.
+    pub fn pick_directory(&mut self, ctx: &eframe::egui::Context) {
+        #[cfg(target_os = "linux")]
+        {
+            if self.ui.folder_dialog_open { return; }
+            self.ui.folder_dialog_open = true;
+            self.ui.status_message = "Waiting for the folder dialog…".into();
+            let tx = self.worker_tx.clone();
+            let ctx = ctx.clone();
+            crate::util::spawn_guarded("pick_folder", tx.clone(), move || {
+                let dir = rfd::FileDialog::new().pick_folder();
+                let _ = tx.send(WorkerMsg::FolderPicked(dir));
+                ctx.request_repaint();
+            });
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = ctx;
+            if let Some(dir) = rfd::FileDialog::new().pick_folder() { self.set_directory(dir); }
+        }
+    }
+
+    /// Open the folder typed into the fallback box; reports a problem instead of failing silently.
+    pub fn open_typed_directory(&mut self) {
+        let text = self.ui.dir_path_input.trim().to_string();
+        let path = PathBuf::from(&text);
+        if text.is_empty() { return; }
+        if path.is_dir() {
+            self.set_directory(path);
+            self.ui.dir_path_input.clear();
+        } else {
+            self.ui.status_message = format!("Not a folder: {text}");
+        }
     }
 
     /// Set the working directory and immediately trigger a scan.

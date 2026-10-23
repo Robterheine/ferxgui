@@ -241,7 +241,7 @@ The release binaries are **not signed or notarised** (no Apple Developer ID, no 
   xattr -d com.apple.quarantine ./ferxgui
   ```
 - **Windows (SmartScreen):** on "Windows protected your PC" click **More info**, then **Run anyway**.
-- **Linux:** the binary is built on Ubuntu 22.04 (glibc 2.35) and runs on that or newer. Mark it executable with `chmod +x ferxgui`.
+- **Linux:** the binary is built on Ubuntu 22.04 (glibc 2.35) and runs on that or newer. Mark it executable with `chmod +x ferxgui`. It uses GTK 3 for file dialogs, so `libgtk-3-0` must be installed (it is on Ubuntu desktops; `sudo apt-get install libgtk-3-0` otherwise). Over X forwarding (MobaXterm, `ssh -X`) the folder dialog opens as a GTK window; if no dialog can be shown, type the folder path into the box beside the Choose button.
 
 Building from source (above) avoids these prompts. The minimum supported Rust toolchain is recorded in `Cargo.toml` (`rust-version`) and checked in CI.
 

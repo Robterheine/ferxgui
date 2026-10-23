@@ -931,11 +931,10 @@ fn render_settings(ui: &mut egui::Ui, state: &mut AppState) {
             ).truncate());
             ui.add_space(8.0);
             if ui.button("Choose…").clicked() {
-                if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                    state.set_directory(dir);
-                }
+                state.pick_directory(ui.ctx());
             }
         });
+        directory_path_entry(ui, state);
         ui.add_space(16.0);
 
         // ── FeRx Engine (via R) ──────────────────────────────────────────────
@@ -2155,4 +2154,15 @@ fn write_drafts(state: &mut AppState) {
             crate::io::textdoc::write_draft(&app_dir, p, &state.ui.files_text);
         }
     }
+}
+
+/// "Or type a folder path": the way in when no folder dialog can be shown (X forwarding without a
+/// desktop session, a headless box).
+pub(crate) fn directory_path_entry(ui: &mut eframe::egui::Ui, state: &mut AppState) {
+    ui.horizontal(|ui| {
+        let r = ui.add(eframe::egui::TextEdit::singleline(&mut state.ui.dir_path_input)
+            .desired_width(300.0).hint_text("or type a folder path"));
+        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(eframe::egui::Key::Enter));
+        if ui.button("Open").clicked() || enter { state.open_typed_directory(); }
+    });
 }

@@ -281,9 +281,7 @@ fn show_project_menu(ui: &mut egui::Ui, state: &mut AppState) {
 
     ui.separator();
     if ui.button("Open Folder…").clicked() {
-        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-            state.set_directory(dir);
-        }
+        state.pick_directory(ui.ctx());
         ui.close_menu();
     }
 }
@@ -435,10 +433,10 @@ fn show_empty_state_no_directory(ui: &mut egui::Ui, state: &mut AppState) {
             )
             .clicked()
         {
-            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                state.set_directory(dir);
-            }
+            state.pick_directory(ui.ctx());
         }
+        ui.add_space(10.0);
+        crate::app::directory_path_entry(ui, state);
     });
 }
 
