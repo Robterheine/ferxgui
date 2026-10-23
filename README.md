@@ -288,6 +288,14 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.10.8 (2026-10-23) — Linux: no file dialog can freeze or silently fail the window
+
+- **Fixed (Linux): "Open Folder…" could do nothing.** The 0.10.6 fix kept an "a dialog is open" flag, so if the dialog never appeared (hidden behind the window over X forwarding, or no GTK available) every later click was ignored.
+- **All file dialogs now go through one service that never blocks the UI thread on Linux.** This covers every "Choose data file…" and "Browse…" button (Models, Simulate, VPC, Sim Plot, the Evaluation dataset locator, Settings → Rscript) and every export (GOF figure, Files plot, Sim Plot, bundle "Save entry as…"). They all used the same blocking call and could freeze the window the same way. Exports now render to a temporary file first and copy it to the place you choose.
+- **A second click after 10 seconds opens a fresh dialog**, and before that the status bar says a dialog is already open (it may be behind the window). A dialog that fails at once is reported ("could not be shown … type the path instead where the screen offers a path box"). The working-directory screen and Settings have a typed-path box; the other buttons do not.
+- **Opening files and folders no longer waits for `xdg-open`** (`open::that` blocks on Linux until it exits and can hang the same way).
+- Not verified on Linux by me: macOS and Windows keep their native dialogs and are unchanged.
+
 ### v0.10.7 (2026-10-23) — unlimited concurrent runs
 
 - **Run as many fits at once as you like.** *Settings → Concurrent Runs → Max concurrent fits* now has an **Unlimited** option (type `0` or `u`), and a number can go up to 64 (it was capped at 16). Fresh installs start Unlimited; an existing settings file keeps its saved value, so **set it to Unlimited in Settings** if it was 1. When the limit is reached the greyed-out Run button now says where to raise it.
