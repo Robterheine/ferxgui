@@ -1864,12 +1864,11 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
                                 .truncate(),
                             );
                             if ui.small_button("Browse…").clicked() {
-                                if let Some(p) = rfd::FileDialog::new()
-                                    .add_filter("CSV / NONMEM", &["csv", "txt"])
-                                    .pick_file()
-                                {
-                                    state.ui.run_data_path = Some(p);
-                                }
+                                crate::dialogs::request("run_data",
+                                    crate::dialogs::Spec::open_file().filter("CSV / NONMEM", &["csv", "txt"]), ui.ctx());
+                            }
+                            if let Some(p) = crate::dialogs::take("run_data") {
+                                state.ui.run_data_path = Some(p);
                             }
                         }
                     });
@@ -4451,7 +4450,7 @@ fn apply_ctx_action(
                 if let Some(parent) = m.model.path.parent() {
                     let log = parent.join(format!("{}_run.log", m.model.stem));
                     if log.exists() {
-                        if let Err(e) = open::that(&log) {
+                        if let Err(e) = open::that_detached(&log) {
                             state.ui.status_message = format!("Could not open log: {e}");
                         }
                     } else {

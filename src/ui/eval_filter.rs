@@ -371,11 +371,15 @@ pub fn show_gof_controls(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
     state.ui.eval_vars = table;
     state.ui.eval_views.insert(stem.clone(), view);
 
+    // Keyed by model, so a late answer is applied to the model it was asked for.
+    let dialog_id = format!("eval_dataset:{stem}");
     if locate {
-        if let Some(p) = rfd::FileDialog::new().add_filter("Dataset", &["csv", "txt", "dat"]).pick_file() {
-            state.ui.eval_dataset_override.insert(stem, p);
-            state.ui.eval_loaded_stem = None; // reload with the chosen dataset
-        }
+        crate::dialogs::request(&dialog_id,
+            crate::dialogs::Spec::open_file().filter("Dataset", &["csv", "txt", "dat"]), ui.ctx());
+    }
+    if let Some(p) = crate::dialogs::take(&dialog_id) {
+        state.ui.eval_dataset_override.insert(stem, p);
+        state.ui.eval_loaded_stem = None; // reload with the chosen dataset
     }
 }
 

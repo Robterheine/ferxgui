@@ -56,19 +56,28 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         let y_lbl = if state.sim.y_label.trim().is_empty() { state.sim.y_col.clone() }
                     else { state.sim.y_label.clone() };
         if let Some(result) = &state.sim.result.clone() {
-            if let Some(path) = rfd::FileDialog::new()
-                .set_file_name("sim_plot.png")
-                .add_filter("PNG image", &["png"])
-                .save_file()
-            {
-                match export_publication_png(&state.sim, result, &path, &x_lbl, &y_lbl) {
-                    Ok(()) => {
-                        if let Err(e) = open::that(&path) {
-                            state.ui.status_message = format!("Sim plot saved (could not open: {e})");
-                        }
-                    }
-                    Err(e) => { state.ui.status_message = format!("Sim plot export failed: {e}"); }
+            // Render first (to a temp file), then ask where to put it: the dialog runs off the UI thread.
+            let tmp = std::env::temp_dir().join(format!("ferxgui_sim_fig_{}.png", std::process::id()));
+            match export_publication_png(&state.sim, result, &tmp, &x_lbl, &y_lbl) {
+                Ok(()) => {
+                    state.ui.sim_fig_tmp = Some(tmp);
+                    crate::dialogs::request("sim_fig",
+                        crate::dialogs::Spec::save_file("sim_plot.png").filter("PNG image", &["png"]), ui.ctx());
                 }
+                Err(e) => { state.ui.status_message = format!("Sim plot export failed: {e}"); }
+            }
+        }
+    }
+    if let Some(path) = crate::dialogs::take("sim_fig") {
+        if let Some(tmp) = state.ui.sim_fig_tmp.take() {
+            match std::fs::copy(&tmp, &path) {
+                Ok(_) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    if let Err(e) = open::that_detached(&path) {
+                        state.ui.status_message = format!("Sim plot saved (could not open: {e})");
+                    }
+                }
+                Err(e) => { state.ui.status_message = format!("Sim plot export failed: {e}"); }
             }
         }
     }
@@ -177,9 +186,10 @@ fn show_cards(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
             if ui.add(
                 egui::Button::new("…").min_size(egui::vec2(28.0, 22.0))
             ).on_hover_text("Browse").clicked() {
-                if let Some(p) = rfd::FileDialog::new().pick_file() {
-                    state.sim.file_path = p.to_string_lossy().to_string();
-                }
+                crate::dialogs::request("simplot_file", crate::dialogs::Spec::open_file(), ui.ctx());
+            }
+            if let Some(p) = crate::dialogs::take("simplot_file") {
+                state.sim.file_path = p.to_string_lossy().to_string();
             }
             if ui.add(
                 egui::Button::new(egui::RichText::new("Load").size(12.0))
@@ -461,9 +471,10 @@ fn show_cards(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
                     .desired_width(ew),
             );
             if ui.add(egui::Button::new("…").min_size(egui::vec2(28.0, 22.0))).clicked() {
-                if let Some(p) = rfd::FileDialog::new().pick_file() {
-                    state.sim.obs_path = p.to_string_lossy().to_string();
-                }
+                crate::dialogs::request("simplot_obs", crate::dialogs::Spec::open_file(), ui.ctx());
+            }
+            if let Some(p) = crate::dialogs::take("simplot_obs") {
+                state.sim.obs_path = p.to_string_lossy().to_string();
             }
             if ui.add(
                 egui::Button::new(egui::RichText::new("Load").size(12.0))

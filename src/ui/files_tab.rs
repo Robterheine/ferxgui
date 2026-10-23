@@ -563,6 +563,15 @@ fn show_table_view(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
 // ── Plot view ─────────────────────────────────────────────────────────────────
 
 fn show_plot_view(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
+    // A figure rendered for export waits here until the user has chosen where to save it.
+    if let Some(dest) = crate::dialogs::take("files_fig") {
+        if let Some(tmp) = state.ui.files_fig_tmp.take() {
+            state.ui.status_message = match std::fs::copy(&tmp, &dest) {
+                Ok(_) => { let _ = std::fs::remove_file(&tmp); format!("Figure saved to {}", dest.display()) }
+                Err(e) => format!("Figure export failed: {e}"),
+            };
+        }
+    }
     if state.ui.files_csv_headers.is_empty() { return; }
 
     let headers = state.ui.files_csv_headers.clone();
@@ -746,14 +755,16 @@ fn show_plot_view(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
             loess: loess_line.clone(),
             linear: linear.map(|f| (f.line(x_min, x_max), f.label())),
         };
+        // Render first (to a temp file), then ask where to put it: the dialog runs off the UI thread.
         let default_name = format!("{}_vs_{}.png", y_col, x_col);
-        if let Some(path) = rfd::FileDialog::new().set_file_name(default_name)
-            .add_filter("PNG image", &["png"]).save_file()
-        {
-            state.ui.status_message = match export_files_plot_png(&spec, &path) {
-                Ok(()) => format!("Figure saved to {}", path.display()),
-                Err(e) => format!("Figure export failed: {e}"),
-            };
+        let tmp = std::env::temp_dir().join(format!("ferxgui_fig_{}.png", std::process::id()));
+        match export_files_plot_png(&spec, &tmp) {
+            Ok(()) => {
+                state.ui.files_fig_tmp = Some(tmp);
+                crate::dialogs::request("files_fig",
+                    crate::dialogs::Spec::save_file(default_name).filter("PNG image", &["png"]), ui.ctx());
+            }
+            Err(e) => state.ui.status_message = format!("Figure export failed: {e}"),
         }
     }
 

@@ -299,10 +299,11 @@ fn show_options(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
         ).truncate());
         ui.add_space(4.0);
         if ui.button("Choose data file…").clicked() {
-            if let Some(p) = rfd::FileDialog::new().add_filter("CSV", &["csv"]).pick_file() {
-                state.ui.vpc_data_cols = read_csv_header(&p);
-                state.ui.vpc_data_path = Some(p);
-            }
+            crate::dialogs::request("vpc_data", crate::dialogs::Spec::open_file().filter("CSV", &["csv"]), ui.ctx());
+        }
+        if let Some(p) = crate::dialogs::take("vpc_data") {
+            state.ui.vpc_data_cols = read_csv_header(&p);
+            state.ui.vpc_data_path = Some(p);
         }
         // Lazy-load column list if not yet populated.
         if state.ui.vpc_data_cols.is_empty() {

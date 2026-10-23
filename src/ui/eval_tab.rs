@@ -1277,6 +1277,9 @@ fn show_iofv_waterfall(ui: &mut egui::Ui, state: &AppState, dark: bool) {
 // ── Export dialog ─────────────────────────────────────────────────────────────
 
 fn show_export_dialog(ctx: &egui::Context, state: &mut AppState, model_idx: usize) {
+    if let Some(out_path) = crate::dialogs::take("gof_export") {
+        finish_gof_export(ctx, state, out_path);
+    }
     if !state.ui.eval_export_dialog { return; }
 
     let mut close   = false;
@@ -1378,120 +1381,126 @@ fn show_export_dialog(ctx: &egui::Context, state: &mut AppState, model_idx: usiz
         let stem = state.workspace.models[model_idx].model.stem.clone();
         let default_name = format!("{stem}_gof.{ext}");
 
-        let save_path = rfd::FileDialog::new()
-            .set_file_name(&default_name)
-            .add_filter("Figure", &[ext])
-            .save_file();
+        // Ask where to save; the dialog runs off the UI thread and `finish_gof_export` continues
+        // when it returns. The model is remembered so a late answer is not applied to another one.
+        state.ui.eval_export_for = state.ui.eval_loaded_stem.clone();
+        crate::dialogs::request("gof_export",
+            crate::dialogs::Spec::save_file(default_name).filter("Figure", &[ext]), ctx);
+    }
+}
 
-        if let Some(out_path) = save_path {
-            // Write predictions CSV to a temp file. Only the rows the on-screen filters
-            // keep are exported, with the colour group as an extra column.
-            let pred_rows = match &state.ui.eval_data {
-                Some(d) => d.rows.clone(),
-                None    => return,
-            };
-            let tmp_csv = match crate::io::r_extract::unique_temp_path("ferxgui_gof_export", "csv") {
-                Ok(p) => p,
-                Err(e) => {
-                    state.ui.status_message = format!("Export failed: {e}");
-                    return;
-                }
-            };
-            let col1 = state.ui.eval_cwres_x_col.clone();
-            let col2 = state.ui.eval_cwres_x_col_2.clone();
-
-            let view_key = state.ui.eval_loaded_stem.clone().unwrap_or_default();
-            let view = state.ui.eval_views.get(&view_key);
-            let gv = match view {
-                Some(v) => super::eval_filter::GofView::from_settings(
-                    v, state.ui.eval_vars.as_ref(), pred_rows.len(), false),
-                None => super::eval_filter::GofView::plain(pred_rows.len(), false),
-            };
-            if gv.n_kept() == 0 {
-                state.ui.status_message = "Export skipped: no observations match the current filters".to_string();
+/// Second half of the GOF export, once the user has chosen the output file.
+fn finish_gof_export(ctx: &egui::Context, state: &mut AppState, out_path: std::path::PathBuf) {
+    if state.ui.eval_export_for != state.ui.eval_loaded_stem {
+        state.ui.status_message = "Export cancelled: the model on screen changed while choosing the file".to_string();
+        return;
+    }
+        // Write predictions CSV to a temp file. Only the rows the on-screen filters
+        // keep are exported, with the colour group as an extra column.
+        let pred_rows = match &state.ui.eval_data {
+            Some(d) => d.rows.clone(),
+            None    => return,
+        };
+        let tmp_csv = match crate::io::r_extract::unique_temp_path("ferxgui_gof_export", "csv") {
+            Ok(p) => p,
+            Err(e) => {
+                state.ui.status_message = format!("Export failed: {e}");
                 return;
             }
-            let export_color = match (&gv.grouping, view.and_then(|v| v.color_by.clone())) {
-                (Some(g), Some(name)) => Some(crate::io::r_extract::GofExportColor {
-                    name,
-                    levels: g.labels.clone(),
-                    continuous: g.continuous,
-                    per_group_loess: gv.per_group_loess,
-                }),
-                _ => None,
-            };
+        };
+        let col1 = state.ui.eval_cwres_x_col.clone();
+        let col2 = state.ui.eval_cwres_x_col_2.clone();
 
-            // Any covariate the on-screen plot can show as an x-axis must
-            // also reach the exported CSV, or the R script's column-name
-            // lookup silently falls back to TIME (see `safe_col` in
-            // GOF_EXPORT_R) — the export would then quietly not match what's
-            // selected on screen instead of erroring.
-            const FIXED_COLS: [&str; 4] = ["TIME", "PRED", "IPRED", "TAD"];
-            let covtab = state.ui.eval_covtab.as_ref();
-            let extra_cov_cols: Vec<&str> = [col1.as_str(), col2.as_str()].into_iter()
-                .filter(|c| !FIXED_COLS.contains(c))
-                .collect::<std::collections::BTreeSet<_>>()
-                .into_iter()
-                .collect();
-
-            if let Ok(mut wtr) = csv::Writer::from_path(&tmp_csv) {
-                let mut header: Vec<&str> =
-                    vec!["ID", "TIME", "DV", "PRED", "IPRED", "CWRES", "IWRES", "TAD"];
-                header.extend(&extra_cov_cols);
-                if export_color.is_some() { header.push("COLOR_GROUP"); }
-                let _ = wtr.write_record(&header);
-                for (i, r) in pred_rows.iter().enumerate() {
-                    if !gv.is_kept(i) { continue; }
-                    let ty = state.ui.eval_y_transform;
-                    let mut record: Vec<String> = vec![
-                        r.id.clone(),
-                        r.time.to_string(),  ty.apply(r.dv).to_string(),
-                        ty.apply(r.pred).to_string(),  ty.apply(r.ipred).to_string(),
-                        r.cwres.to_string(), r.iwres.to_string(),
-                        r.tad.to_string(),
-                    ];
-                    for name in &extra_cov_cols {
-                        let v = covtab.and_then(|c| c.lookup(&r.id, r.time, name))
-                            .unwrap_or(f64::NAN);
-                        record.push(v.to_string());
-                    }
-                    if let Some(g) = &gv.grouping {
-                        let k = g.group.get(i).copied().unwrap_or(crate::domain::NO_GROUP) as usize;
-                        record.push(g.labels.get(k).cloned().unwrap_or_default());
-                    }
-                    let _ = wtr.write_record(&record);
-                }
-                let _ = wtr.flush();
-            }
-
-            let y_token     = state.ui.eval_y_transform.token();
-            let tx          = state.worker_tx.clone();
-            let ctx_cl      = ctx.clone();
-            let format      = state.ui.eval_export_format.clone();
-            let width       = state.ui.eval_export_width_mm;
-            let loess       = state.ui.eval_export_loess;
-            let ci          = state.ui.eval_export_ci_lines;
-
-            state.ui.status_message = "Exporting figure…".to_string();
-            state.ui.eval_exporting = true;
-
-            crate::util::spawn_guarded("eval_tab:1478", tx.clone(), move || {
-                let result = crate::io::r_extract::export_gof(
-                    &tmp_csv, &out_path, &format, width,
-                    &col1, &col2, loess, ci, export_color.as_ref(), y_token);
-                let _ = std::fs::remove_file(&tmp_csv);
-                match result {
-                    Ok(path) => {
-                        let _ = tx.send(crate::workers::messages::WorkerMsg::GofExportComplete { path });
-                    }
-                    Err(e) => {
-                        let _ = tx.send(crate::workers::messages::WorkerMsg::GofExportError { message: e });
-                    }
-                }
-                ctx_cl.request_repaint();
-            });
+        let view_key = state.ui.eval_loaded_stem.clone().unwrap_or_default();
+        let view = state.ui.eval_views.get(&view_key);
+        let gv = match view {
+            Some(v) => super::eval_filter::GofView::from_settings(
+                v, state.ui.eval_vars.as_ref(), pred_rows.len(), false),
+            None => super::eval_filter::GofView::plain(pred_rows.len(), false),
+        };
+        if gv.n_kept() == 0 {
+            state.ui.status_message = "Export skipped: no observations match the current filters".to_string();
+            return;
         }
-    }
+        let export_color = match (&gv.grouping, view.and_then(|v| v.color_by.clone())) {
+            (Some(g), Some(name)) => Some(crate::io::r_extract::GofExportColor {
+                name,
+                levels: g.labels.clone(),
+                continuous: g.continuous,
+                per_group_loess: gv.per_group_loess,
+            }),
+            _ => None,
+        };
+
+        // Any covariate the on-screen plot can show as an x-axis must
+        // also reach the exported CSV, or the R script's column-name
+        // lookup silently falls back to TIME (see `safe_col` in
+        // GOF_EXPORT_R) — the export would then quietly not match what's
+        // selected on screen instead of erroring.
+        const FIXED_COLS: [&str; 4] = ["TIME", "PRED", "IPRED", "TAD"];
+        let covtab = state.ui.eval_covtab.as_ref();
+        let extra_cov_cols: Vec<&str> = [col1.as_str(), col2.as_str()].into_iter()
+            .filter(|c| !FIXED_COLS.contains(c))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+
+        if let Ok(mut wtr) = csv::Writer::from_path(&tmp_csv) {
+            let mut header: Vec<&str> =
+                vec!["ID", "TIME", "DV", "PRED", "IPRED", "CWRES", "IWRES", "TAD"];
+            header.extend(&extra_cov_cols);
+            if export_color.is_some() { header.push("COLOR_GROUP"); }
+            let _ = wtr.write_record(&header);
+            for (i, r) in pred_rows.iter().enumerate() {
+                if !gv.is_kept(i) { continue; }
+                let ty = state.ui.eval_y_transform;
+                let mut record: Vec<String> = vec![
+                    r.id.clone(),
+                    r.time.to_string(),  ty.apply(r.dv).to_string(),
+                    ty.apply(r.pred).to_string(),  ty.apply(r.ipred).to_string(),
+                    r.cwres.to_string(), r.iwres.to_string(),
+                    r.tad.to_string(),
+                ];
+                for name in &extra_cov_cols {
+                    let v = covtab.and_then(|c| c.lookup(&r.id, r.time, name))
+                        .unwrap_or(f64::NAN);
+                    record.push(v.to_string());
+                }
+                if let Some(g) = &gv.grouping {
+                    let k = g.group.get(i).copied().unwrap_or(crate::domain::NO_GROUP) as usize;
+                    record.push(g.labels.get(k).cloned().unwrap_or_default());
+                }
+                let _ = wtr.write_record(&record);
+            }
+            let _ = wtr.flush();
+        }
+
+        let y_token     = state.ui.eval_y_transform.token();
+        let tx          = state.worker_tx.clone();
+        let ctx_cl      = ctx.clone();
+        let format      = state.ui.eval_export_format.clone();
+        let width       = state.ui.eval_export_width_mm;
+        let loess       = state.ui.eval_export_loess;
+        let ci          = state.ui.eval_export_ci_lines;
+
+        state.ui.status_message = "Exporting figure…".to_string();
+        state.ui.eval_exporting = true;
+
+        crate::util::spawn_guarded("eval_tab:1478", tx.clone(), move || {
+            let result = crate::io::r_extract::export_gof(
+                &tmp_csv, &out_path, &format, width,
+                &col1, &col2, loess, ci, export_color.as_ref(), y_token);
+            let _ = std::fs::remove_file(&tmp_csv);
+            match result {
+                Ok(path) => {
+                    let _ = tx.send(crate::workers::messages::WorkerMsg::GofExportComplete { path });
+                }
+                Err(e) => {
+                    let _ = tx.send(crate::workers::messages::WorkerMsg::GofExportError { message: e });
+                }
+            }
+            ctx_cl.request_repaint();
+        });
 }
 
 fn legend_dot(ui: &mut egui::Ui, color: egui::Color32, label: &str) {

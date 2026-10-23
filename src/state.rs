@@ -405,9 +405,12 @@ pub struct UiState {
     pub editor_dirty: bool,
     /// Which model stem is currently loaded in the editor (used to detect selection change).
     pub editor_loaded_stem: Option<String>,
-    /// A folder dialog is open (Linux runs it on a worker thread so a dialog that never appears
-    /// cannot freeze the window); ignore further clicks until it returns.
-    pub folder_dialog_open: bool,
+    /// The model whose GOF figure export is waiting for a file name.
+    pub eval_export_for: Option<String>,
+    /// A figure rendered to a temporary file, waiting for the user to pick where to save it.
+    pub files_fig_tmp: Option<PathBuf>,
+    /// Same for the Sim Plot figure.
+    pub sim_fig_tmp: Option<PathBuf>,
     /// Text of the "type a folder path" fallback.
     pub dir_path_input: String,
     /// Validation findings for a just-created template, shown until dismissed.
@@ -771,7 +774,9 @@ impl Default for UiState {
             editor_dirty: false,
             lrt_nested: false,
             new_model_notice: None,
-            folder_dialog_open: false,
+            eval_export_for: None,
+            files_fig_tmp: None,
+            sim_fig_tmp: None,
             dir_path_input: String::new(),
             editor_switch_target: None,
             editor_overwrite_ok: false,
@@ -1645,7 +1650,7 @@ impl AppState {
                 // clearing the whole map is simpler than threading a stem
                 // through this message just to remove one key.
                 self.workspace.vpc_export_error.clear();
-                if let Err(e) = open::that(&path) {
+                if let Err(e) = open::that_detached(&path) {
                     self.ui.status_message = format!("Exported R ggplot → {path} (could not open: {e})");
                 } else {
                     self.ui.status_message = format!("Opened R ggplot → {path}");
@@ -1787,12 +1792,7 @@ impl AppState {
                 self.ui.status_message = format!("Covariate screen ready: {stem}");
                 self.workspace.cov_screen_results.insert(stem, *result);
             }
-            FolderPicked(dir) => {
-                self.ui.folder_dialog_open = false;
-                if let Some(d) = dir { self.set_directory(d); }
-            }
             RTaskError { context, message } => {
-                if context == "pick_folder" { self.ui.folder_dialog_open = false; }
                 // Clean up in-flight tracking if stem is encoded in the context.
                 // For inspect, also mark as failed so we don't auto-retry every frame.
                 if let Some(stem) = context.strip_prefix("inspect ") {
@@ -1903,28 +1903,20 @@ impl AppState {
         });
     }
 
-    /// Ask the user for a working directory. On Linux the dialog runs on a worker thread and the
-    /// result arrives as `FolderPicked`; a dialog that fails to appear (no GTK, no display) leaves
-    /// the window responsive. Elsewhere the native dialog is used directly.
+    /// Ask the user for a working directory. The chosen folder is applied by `poll_dialogs`
+    /// (see `crate::dialogs`); the dialog never blocks the UI thread on Linux.
     pub fn pick_directory(&mut self, ctx: &eframe::egui::Context) {
-        #[cfg(target_os = "linux")]
-        {
-            if self.ui.folder_dialog_open { return; }
-            self.ui.folder_dialog_open = true;
-            self.ui.status_message = "Waiting for the folder dialog…".into();
-            let tx = self.worker_tx.clone();
-            let ctx = ctx.clone();
-            crate::util::spawn_guarded("pick_folder", tx.clone(), move || {
-                let dir = rfd::FileDialog::new().pick_folder();
-                let _ = tx.send(WorkerMsg::FolderPicked(dir));
-                ctx.request_repaint();
-            });
+        crate::dialogs::request("workdir", crate::dialogs::Spec::folder(), ctx);
+    }
+
+    /// Collect finished dialogs that act on global state (call once per frame) and surface any
+    /// message about a dialog that could not be shown.
+    pub fn poll_dialogs(&mut self) {
+        if let Some(dir) = crate::dialogs::take("workdir") { self.set_directory(dir); }
+        if crate::dialogs::pending("workdir") {
+            self.ui.status_message = "Waiting for the folder dialog… (if it does not appear, type the path in the box)".into();
         }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = ctx;
-            if let Some(dir) = rfd::FileDialog::new().pick_folder() { self.set_directory(dir); }
-        }
+        if let Some(note) = crate::dialogs::take_note() { self.ui.status_message = note; }
     }
 
     /// Open the folder typed into the fallback box; reports a problem instead of failing silently.

@@ -503,7 +503,7 @@ fn show_detail(
                     .on_hover_text("Open in Finder / Explorer")
                     .clicked()
                 {
-                    if let Err(e) = open::that(&rec.directory) {
+                    if let Err(e) = open::that_detached(&rec.directory) {
                         *status_msg = format!("Could not open folder: {e}");
                     }
                 }

@@ -3,6 +3,7 @@
 #![allow(clippy::too_many_arguments)]
 
 mod app;
+mod dialogs;
 mod domain;
 mod io;
 mod notify;

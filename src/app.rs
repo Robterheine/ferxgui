@@ -410,6 +410,7 @@ impl eframe::App for FerxApp {
         show_quit_unsaved_dialog(ctx, &mut self.state);
 
         write_drafts(&mut self.state);
+        self.state.poll_dialogs();
 
         // Drain worker messages first.
         self.state.process_worker_messages();
@@ -666,7 +667,7 @@ fn render_header(ctx: &egui::Context, state: &mut AppState) {
                         && ui.small_button("Open RStudio").clicked()
                     {
                         if let Some(path) = &state.workspace.settings.rstudio_path {
-                            if let Err(e) = open::that(path) {
+                            if let Err(e) = open::that_detached(path) {
                                 state.ui.status_message = format!("Could not open RStudio: {e}");
                             }
                         }
@@ -1017,12 +1018,13 @@ fn render_settings(ui: &mut egui::Ui, state: &mut AppState) {
             // Browse (to Rscript) + optional Reset
             ui.horizontal(|ui| {
                 if ui.button("Browse to Rscript…").clicked() {
-                    if let Some(path) = rfd::FileDialog::new().pick_file() {
-                        state.workspace.settings.ferx_binary = Some(path);
-                        state.workspace.settings.ferx_binary_custom = true;
-                        state.workspace.ferx_binary_source = FerxBinarySource::Custom;
-                        if let Some(w) = state.workspace.save_settings() { state.ui.status_message = w; }
-                    }
+                    crate::dialogs::request("rscript", crate::dialogs::Spec::open_file(), ui.ctx());
+                }
+                if let Some(path) = crate::dialogs::take("rscript") {
+                    state.workspace.settings.ferx_binary = Some(path);
+                    state.workspace.settings.ferx_binary_custom = true;
+                    state.workspace.ferx_binary_source = FerxBinarySource::Custom;
+                    if let Some(w) = state.workspace.save_settings() { state.ui.status_message = w; }
                 }
 
                 if state.workspace.ferx_binary_source == FerxBinarySource::Custom {
@@ -1994,7 +1996,7 @@ fn save_tree_png(
         Some(img) => {
             if let Err(e) = img.save(&path) {
                 state.ui.status_message = format!("Tree export failed: {e}");
-            } else if let Err(e) = open::that(&path) {
+            } else if let Err(e) = open::that_detached(&path) {
                 state.ui.status_message = format!("Tree saved to {} (could not open: {e})", path.display());
             } else {
                 state.ui.status_message = format!("Tree exported → {}", path.display());

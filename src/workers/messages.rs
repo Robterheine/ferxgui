@@ -57,10 +57,6 @@ pub enum WorkerMsg {
     VpcPlotExported { path: String },
 
     /// A new model file was created from a template; triggers a directory rescan.
-    /// The folder chooser (run off the UI thread on Linux) finished; None = cancelled.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // only the Linux dialog thread sends it
-    FolderPicked(Option<std::path::PathBuf>),
-
     /// A model was created from a template; `warnings` are ferx's validation findings for it.
     ModelCreated { stem: String, warnings: Vec<String> },
 

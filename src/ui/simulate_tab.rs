@@ -166,9 +166,10 @@ fn show_options(ui: &mut egui::Ui, state: &mut AppState, idx: usize, has_fitrx: 
         ).truncate());
         ui.add_space(4.0);
         if ui.button("Choose data file…").clicked() {
-            if let Some(p) = rfd::FileDialog::new().add_filter("CSV", &["csv"]).pick_file() {
-                state.ui.simrun_data_path = Some(p);
-            }
+            crate::dialogs::request("simrun_data", crate::dialogs::Spec::open_file().filter("CSV", &["csv"]), ui.ctx());
+        }
+        if let Some(p) = crate::dialogs::take("simrun_data") {
+            state.ui.simrun_data_path = Some(p);
         }
     });
 
@@ -304,13 +305,11 @@ fn show_options(ui: &mut egui::Ui, state: &mut AppState, idx: usize, has_fitrx: 
         }
         ui.add_space(4.0);
         if ui.button("Choose…").clicked() {
-            if let Some(p) = rfd::FileDialog::new()
-                .add_filter("CSV", &["csv"])
-                .set_file_name("sim_output.csv")
-                .save_file()
-            {
-                state.ui.simrun_out_path = p.to_string_lossy().into_owned();
-            }
+            crate::dialogs::request("simrun_out",
+                crate::dialogs::Spec::save_file("sim_output.csv").filter("CSV", &["csv"]), ui.ctx());
+        }
+        if let Some(p) = crate::dialogs::take("simrun_out") {
+            state.ui.simrun_out_path = p.to_string_lossy().into_owned();
         }
     });
 }

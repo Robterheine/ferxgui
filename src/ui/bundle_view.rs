@@ -29,13 +29,15 @@ pub struct BundleViewState {
     pub json_filter: String,
     /// One-line result of the last action (save entry, copy ...).
     pub status: String,
+    /// An entry already extracted to a temporary file, waiting for the user to choose where to save it.
+    pub save_tmp: Option<(String, std::path::PathBuf)>,
 }
 
 impl BundleViewState {
     pub fn new(info: BundleInfo) -> Self {
         Self {
             info, section: BundleSection::Overview, data_check: FileCheck::NotChecked,
-            selected_entry: None, preview: None, json_filter: String::new(), status: String::new(),
+            selected_entry: None, preview: None, json_filter: String::new(), status: String::new(), save_tmp: None,
         }
     }
 }
@@ -567,10 +569,21 @@ fn show_contents(ui: &mut egui::Ui, bv: &mut BundleViewState, dark: bool) {
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(&name).color(theme::fg(dark)).size(12.0).strong());
         if ui.small_button("Save entry as…").clicked() {
-            if let Some(dest) = rfd::FileDialog::new().set_file_name(&name).save_file() {
-                bv.status = match bundle::extract_entry(&bv.info.path, &name, &dest) {
-                    Ok(()) => format!("Saved {name} to {}", dest.display()),
-                    Err(e) => format!("Could not save {name}: {e}"),
+            // Extract first (to a temp file), then ask where to put it: the dialog runs off the UI thread.
+            let tmp = std::env::temp_dir().join(format!("ferxgui_entry_{}.tmp", std::process::id()));
+            match bundle::extract_entry(&bv.info.path, &name, &tmp) {
+                Ok(()) => {
+                    bv.save_tmp = Some((name.clone(), tmp));
+                    crate::dialogs::request("bundle_entry", crate::dialogs::Spec::save_file(name.clone()), ui.ctx());
+                }
+                Err(e) => bv.status = format!("Could not save {name}: {e}"),
+            }
+        }
+        if let Some(dest) = crate::dialogs::take("bundle_entry") {
+            if let Some((saved_name, tmp)) = bv.save_tmp.take() {
+                bv.status = match std::fs::copy(&tmp, &dest) {
+                    Ok(_) => { let _ = std::fs::remove_file(&tmp); format!("Saved {saved_name} to {}", dest.display()) }
+                    Err(e) => format!("Could not save {saved_name}: {e}"),
                 };
             }
         }
