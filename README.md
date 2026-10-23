@@ -288,6 +288,12 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.10.6 (2026-10-23) — Linux: folder dialog no longer freezes over X forwarding
+
+- **Fixed (Linux): choosing a working directory froze the program over X forwarding** (MobaXterm, `ssh -X`). The default dialog backend needs a D-Bus session and portal service, which are absent there, and the call blocked the whole window. File dialogs now use GTK 3 on Linux (`libgtk-3-0` must be installed; Ubuntu desktops have it), and the folder chooser runs on a worker thread, so a dialog that does not appear cannot freeze the window.
+- **Type a path instead:** the "no working directory" screen and Settings have a box to type a folder path and press Open, for when no dialog can be shown.
+- macOS and Windows are unchanged (native dialogs).
+
 ### v0.10.5 (2026-10-21) — Files plot: linear trendline
 
 - **Files plot:** a **Linear fit** option next to LOESS draws an ordinary least-squares line through the plotted points, with its equation, R² and n in the legend (fitted on the log10 values when an axis is log). It is included in the exported figure. It needs at least 3 points with some spread in X.
