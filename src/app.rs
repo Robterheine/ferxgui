@@ -1059,7 +1059,13 @@ fn render_settings(ui: &mut egui::Ui, state: &mut AppState) {
             ui.horizontal(|ui| {
                 ui.label("Max concurrent fits:");
                 let mut max_concurrent = state.workspace.settings.max_concurrent_runs;
-                if ui.add(egui::DragValue::new(&mut max_concurrent).range(1..=16)).changed() {
+                if ui.add(egui::DragValue::new(&mut max_concurrent).range(0..=64)
+                    .custom_formatter(|n, _| if n == 0.0 { "Unlimited".to_string() } else { format!("{n}") })
+                    .custom_parser(|s| {
+                        let t = s.trim();
+                        if t.eq_ignore_ascii_case("unlimited") || t.eq_ignore_ascii_case("u") { Some(0.0) } else { t.parse::<f64>().ok() }
+                    })).changed()
+                {
                     state.workspace.settings.max_concurrent_runs = max_concurrent;
                     if let Some(w) = state.workspace.save_settings() { state.ui.status_message = w; }
                 }
@@ -1067,8 +1073,9 @@ fn render_settings(ui: &mut egui::Ui, state: &mut AppState) {
             ui.add_space(4.0);
             ui.label(
                 egui::RichText::new(
-                    "How many ferx fits may run at the same time. Default 1 matches earlier \
-                     behaviour — raise it to fit several models in parallel."
+                    "How many ferx fits may run at the same time. Unlimited (0) starts every run \
+                     you ask for at once; a number caps it and extra runs wait in the queue. \
+                     Each model can have one run at a time (they share one results file)."
                 )
                 .color(theme::fg3(ui.visuals().dark_mode))
                 .size(11.0),
@@ -1080,7 +1087,7 @@ fn render_settings(ui: &mut egui::Ui, state: &mut AppState) {
             // the actual default as cores − 1, capped at 8, not "every core").
             let cores = std::thread::available_parallelism().map(std::num::NonZeroUsize::get).unwrap_or(1);
             if let Some(warning) = oversubscription_warning(
-                state.workspace.settings.max_concurrent_runs,
+                state.workspace.settings.effective_max_runs(),
                 state.ui.run_threads,
                 cores,
             ) {
@@ -1132,6 +1139,14 @@ fn oversubscription_warning(max_concurrent: usize, threads: u32, cores: usize) -
     if max_concurrent <= 1 {
         return None;
     }
+    if max_concurrent == usize::MAX {
+        // Unlimited: no product to compute; say what happens when many fits start together.
+        return Some(format!(
+            "Unlimited concurrent fits: every run you start begins immediately. With threads on \
+             \"auto\" each fit may claim up to {} core(s) of this {cores}-core machine, so many at once \
+             will each run slower (and use more memory). Set a per-run thread count on the Run tab, \
+             or cap this number.", cores.saturating_sub(1).clamp(1, 8)));
+    }
     if threads == 0 {
         // ferx-r 0.3.0 documents the real "auto" default as cores − 1, capped at 8
         // (not "every core") — quote that estimate rather than the raw core count.
@@ -1182,6 +1197,13 @@ mod oversubscription_warning_tests {
     fn boundary_exactly_equal_to_core_count_is_not_a_warning() {
         // 4 * 2 == 8 cores exactly — fully subscribed, not OVER-subscribed.
         assert!(oversubscription_warning(4, 2, 8).is_none());
+    }
+
+    #[test]
+    fn unlimited_warns_without_overflowing() {
+        let w = oversubscription_warning(usize::MAX, 4, 8).unwrap();
+        assert!(w.contains("Unlimited"));
+        assert!(oversubscription_warning(usize::MAX, 0, 1).is_some());
     }
 }
 

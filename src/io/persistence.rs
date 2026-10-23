@@ -63,9 +63,9 @@ pub struct Settings {
     /// background R-package detection on the next launch.
     #[serde(default)]
     pub ferx_binary_custom: bool,
-    /// Maximum number of ferx fits allowed to run concurrently. Default 1
-    /// reproduces the previous strictly-sequential behaviour unchanged — the
-    /// user opts into running several at once.
+    /// Maximum number of ferx fits allowed to run concurrently; 0 = unlimited. A settings file
+    /// written before this field existed loads as 1 (the strictly-sequential behaviour it was saved
+    /// under); a fresh install starts unlimited.
     #[serde(default = "default_max_concurrent_runs")]
     pub max_concurrent_runs: usize,
 }
@@ -84,8 +84,18 @@ impl Default for Settings {
                 "csv".into(),
             ],
             ferx_binary_custom: false,
-            max_concurrent_runs: default_max_concurrent_runs(),
+            max_concurrent_runs: UNLIMITED_RUNS,
         }
+    }
+}
+
+/// `max_concurrent_runs` value meaning "no limit".
+pub const UNLIMITED_RUNS: usize = 0;
+
+impl Settings {
+    /// The number of fits that may run at once, with "unlimited" as `usize::MAX`.
+    pub fn effective_max_runs(&self) -> usize {
+        if self.max_concurrent_runs == UNLIMITED_RUNS { usize::MAX } else { self.max_concurrent_runs }
     }
 }
 
@@ -480,4 +490,14 @@ mod r_discovery_tests {
         assert_eq!(fb.rscript, PathBuf::from("/c/Rscript"));
         assert!(pick_best_r(vec![]).is_none());
     }
+
+    #[test]
+    fn fresh_settings_are_unlimited_and_zero_means_no_limit() {
+        let s = Settings::default();
+        assert_eq!(s.max_concurrent_runs, super::UNLIMITED_RUNS);
+        assert_eq!(s.effective_max_runs(), usize::MAX);
+        let two = Settings { max_concurrent_runs: 2, ..Settings::default() };
+        assert_eq!(two.effective_max_runs(), 2);
+    }
 }
+

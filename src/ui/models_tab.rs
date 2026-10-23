@@ -966,7 +966,7 @@ fn show_model_row_context_menu(
         // before.
         let this_running   = state.run.active_runs.contains_key(&row.stem);
         let active_count   = state.run.active_runs.len();
-        let max_concurrent = state.workspace.settings.max_concurrent_runs;
+        let max_concurrent = state.workspace.settings.effective_max_runs();
         let has_ferx       = state.workspace.settings.ferx_binary.is_some();
         let has_data       = resolve_data_path_for_run(state, &row.stem).is_some();
         let can_run = can_launch_run(
@@ -1993,7 +1993,7 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
             // ── Action buttons ──
             ui.horizontal(|ui| {
                 let active_count   = state.run.active_runs.len();
-                let max_concurrent = state.workspace.settings.max_concurrent_runs;
+                let max_concurrent = state.workspace.settings.effective_max_runs();
                 let has_ferx       = state.workspace.settings.ferx_binary.is_some();
                 let has_data       = state.ui.run_data_path.is_some();
                 let can_run = can_launch_run(
@@ -2583,7 +2583,7 @@ fn run_disabled_reason(
     if this_stem_running {
         Some("This model is already running")
     } else if active_count >= max_concurrent {
-        Some("All concurrent-run slots are busy — use + Queue to run it as soon as one frees up")
+        Some("All concurrent-run slots are busy — raise \"Max concurrent fits\" in Settings (or set it to Unlimited), or use + Queue to run it as soon as one frees up")
     } else if !has_ferx_binary {
         Some("ferx isn't configured — set the Rscript path in Settings")
     } else if !has_data_path {
@@ -2935,9 +2935,8 @@ fn next_startable_queue_index(
 /// Start queued runs until every concurrent-run slot is full or nothing left
 /// in the queue can start right now. Called every frame by the app update loop.
 pub fn advance_queue(state: &mut AppState) {
-    // Defensive floor: a hand-edited settings.json could set this to 0,
-    // which would otherwise stall the queue forever with no visible cause.
-    let max_concurrent = state.workspace.settings.max_concurrent_runs.max(1);
+    // 0 in settings means unlimited (see `Settings::effective_max_runs`).
+    let max_concurrent = state.workspace.settings.effective_max_runs();
     while state.run.active_runs.len() < max_concurrent {
         let running_stems: HashSet<String> = state.run.active_runs.keys().cloned().collect();
         let Some(idx) = next_startable_queue_index(&running_stems, &state.run.run_queue) else { break };
