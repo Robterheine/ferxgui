@@ -288,6 +288,14 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.10.9 (2026-11-06) — sigma on the model file's scale; variance and SD side by side
+
+- **Sigma is shown on the scale the model file declares.** ferx always returns the residual-error estimate as an SD, whatever the file says (checked on `~ 0.0001`, `~ 0.0001 (variance)` and `~ 0.01 (sd)`: all give 0.0105651), and records the declared scale as `sigma.init_as_sd`. A variance-declared sigma (the default; `(sd)` opts out) used to appear as an SD, and the Models tab compared a variance initial value with an SD estimate. It now appears as a variance, with the SE by the delta method (SE(σ²) = 2σ·SE(σ)); RSE% and the log-scale interval follow. Bundles that do not record the scale keep showing the SD.
+- **Both scales are visible.** For σ the declared scale comes first and the other sits beside it (`VARIANCE (σ²)` | `SD (σ)`, or the reverse); for ω the tables show `VARIANCE (ω²)` and `SD (ω)`. In the Models tab Parameters, Report tab, HTML report, bundle inspector and SIR table; hovering the second value shows its SE. The Compare dialog shows one scale (the shared one, or variance when the models differ).
+- **SIR:** the sigma intervals, histogram samples and correlations are put on the declared scale in the R script. A SIR result is tied to the declared scale, so the first run after this update on such a model is recomputed.
+- **Small values keep their digits in the tables** (values below 0.01 show four significant digits): a variance of 0.000112 printed as "0.0001" and its SE as "0.0000" before.
+- Omega is still always shown as a variance first, even if a model declares `omega … (sd)`.
+
 ### v0.10.8 (2026-10-23) — Linux: no file dialog can freeze or silently fail the window
 
 - **Fixed (Linux): "Open Folder…" could do nothing.** The 0.10.6 fix kept an "a dialog is open" flag, so if the dialog never appeared (hidden behind the window over X forwarding, or no GTK available) every later click was ignored.
