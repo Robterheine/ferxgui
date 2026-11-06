@@ -295,6 +295,19 @@ impl FitSummary {
     pub fn sigma_shown_vec(&self) -> Vec<f64> { (0..self.sigma.len()).map(|i| self.sigma_shown(i)).collect() }
     pub fn se_sigma_shown_vec(&self) -> Vec<f64> { (0..self.sigma.len()).map(|i| self.se_sigma_shown(i)).collect() }
 
+    /// Sigma `i` on the scale it is NOT shown on (SD when shown as a variance, and the reverse), so
+    /// both are visible side by side.
+    pub fn sigma_alt(&self, i: usize) -> f64 { self.sigma_in(i, !self.sigma_is_variance(i)) }
+    pub fn se_sigma_alt(&self, i: usize) -> f64 { self.se_sigma_in(i, !self.sigma_is_variance(i)) }
+
+    /// Column headings for the sigma estimate as shown, and on the other scale.
+    pub fn sigma_primary_header(&self) -> &'static str {
+        match self.sigma_scale_label() { "variance" => "VARIANCE (σ²)", "SD" => "SD (σ)", _ => "ESTIMATE" }
+    }
+    pub fn sigma_alt_header(&self) -> &'static str {
+        match self.sigma_scale_label() { "variance" => "SD (σ)", "SD" => "VARIANCE (σ²)", _ => "OTHER SCALE" }
+    }
+
     /// "variance", "SD" or "mixed": the scale(s) the sigmas are shown on, for headings.
     pub fn sigma_scale_label(&self) -> &'static str {
         let n = self.sigma.len();

@@ -203,8 +203,8 @@ fn show_theta_section(ui: &mut egui::Ui, fit: &FitSummary, dark: bool) {
 fn show_omega_section(ui: &mut egui::Ui, fit: &FitSummary, dark: bool) {
     section_header(ui, &format!("Between-Subject Variability — OMEGA  ({} ETA)", fit.n_eta), dark);
     if fit.n_eta == 0 { return; }
-    param_table(ui, "rpt_omega", 7, dark, |ui| {
-        for h in ["PARAM", "ESTIMATE", "SE", "RSE%", "95% CI LO", "95% CI HI", "SHRINKAGE%"] {
+    param_table(ui, "rpt_omega", 8, dark, |ui| {
+        for h in ["PARAM", "VARIANCE (ω²)", "SD (ω)", "SE (variance)", "RSE%", "95% CI LO", "95% CI HI", "SHRINKAGE%"] {
             ui.label(egui::RichText::new(h).size(10.0).color(theme::fg3(dark)).strong());
         }
         ui.end_row();
@@ -214,7 +214,7 @@ fn show_omega_section(ui: &mut egui::Ui, fit: &FitSummary, dark: bool) {
             let est  = fit.omega_value(i, i).unwrap_or(f64::NAN);
             let se   = fit.se_omega_diag(i).unwrap_or(f64::NAN);
             let shrink = fit.eta_shrinkage.get(i).copied();
-            param_row_omega(ui, &name, est, se, shrink, dark);
+            param_row_omega(ui, &name, est, est.max(0.0).sqrt(), se, shrink, dark);
         }
     });
 }
@@ -239,8 +239,8 @@ fn show_kappa_section(ui: &mut egui::Ui, fit: &FitSummary, dark: bool) {
 fn show_sigma_section(ui: &mut egui::Ui, fit: &FitSummary, dark: bool) {
     section_header(ui, &format!("Residual Error — SIGMA, {}  ({})", fit.sigma_scale_label(), fit.sigma.len()), dark);
     if fit.sigma.is_empty() { return; }
-    param_table(ui, "rpt_sigma", 7, dark, |ui| {
-        for h in ["PARAM", "ESTIMATE", "SE", "RSE%", "95% CI LO", "95% CI HI", "SHRINKAGE%"] {
+    param_table(ui, "rpt_sigma", 8, dark, |ui| {
+        for h in ["PARAM", fit.sigma_primary_header(), fit.sigma_alt_header(), "SE (as first column)", "RSE%", "95% CI LO", "95% CI HI", "SHRINKAGE%"] {
             ui.label(egui::RichText::new(h).size(10.0).color(theme::fg3(dark)).strong());
         }
         ui.end_row();
@@ -251,7 +251,7 @@ fn show_sigma_section(ui: &mut egui::Ui, fit: &FitSummary, dark: bool) {
             let est    = fit.sigma_shown(i);
             let se     = fit.se_sigma_shown(i);
             let shrink = fit.eps_shrinkage.get(i).copied();
-            param_row_omega(ui, &name, est, se, shrink, dark);
+            param_row_omega(ui, &name, est, fit.sigma_alt(i), se, shrink, dark);
         }
     });
 }
@@ -420,11 +420,13 @@ fn param_row_fixed(
 }
 
 fn param_row_omega(
-    ui: &mut egui::Ui, name: &str, est: f64, se: f64,
+    ui: &mut egui::Ui, name: &str, est: f64, alt: f64, se: f64,
     shrinkage: Option<f64>, dark: bool,
 ) {
     ui.label(egui::RichText::new(name).color(theme::fg(dark)).size(12.0).monospace());
     ui.label(egui::RichText::new(fmt_sig4(est)).color(theme::fg(dark)).size(12.0));
+    // The same parameter on the other scale (variance ↔ SD).
+    ui.label(egui::RichText::new(fmt_sig4(alt)).color(theme::fg(dark)).size(12.0));
     ui.label(egui::RichText::new(fmt_sig4(se)).color(theme::fg2(dark)).size(12.0));
     let rse = rse_pct(est, se);
     ui.label(egui::RichText::new(fmt_rse(rse)).color(rse_color(rse)).size(12.0));
@@ -628,7 +630,7 @@ fn generate_html(
         b.push_str(&format!(
             "<section><h2>Between-Subject Variability — OMEGA  ({} ETA)</h2>\n", fit.n_eta));
         b.push_str("<table class=\"params\"><tr>\
-            <th>PARAM</th><th>ESTIMATE</th><th>SE</th>\
+            <th>PARAM</th><th>VARIANCE (ω²)</th><th>SD (ω)</th><th>SE (variance)</th>\
             <th>RSE%</th><th>95% CI LO</th><th>95% CI HI</th><th>SHRINKAGE%</th></tr>\n");
         for i in 0..fit.n_eta {
             let name = fit.omega_names.get(i).cloned()
@@ -636,7 +638,7 @@ fn generate_html(
             let est    = fit.omega_value(i, i).unwrap_or(f64::NAN);
             let se     = fit.se_omega_diag(i).unwrap_or(f64::NAN);
             let shrink = fit.eta_shrinkage.get(i).copied();
-            b.push_str(&html_param_row_omega(&name, est, se, shrink));
+            b.push_str(&html_param_row_omega(&name, est, est.max(0.0).sqrt(), se, shrink));
         }
         b.push_str("</table></section>\n");
     }
@@ -662,16 +664,17 @@ fn generate_html(
     if !fit.sigma.is_empty() {
         b.push_str(&format!(
             "<section><h2>Residual Error — SIGMA, {}  ({})</h2>\n", fit.sigma_scale_label(), fit.sigma.len()));
-        b.push_str("<table class=\"params\"><tr>\
-            <th>PARAM</th><th>ESTIMATE</th><th>SE</th>\
-            <th>RSE%</th><th>95% CI LO</th><th>95% CI HI</th><th>SHRINKAGE%</th></tr>\n");
+        b.push_str(&format!("<table class=\"params\"><tr>\
+            <th>PARAM</th><th>{}</th><th>{}</th><th>SE (as first column)</th>\
+            <th>RSE%</th><th>95% CI LO</th><th>95% CI HI</th><th>SHRINKAGE%</th></tr>\n",
+            fit.sigma_primary_header(), fit.sigma_alt_header()));
         for i in 0..fit.sigma.len() {
             let name = fit.sigma_names.get(i).cloned()
                 .unwrap_or_else(|| format!("SIGMA{}", i + 1));
             let est    = fit.sigma_shown(i);
             let se     = fit.se_sigma_shown(i);
             let shrink = fit.eps_shrinkage.get(i).copied();
-            b.push_str(&html_param_row_omega(&name, est, se, shrink));
+            b.push_str(&html_param_row_omega(&name, est, fit.sigma_alt(i), se, shrink));
         }
         b.push_str("</table></section>\n");
     }
@@ -771,7 +774,7 @@ fn html_param_row_fixed(name: &str, est: f64, se: f64, fixed: bool, log_ci: crat
     )
 }
 
-fn html_param_row_omega(name: &str, est: f64, se: f64, shrink: Option<f64>) -> String {
+fn html_param_row_omega(name: &str, est: f64, alt: f64, se: f64, shrink: Option<f64>) -> String {
     let rse = rse_pct(est, se);
     let (lo, hi) = ci_pair(est, se, true.into());
     let shrink_str = match shrink {
@@ -779,9 +782,9 @@ fn html_param_row_omega(name: &str, est: f64, se: f64, shrink: Option<f64>) -> S
         None    => "<td>—</td>".to_string(),
     };
     format!(
-        "<tr><td class=\"mono\">{name}</td><td>{}</td><td>{}</td>\
+        "<tr><td class=\"mono\">{name}</td><td>{}</td><td>{}</td><td>{}</td>\
          <td class=\"{}\">{}</td><td>{lo}</td><td>{hi}</td>{shrink_str}</tr>\n",
-        fmt_sig4(est), fmt_sig4(se),
+        fmt_sig4(est), fmt_sig4(alt), fmt_sig4(se),
         rse_html_class(rse), fmt_rse(rse),
     )
 }
@@ -923,7 +926,10 @@ mod sigma_report_tests {
 
     fn html_for(fixture: &str) -> String {
         let fx = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-        let d = std::env::temp_dir().join(format!("ferxgui_sigrep_{fixture}_{}", std::process::id()));
+        // Unique per call: the tests run in parallel and one would otherwise delete the other's folder.
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let d = std::env::temp_dir().join(format!("ferxgui_sigrep_{fixture}_{}_{}", std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         for ext in ["ferx", "fitrx"] { std::fs::copy(fx.join(format!("{fixture}.{ext}")), d.join(format!("{fixture}.{ext}"))).unwrap(); }
@@ -940,13 +946,25 @@ mod sigma_report_tests {
     }
 
     #[test]
-    fn html_report_shows_sigma_as_variance_when_the_model_declares_variance() {
+    fn html_report_shows_sigma_as_declared_and_the_other_scale_beside_it() {
+        // Variance declared: variance first (the model file's scale), SD beside it.
         let var = sigma_section(&html_for("warfarin_sigvar"));
         assert!(var.contains("SIGMA, variance"), "{var}");
-        assert!(var.contains("1.116e-4"), "variance 0.0105651² = 1.116e-4 expected in: {var}");
-        assert!(!var.contains("0.0106"), "the SD must not appear: {var}");
+        assert!(var.contains("<th>VARIANCE (σ²)</th><th>SD (σ)</th>"), "{var}");
+        assert!(var.contains("<td>1.116e-4</td><td>0.0106</td>"), "variance then SD: {var}");
+        // SD declared: SD first, variance beside it.
         let sd = sigma_section(&html_for("warfarin"));
-        assert!(sd.contains("SIGMA, SD") && sd.contains("0.0106"), "{sd}");
+        assert!(sd.contains("SIGMA, SD") && sd.contains("<th>SD (σ)</th><th>VARIANCE (σ²)</th>"), "{sd}");
+        assert!(sd.contains("<td>0.0106</td><td>1.116e-4</td>"), "SD then variance: {sd}");
+    }
+
+    #[test]
+    fn omega_is_shown_as_variance_and_sd() {
+        let html = html_for("warfarin");
+        let a = html.find("Between-Subject Variability").unwrap();
+        let sec = &html[a..a + html[a..].find("</section>").unwrap()];
+        assert!(sec.contains("<th>VARIANCE (ω²)</th><th>SD (ω)</th>"), "{sec}");
+        // ETA_CL: ω² = 0.0286, ω = 0.1691.
+        assert!(sec.contains("<td>0.0286</td><td>0.1691</td>"), "{sec}");
     }
 }
-

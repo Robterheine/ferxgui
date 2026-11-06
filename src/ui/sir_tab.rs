@@ -262,11 +262,13 @@ fn show_ci_comparison(
         ui.add_space(2.0);
 
         egui::Grid::new(egui::Id::new(ui.next_auto_id()))
-            .num_columns(7)
+            .num_columns(8)
             .spacing([10.0, 4.0])
             .min_col_width(50.0)
             .show(ui, |ui| {
-                for h in ["PARAM","ESTIMATE","ASYM 2.5%","ASYM 97.5%","SIR 2.5%","SIR 97.5%","ASYM vs SIR"] {
+                // Last-but-one column: the estimate on the other scale (omega: SD; sigma: variance ↔ SD).
+                let alt_header = match section_title { "OMEGA (diag)" => "SD (ω)", "SIGMA" => fit.sigma_alt_header(), _ => "" };
+                for h in ["PARAM","ESTIMATE","ASYM 2.5%","ASYM 97.5%","SIR 2.5%","SIR 97.5%", alt_header, "ASYM vs SIR"] {
                     ui.label(egui::RichText::new(h).color(theme::fg2(dark)).size(10.0).strong());
                 }
                 ui.end_row();
@@ -286,6 +288,13 @@ fn show_ci_comparison(
                     ui.label(egui::RichText::new(fmt4(asym_hi)).color(theme::fg2(dark)).size(11.0));
                     ui.label(egui::RichText::new(fmt4(ci.lo)).color(theme::ACCENT).size(11.0));
                     ui.label(egui::RichText::new(fmt4(ci.hi)).color(theme::ACCENT).size(11.0));
+                    let alt = match section_title {
+                        "OMEGA (diag)" => est.max(0.0).sqrt(),
+                        "SIGMA" => fit.sigma_alt(i),
+                        _ => f64::NAN,
+                    };
+                    ui.label(egui::RichText::new(if alt.is_nan() { String::new() } else { fmt4(alt) })
+                        .color(theme::fg2(dark)).size(11.0));
 
                     let asym_w = asym_hi - asym_lo;
                     let sir_w  = ci.hi - ci.lo;
@@ -671,9 +680,7 @@ fn sir_section_header(ui: &mut egui::Ui, title: &str, dark: bool) {
     ui.add_space(4.0);
 }
 
-fn fmt4(v: f64) -> String {
-    if v.is_nan() { "—".to_string() } else { format!("{v:.4}") }
-}
+fn fmt4(v: f64) -> String { crate::util::fmt_sig4(v) }
 
 fn hint(ui: &mut egui::Ui, dark: bool, msg: &str) {
     let color = if dark { theme::FG3 } else { egui::Color32::from_gray(150) };

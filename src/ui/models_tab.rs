@@ -3374,7 +3374,7 @@ fn show_params_pill(ui: &mut egui::Ui, state: &mut AppState) {
                     let init = params.theta_init_for(&name, i);
                     let est  = fit.theta.get(i).copied().unwrap_or(f64::NAN);
                     let se   = fit.se_theta.get(i).copied().unwrap_or(f64::NAN);
-                    theta_param_row(ui, &name, init, est, se, fit.is_theta_fixed(i), fit.theta_ci_scale(i));
+                    theta_param_row(ui, &name, init, est, se, fit.is_theta_fixed(i), fit.theta_ci_scale(i), None);
                 }
             });
 
@@ -3382,7 +3382,7 @@ fn show_params_pill(ui: &mut egui::Ui, state: &mut AppState) {
 
             // ── OMEGA ──
             section_header(ui, &format!("OMEGA  ({} ETA)", fit.n_eta));
-            params_table(ui, 8, |ui| {
+            params_table(ui, 9, |ui| {
                 omega_table_header(ui);
                 for i in 0..fit.n_eta {
                     let name = fit.omega_names.get(i).cloned()
@@ -3456,7 +3456,7 @@ fn show_params_pill(ui: &mut egui::Ui, state: &mut AppState) {
             if fit.n_kappa > 0 {
                 ui.add_space(8.0);
                 section_header(ui, &format!("KAPPA  ({} IOV)", fit.n_kappa));
-                params_table(ui, 8, |ui| {
+                params_table(ui, 9, |ui| {
                     omega_table_header(ui);
                     for i in 0..fit.n_kappa {
                         let name = fit.kappa_names.get(i).cloned()
@@ -3528,8 +3528,8 @@ fn show_params_pill(ui: &mut egui::Ui, state: &mut AppState) {
 
             // ── SIGMA ──
             section_header(ui, &format!("SIGMA, {}  ({})", fit.sigma_scale_label(), fit.sigma.len()));
-            params_table(ui, 7, |ui| {
-                theta_table_header(ui);
+            params_table(ui, 8, |ui| {
+                sigma_table_header(ui, fit.sigma_primary_header(), fit.sigma_alt_header());
                 for i in 0..fit.sigma.len() {
                     let name = fit.sigma_names.get(i).cloned()
                         .unwrap_or_else(|| format!("SIGMA{}", i + 1));
@@ -3537,7 +3537,7 @@ fn show_params_pill(ui: &mut egui::Ui, state: &mut AppState) {
                     // Same scale as the model file's initial value (variance unless `(sd)`).
                     let est  = fit.sigma_shown(i);
                     let se   = fit.se_sigma_shown(i);
-                    theta_param_row(ui, &name, init, est, se, false, true.into());
+                    theta_param_row(ui, &name, init, est, se, false, true.into(), Some((fit.sigma_alt(i), fit.se_sigma_alt(i))));
                 }
             });
 
@@ -3807,9 +3807,18 @@ fn theta_table_header(ui: &mut egui::Ui) {
     ui.end_row();
 }
 
+/// Header for SIGMA rows: the estimate as the model file declares it, then the other scale.
+fn sigma_table_header(ui: &mut egui::Ui, first: &str, second: &str) {
+    let dark = ui.visuals().dark_mode;
+    for h in ["PARAM", "INIT→FINAL", first, second, "SE", "RSE%", "95% LO", "95% HI"] {
+        ui.label(egui::RichText::new(h).color(theme::fg2(dark)).size(10.0).strong());
+    }
+    ui.end_row();
+}
+
 fn omega_table_header(ui: &mut egui::Ui) {
     let dark = ui.visuals().dark_mode;
-    for h in ["PARAM","INIT→FINAL","ESTIMATE","SE","CV%","RSE%","95% LO","95% HI"] {
+    for h in ["PARAM","INIT→FINAL","VARIANCE","SD","SE (var)","CV%","RSE%","95% LO","95% HI"] {
         ui.label(egui::RichText::new(h).color(theme::fg2(dark)).size(10.0).strong());
     }
     ui.end_row();
@@ -3824,12 +3833,18 @@ fn theta_param_row(
     se: f64,
     fixed: bool,
     log_ci: crate::domain::stats::CiScale,
+    alt: Option<(f64, f64)>,
 ) {
     let dark = ui.visuals().dark_mode;
     ui.label(egui::RichText::new(name).color(theme::fg(dark)).size(12.0).monospace());
     draw_init_final_cell(ui, initial, estimate, fixed, false);
     let est_color = theme::fg(dark);
     ui.label(egui::RichText::new(fmt_sig4(estimate)).color(est_color).size(12.0));
+    // Sigma only: the same estimate on the other scale (variance ↔ SD), with its SE on hover.
+    if let Some((v, v_se)) = alt {
+        ui.label(egui::RichText::new(fmt_sig4(v)).color(theme::fg(dark)).size(12.0))
+            .on_hover_text(format!("SE on this scale: {}", fmt_sig4(v_se)));
+    }
     ui.label(egui::RichText::new(fmt_sig4(se)).color(theme::fg2(dark)).size(12.0));
     let rse = rse_pct(estimate, se);
     let rse_color = rse_color(rse);
@@ -3858,6 +3873,10 @@ fn omega_param_row(
     ui.label(egui::RichText::new(name).color(theme::fg(dark)).size(12.0).monospace());
     draw_init_final_cell(ui, initial, estimate, fixed, at_bound);
     ui.label(egui::RichText::new(fmt_sig4(estimate)).color(theme::fg(dark)).size(12.0));
+    // The same variance as an SD; its SE (delta method, SE(ω) = SE(ω²) / 2ω) is on hover.
+    let sd = estimate.max(0.0).sqrt();
+    ui.label(egui::RichText::new(fmt_sig4(sd)).color(theme::fg(dark)).size(12.0))
+        .on_hover_text(format!("SE on the SD scale: {}", if sd > 0.0 { fmt_sig4(se / (2.0 * sd)) } else { "—".into() }));
     ui.label(egui::RichText::new(fmt_sig4(se)).color(theme::fg2(dark)).size(12.0));
     let cv_cell: Option<(f64, &str)> = if estimate.is_finite() {
         match param_type {
