@@ -877,6 +877,7 @@ fn wire_to_summary(w: FitWire, mut warnings: Vec<String>) -> FitSummary {
     let sigma       = json_val_to_f64_vec(w.sigma.get("estimates").unwrap_or(&serde_json::Value::Null));
     let sigma_names = json_val_to_str_vec(w.sigma.get("names").unwrap_or(&serde_json::Value::Null));
     let se_sigma    = json_val_to_f64_vec(w.sigma.get("se").unwrap_or(&serde_json::Value::Null));
+    let sigma_init_as_sd = json_val_to_bool_vec(w.sigma.get("init_as_sd").unwrap_or(&serde_json::Value::Null));
 
     // Eps shrinkage: scalar when there is one sigma component.
     let eps_shrinkage = to_pct(json_val_to_f64_vec(&w.shrinkage_eps));
@@ -955,6 +956,7 @@ fn wire_to_summary(w: FitWire, mut warnings: Vec<String>) -> FitSummary {
         kappa_shrinkage: iov_shrinkage,
         sigma,
         sigma_names,
+        sigma_init_as_sd,
         se_theta,
         se_omega,
         se_sigma,
@@ -1616,3 +1618,37 @@ mod no_eta_tests {
         assert!(s.has_identity());
     }
 }
+
+#[cfg(test)]
+mod sigma_scale_tests {
+    use super::*;
+
+    fn fx(name: &str) -> PathBuf { PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name) }
+
+    /// ferx returns sigma as an SD whatever the model file declares; the app shows the declared scale.
+    #[test]
+    fn sigma_is_shown_on_the_scale_the_model_file_declares() {
+        let sd = read_fit_summary(&fx("warfarin.fitrx")).unwrap();          // `~ 0.01 (sd)`
+        let var = read_fit_summary(&fx("warfarin_sigvar.fitrx")).unwrap();  // `~ 0.0001 (variance)`
+        assert_eq!(sd.sigma_init_as_sd, vec![true]);
+        assert_eq!(var.sigma_init_as_sd, vec![false]);
+        // Same model, same data: ferx returns the same SD for both declarations.
+        assert!((sd.sigma[0] - var.sigma[0]).abs() < 1e-9, "{} vs {}", sd.sigma[0], var.sigma[0]);
+        assert!(!sd.sigma_is_variance(0) && var.sigma_is_variance(0));
+        assert!((sd.sigma_shown(0) - 0.0105651).abs() < 1e-6, "SD declared: shown as SD");
+        assert!((var.sigma_shown(0) - 0.0105651_f64.powi(2)).abs() < 1e-8, "variance declared: shown as SD²");
+        // SE by the delta method: SE(σ²) = 2·σ·SE(σ); RSE doubles.
+        let want = 2.0 * var.sigma[0] * var.se_sigma[0];
+        assert!((var.se_sigma_shown(0) - want).abs() < 1e-12);
+        assert!((var.se_sigma_shown(0) / var.sigma_shown(0) - 2.0 * var.se_sigma[0] / var.sigma[0]).abs() < 1e-9);
+        assert_eq!(var.sigma_scale_label(), "variance");
+        assert_eq!(sd.sigma_scale_label(), "SD");
+        // A bundle that does not record the scale keeps showing the SD, as before.
+        let legacy = FitSummary { sigma: vec![0.1], se_sigma: vec![0.01], ..Default::default() };
+        assert!(!legacy.sigma_is_variance(0));
+        assert_eq!(legacy.sigma_shown(0), 0.1);
+        // The two declarations are different fits for caching purposes (scale is part of the identity).
+        assert_ne!(sd.estimates_fingerprint(), var.estimates_fingerprint());
+    }
+}
+

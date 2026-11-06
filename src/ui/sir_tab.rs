@@ -249,13 +249,16 @@ fn show_ci_comparison(
 ) {
     let omega_est = omega_diag_vec(fit);
     let omega_se  = fit.se_omega_diag_vec();
+    // Sigma on the model file's scale (the SIR intervals are put on it by the R script).
+    let (sigma_est, sigma_se) = (fit.sigma_shown_vec(), fit.se_sigma_shown_vec());
     for (section_title, cis, ests, ses) in [
         ("THETA",         sir.theta.as_slice(), fit.theta.as_slice(),  fit.se_theta.as_slice()),
         ("OMEGA (diag)",  sir.omega.as_slice(), omega_est.as_slice(), omega_se.as_slice()),
-        ("SIGMA",         sir.sigma.as_slice(), fit.sigma.as_slice(),  fit.se_sigma.as_slice()),
+        ("SIGMA",         sir.sigma.as_slice(), sigma_est.as_slice(), sigma_se.as_slice()),
     ] {
         if cis.is_empty() { continue; }
-        sir_section_header(ui, section_title, dark);
+        let title = if section_title == "SIGMA" { format!("SIGMA ({})", fit.sigma_scale_label()) } else { section_title.to_string() };
+        sir_section_header(ui, &title, dark);
         ui.add_space(2.0);
 
         egui::Grid::new(egui::Id::new(ui.next_auto_id()))
@@ -628,7 +631,7 @@ fn find_estimate_se(fit: &crate::domain::FitSummary, name: &str) -> (Option<f64>
         return (fit.omega_value(i, i), fit.se_omega_diag(i));
     }
     if let Some(i) = fit.sigma_names.iter().position(|n| n == name) {
-        return (fit.sigma.get(i).copied(), fit.se_sigma.get(i).copied());
+        return (Some(fit.sigma_shown(i)), Some(fit.se_sigma_shown(i)));
     }
     (None, None)
 }

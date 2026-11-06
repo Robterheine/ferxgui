@@ -459,15 +459,16 @@ fn show_parameters(ui: &mut egui::Ui, bv: &BundleViewState, dark: bool) {
         });
     }
 
-    card(ui, dark, &format!("SIGMA  ({})", s.sigma.len()), |ui| {
+    card(ui, dark, &format!("SIGMA, {}  ({})", s.sigma_scale_label(), s.sigma.len()), |ui| {
         grid("bv_sigma", 5).striped(true).show(ui, |ui| {
             hdr(ui, &["NAME", "ESTIMATE", "SE", "RSE %", "SHRINKAGE %"]);
-            for (i, est) in s.sigma.iter().enumerate() {
-                let se = s.se_sigma.get(i).copied().unwrap_or(f64::NAN);
+            for i in 0..s.sigma.len() {
+                // The scale the model file declares (variance unless `(sd)`); ferx stores an SD.
+                let (est, se) = (s.sigma_shown(i), s.se_sigma_shown(i));
                 cell(ui, s.sigma_names.get(i).cloned().unwrap_or_else(|| format!("SIGMA{}", i + 1)));
-                cell(ui, sig(*est));
+                cell(ui, sig(est));
                 cell(ui, sig(se));
-                cell(ui, rse(*est, se));
+                cell(ui, rse(est, se));
                 cell(ui, s.eps_shrinkage.get(i).map_or("—".into(), |v| format!("{v:.1}")));
             }
         });
@@ -805,7 +806,7 @@ mod tests {
             assert!(h.query_by_label_contains(needle).is_some(), "Overview is missing {needle}");
         }
         let h = render(BundleSection::Parameters, &b);
-        for needle in ["THETA  (2)", "OMEGA  (2 ETA, block)", "SIGMA  (1)", "TVCL", "fixed", "ETA_V ~ ETA_CL"] {
+        for needle in ["THETA  (2)", "OMEGA  (2 ETA, block)", "SIGMA, SD  (1)", "TVCL", "fixed", "ETA_V ~ ETA_CL"] {
             assert!(h.query_by_label_contains(needle).is_some(), "Parameters is missing {needle}");
         }
         let h = render(BundleSection::Model, &b);

@@ -836,6 +836,9 @@ keep_samples  <- if (length(args) >= 5) tolower(args[5]) == "true" else TRUE
 # diagonal one this script can undo (no block omega / sigma, no IOV kappa).
 theta_lower   <- if (length(args) >= 6 && nchar(args[6]) > 0) as.numeric(strsplit(args[6], ",")[[1]]) else numeric(0)
 layout_ok     <- if (length(args) >= 7) tolower(args[7]) == "true" else FALSE
+# Per sigma, 1 when the model file declares it as a variance. ferx's SIR works on SDs; those sigmas
+# are squared here so intervals and samples are on the scale the model file uses.
+sigma_var     <- if (length(args) >= 9 && nchar(args[9]) > 0) as.integer(strsplit(args[9], ",")[[1]]) == 1L else logical(0)
 
 suppressMessages(library(ferx))
 suppressMessages(library(jsonlite))
@@ -874,6 +877,13 @@ result <- list(
   omega   = ci_group(sir_fit$sir_ci_omega),
   sigma   = ci_group(sir_fit$sir_ci_sigma)
 )
+
+for (j in seq_along(result$sigma$lo)) {
+  if (isTRUE(sigma_var[j])) {
+    result$sigma$lo[[j]] <- result$sigma$lo[[j]]^2
+    result$sigma$hi[[j]] <- result$sigma$hi[[j]]^2
+  }
+}
 
 # Correlation matrix + per-parameter samples (when resamples were kept).
 if (keep_samples &&
@@ -937,6 +947,9 @@ if (keep_samples &&
   if (n_sigma_params > 0) {
     sigma_cols <- seq(n_theta_params + n_omega_params + 1, n_dim)
     mat[, sigma_cols] <- exp(mat[, sigma_cols])
+    for (j in seq_along(sigma_cols)) {
+      if (isTRUE(sigma_var[j])) mat[, sigma_cols[j]] <- mat[, sigma_cols[j]]^2
+    }
   }
 
   # Empirical correlation matrix (fall back to identity on error).
@@ -1718,6 +1731,9 @@ pub fn compute_sir(
         .map(|f| f.theta_lower.iter().map(|v| format!("{v}")).collect::<Vec<_>>().join(","))
         .unwrap_or_default();
     let layout_ok = fit.as_ref().is_some_and(sir_layout_supported);
+    let sigma_var = fit.as_ref()
+        .map(|f| (0..f.sigma.len()).map(|i| if f.sigma_is_variance(i) { "1" } else { "0" }).collect::<Vec<_>>().join(","))
+        .unwrap_or_default();
     let json = run_script(SIR_R, &[
         path_as_str(fitrx_path)?,
         &n_samples.to_string(),
@@ -1727,6 +1743,7 @@ pub fn compute_sir(
         &theta_lower,
         if layout_ok { "true" } else { "false" },
         &verified_data_override(fitrx_path)?,
+        &sigma_var,
     ]).map_err(|e| no_eta_hint(fitrx_path, e))?;
     let mut result = parse_sir_result(&json)
         .map_err(|e| format!("SIR JSON parse error: {e}\nR output: {}", crate::util::truncate_chars(&json, 500)))?;
@@ -2744,6 +2761,29 @@ mod no_eta_hint_tests {
         let e = compute_sir(&d.join("binary_logistic.fitrx"), 100, 50, 1, true).unwrap_err();
         assert!(e.contains("ferx-r #553"), "{e}");
         let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
+mod sir_sigma_scale_tests {
+    use super::*;
+    use crate::util::testsupport::{available, fixture, r_with_ferx};
+
+    /// SIR on a variance-declared sigma gives intervals and samples that are the SD results squared
+    /// (same model and data, same seed: only the declared scale differs).
+    #[test]
+    fn sir_sigma_is_on_the_declared_scale() {
+        if !available(r_with_ferx(), "Rscript with ferx") { return; }
+        let sd = compute_sir(&fixture("warfarin.fitrx"), 300, 150, 1, true).unwrap();
+        let var = compute_sir(&fixture("warfarin_sigvar.fitrx"), 300, 150, 1, true).unwrap();
+        let (a, b) = (&sd.sigma[0], &var.sigma[0]);
+        assert!((b.lo - a.lo * a.lo).abs() < 1e-9 * (1.0 + a.lo), "{} vs {}²", b.lo, a.lo);
+        assert!((b.hi - a.hi * a.hi).abs() < 1e-9 * (1.0 + a.hi));
+        let (xs, vs) = (&sd.param_samples["PROP_ERR"], &var.param_samples["PROP_ERR"]);
+        assert_eq!(xs.len(), vs.len());
+        assert!(xs.iter().zip(vs).all(|(x, v)| (v - x * x).abs() < 1e-12), "samples squared");
+        // Other parameters are untouched.
+        assert_eq!(sd.theta[0].lo, var.theta[0].lo);
     }
 }
 

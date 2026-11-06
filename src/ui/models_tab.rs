@@ -3527,15 +3527,16 @@ fn show_params_pill(ui: &mut egui::Ui, state: &mut AppState) {
             ui.add_space(8.0);
 
             // ── SIGMA ──
-            section_header(ui, &format!("SIGMA  ({})", fit.sigma.len()));
+            section_header(ui, &format!("SIGMA, {}  ({})", fit.sigma_scale_label(), fit.sigma.len()));
             params_table(ui, 7, |ui| {
                 theta_table_header(ui);
                 for i in 0..fit.sigma.len() {
                     let name = fit.sigma_names.get(i).cloned()
                         .unwrap_or_else(|| format!("SIGMA{}", i + 1));
                     let init = params.sigma_init.get(i).copied().unwrap_or(f64::NAN);
-                    let est  = fit.sigma.get(i).copied().unwrap_or(f64::NAN);
-                    let se   = fit.se_sigma.get(i).copied().unwrap_or(f64::NAN);
+                    // Same scale as the model file's initial value (variance unless `(sd)`).
+                    let est  = fit.sigma_shown(i);
+                    let se   = fit.se_sigma_shown(i);
                     theta_param_row(ui, &name, init, est, se, false, true.into());
                 }
             });
@@ -4359,9 +4360,7 @@ fn fmt_f64_1dp(v: f64) -> String {
 fn fmt_f64_0dp(v: f64) -> String {
     if v.is_nan() { "—".to_string() } else { format!("{:.0}", v) }
 }
-fn fmt_sig4(v: f64) -> String {
-    if v.is_nan() { "—".to_string() } else { format!("{:.4}", v) }
-}
+fn fmt_sig4(v: f64) -> String { crate::util::fmt_sig4(v) }
 fn fmt_duration(secs: f64) -> String {
     if secs <= 0.0 { return "—".to_string(); }
     let s = secs as u64;
@@ -5407,12 +5406,19 @@ fn show_compare_dialog(ctx: &egui::Context, state: &mut AppState) {
 
                         // SIGMA section.
                         if !fit_a.sigma.is_empty() || !fit_b.sigma.is_empty() {
-                            for _ in 0..7 { ui.label(egui::RichText::new("-- SIGMA --").color(dim).size(10.0)); }
+                            // One scale for both models: the shared one when they agree, else variance.
+                            let var = (0..fit_a.sigma.len().max(fit_b.sigma.len()))
+                                .any(|i| fit_a.sigma_is_variance(i) || fit_b.sigma_is_variance(i));
+                            let sc = |f: &crate::domain::FitSummary| -> (Vec<f64>, Vec<f64>) {
+                                ((0..f.sigma.len()).map(|i| f.sigma_in(i, var)).collect(),
+                                 (0..f.sigma.len()).map(|i| f.se_sigma_in(i, var)).collect())
+                            };
+                            let ((sa, sea), (sb, seb)) = (sc(&fit_a), sc(&fit_b));
+                            let title = if var { "-- SIGMA (variance) --" } else { "-- SIGMA (SD) --" };
+                            for _ in 0..7 { ui.label(egui::RichText::new(title).color(dim).size(10.0)); }
                             ui.end_row();
                             compare_param_rows(ui, fg, dark,
-                                &fit_a.sigma_names, &fit_b.sigma_names,
-                                &fit_a.sigma, &fit_b.sigma,
-                                &fit_a.se_sigma, &fit_b.se_sigma);
+                                &fit_a.sigma_names, &fit_b.sigma_names, &sa, &sb, &sea, &seb);
                         }
 
                         // Fit statistics — plain per-model values, no delta

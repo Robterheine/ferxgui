@@ -237,7 +237,7 @@ fn show_kappa_section(ui: &mut egui::Ui, fit: &FitSummary, dark: bool) {
 }
 
 fn show_sigma_section(ui: &mut egui::Ui, fit: &FitSummary, dark: bool) {
-    section_header(ui, &format!("Residual Error — SIGMA  ({})", fit.sigma.len()), dark);
+    section_header(ui, &format!("Residual Error — SIGMA, {}  ({})", fit.sigma_scale_label(), fit.sigma.len()), dark);
     if fit.sigma.is_empty() { return; }
     param_table(ui, "rpt_sigma", 7, dark, |ui| {
         for h in ["PARAM", "ESTIMATE", "SE", "RSE%", "95% CI LO", "95% CI HI", "SHRINKAGE%"] {
@@ -247,8 +247,9 @@ fn show_sigma_section(ui: &mut egui::Ui, fit: &FitSummary, dark: bool) {
         for i in 0..fit.sigma.len() {
             let name = fit.sigma_names.get(i).cloned()
                 .unwrap_or_else(|| format!("SIGMA{}", i + 1));
-            let est    = fit.sigma.get(i).copied().unwrap_or(f64::NAN);
-            let se     = fit.se_sigma.get(i).copied().unwrap_or(f64::NAN);
+            // On the scale the model file declares (variance unless `(sd)`); ferx returns an SD.
+            let est    = fit.sigma_shown(i);
+            let se     = fit.se_sigma_shown(i);
             let shrink = fit.eps_shrinkage.get(i).copied();
             param_row_omega(ui, &name, est, se, shrink, dark);
         }
@@ -490,7 +491,7 @@ fn shrink_color(s: f64) -> egui::Color32 {
     else               { theme::RED }
 }
 
-fn fmt_sig4(v: f64) -> String { if v.is_nan() { "—".into() } else { format!("{v:.4}") } }
+fn fmt_sig4(v: f64) -> String { crate::util::fmt_sig4(v) }
 fn fmt_f64_1dp(v: f64) -> String { if v.is_nan() { "—".into() } else { format!("{v:.1}") } }
 fn fmt_f64_3dp(v: f64) -> String { if v.is_nan() { "—".into() } else { format!("{v:.3}") } }
 fn fmt_rse(rse: f64) -> String { if rse.is_nan() { "—".into() } else { format!("{rse:.1}%") } }
@@ -660,15 +661,15 @@ fn generate_html(
     // ── SIGMA ──
     if !fit.sigma.is_empty() {
         b.push_str(&format!(
-            "<section><h2>Residual Error — SIGMA  ({})</h2>\n", fit.sigma.len()));
+            "<section><h2>Residual Error — SIGMA, {}  ({})</h2>\n", fit.sigma_scale_label(), fit.sigma.len()));
         b.push_str("<table class=\"params\"><tr>\
             <th>PARAM</th><th>ESTIMATE</th><th>SE</th>\
             <th>RSE%</th><th>95% CI LO</th><th>95% CI HI</th><th>SHRINKAGE%</th></tr>\n");
         for i in 0..fit.sigma.len() {
             let name = fit.sigma_names.get(i).cloned()
                 .unwrap_or_else(|| format!("SIGMA{}", i + 1));
-            let est    = fit.sigma.get(i).copied().unwrap_or(f64::NAN);
-            let se     = fit.se_sigma.get(i).copied().unwrap_or(f64::NAN);
+            let est    = fit.sigma_shown(i);
+            let se     = fit.se_sigma_shown(i);
             let shrink = fit.eps_shrinkage.get(i).copied();
             b.push_str(&html_param_row_omega(&name, est, se, shrink));
         }
@@ -915,3 +916,37 @@ mod no_eta_report_tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 }
+
+#[cfg(test)]
+mod sigma_report_tests {
+    use super::*;
+
+    fn html_for(fixture: &str) -> String {
+        let fx = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let d = std::env::temp_dir().join(format!("ferxgui_sigrep_{fixture}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        for ext in ["ferx", "fitrx"] { std::fs::copy(fx.join(format!("{fixture}.{ext}")), d.join(format!("{fixture}.{ext}"))).unwrap(); }
+        std::fs::copy(fx.join("warfarin.csv"), d.join("warfarin.csv")).unwrap();
+        let entry = crate::workers::scan::build_entry(d.join(format!("{fixture}.ferx")), &Default::default()).unwrap();
+        let html = generate_html(entry.fit.as_ref().unwrap(), &entry, None, "test");
+        let _ = std::fs::remove_dir_all(&d);
+        html
+    }
+
+    fn sigma_section(html: &str) -> String {
+        let a = html.find("Residual Error").expect("sigma section");
+        html[a..a + html[a..].find("</section>").unwrap()].to_string()
+    }
+
+    #[test]
+    fn html_report_shows_sigma_as_variance_when_the_model_declares_variance() {
+        let var = sigma_section(&html_for("warfarin_sigvar"));
+        assert!(var.contains("SIGMA, variance"), "{var}");
+        assert!(var.contains("1.116e-4"), "variance 0.0105651² = 1.116e-4 expected in: {var}");
+        assert!(!var.contains("0.0106"), "the SD must not appear: {var}");
+        let sd = sigma_section(&html_for("warfarin"));
+        assert!(sd.contains("SIGMA, SD") && sd.contains("0.0106"), "{sd}");
+    }
+}
+

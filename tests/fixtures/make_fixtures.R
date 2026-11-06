@@ -44,3 +44,8 @@ ferx_save_fit(ferx_fit(file.path(d, "warfarin_iov.ferx"), file.path(d, "warfarin
 # bundles; SIR and covariance run on them). Written to the same folder as the other fixtures.
 ferx_save_fit(ferx_fit(file.path(d, "binary_logistic.ferx"), file.path(d, "binary_logistic.csv"),
                        method = "focei", covariance = TRUE), file.path(d, "binary_logistic.fitrx"))
+
+# Warfarin with sigma declared as a VARIANCE (0.0001 = 0.01²): ferx still returns the estimate as an SD
+# and records the declared scale in sigma$init_as_sd (FALSE here).
+ferx_save_fit(ferx_fit(file.path(d, "warfarin_sigvar.ferx"), file.path(d, "warfarin.csv"),
+                       method = "focei", covariance = TRUE), file.path(d, "warfarin_sigvar.fitrx"))

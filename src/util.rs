@@ -25,6 +25,16 @@ pub fn truncate_chars(s: &str, n: usize) -> &str {
     &s[..end]
 }
 
+/// Parameter value for the tables: four decimals as before, but small magnitudes keep their
+/// significant digits (a variance of 0.000112 must not print as "0.0001", nor its SE as "0.0000").
+pub fn fmt_sig4(v: f64) -> String {
+    if v.is_nan() { return "—".into(); }
+    let a = v.abs();
+    if a == 0.0 || a >= 0.01 || !a.is_finite() { format!("{v:.4}") }
+    else if a >= 1e-3 { format!("{v:.6}") }
+    else { format!("{v:.3e}") }
+}
+
 /// Run `job` on a new thread; a panic is turned into `WorkerMsg::RTaskError`
 /// instead of silently killing the thread and leaving the UI waiting.
 pub fn spawn_guarded<F>(name: &str, tx: Sender<WorkerMsg>, job: F)
@@ -105,6 +115,17 @@ mod tests {
             assert!(v[first_nan..].iter().all(|x| x.is_nan()), "NaN not last");
             assert!(v[..first_nan].windows(2).all(|w| w[0] <= w[1]), "not sorted");
         }
+    }
+
+    #[test]
+    fn fmt_sig4_keeps_digits_of_small_values() {
+        assert_eq!(fmt_sig4(0.1327), "0.1327");
+        assert_eq!(fmt_sig4(7.7377062), "7.7377");
+        assert_eq!(fmt_sig4(0.0), "0.0000");
+        assert_eq!(fmt_sig4(0.009592), "0.009592");
+        assert_eq!(fmt_sig4(0.000111621), "1.116e-4");
+        assert_eq!(fmt_sig4(-0.0000177), "-1.770e-5");
+        assert_eq!(fmt_sig4(f64::NAN), "—");
     }
 
     #[test]

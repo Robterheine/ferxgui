@@ -58,6 +58,11 @@ pub struct FitSummary {
     pub sigma: Vec<f64>,
     #[serde(default)]
     pub sigma_names: Vec<String>,
+    /// Per sigma: was it declared as an SD in the model file (`sigma X ~ 0.1 (sd)`)? ferx always
+    /// returns the estimate as an SD; this records the scale the model file uses, which is what the
+    /// app shows. Empty for bundles that do not record it (then SD, as before).
+    #[serde(default)]
+    pub sigma_init_as_sd: Vec<bool>,
 
     // Standard errors (None when covariance step was skipped)
     #[serde(default)]
@@ -267,6 +272,36 @@ impl FitSummary {
         }
     }
 
+    /// True when sigma `i` is declared as a variance in the model file (the default; `(sd)` opts out).
+    pub fn sigma_is_variance(&self, i: usize) -> bool {
+        self.sigma_init_as_sd.get(i).is_some_and(|sd| !*sd)
+    }
+
+    /// Estimate of sigma `i` on the requested scale (ferx returns an SD; variance = SD²).
+    pub fn sigma_in(&self, i: usize, variance: bool) -> f64 {
+        let sd = self.sigma.get(i).copied().unwrap_or(f64::NAN);
+        if variance { sd * sd } else { sd }
+    }
+
+    /// SE of sigma `i` on the requested scale: SE(σ²) = 2σ·SE(σ) (delta method).
+    pub fn se_sigma_in(&self, i: usize, variance: bool) -> f64 {
+        let se = self.se_sigma.get(i).copied().unwrap_or(f64::NAN);
+        if variance { 2.0 * self.sigma.get(i).copied().unwrap_or(f64::NAN).abs() * se } else { se }
+    }
+
+    /// Sigma `i` as the model file declares it (variance or SD).
+    pub fn sigma_shown(&self, i: usize) -> f64 { self.sigma_in(i, self.sigma_is_variance(i)) }
+    pub fn se_sigma_shown(&self, i: usize) -> f64 { self.se_sigma_in(i, self.sigma_is_variance(i)) }
+    pub fn sigma_shown_vec(&self) -> Vec<f64> { (0..self.sigma.len()).map(|i| self.sigma_shown(i)).collect() }
+    pub fn se_sigma_shown_vec(&self) -> Vec<f64> { (0..self.sigma.len()).map(|i| self.se_sigma_shown(i)).collect() }
+
+    /// "variance", "SD" or "mixed": the scale(s) the sigmas are shown on, for headings.
+    pub fn sigma_scale_label(&self) -> &'static str {
+        let n = self.sigma.len();
+        let var = (0..n).filter(|&i| self.sigma_is_variance(i)).count();
+        if n == 0 || var == 0 { "SD" } else if var == n { "variance" } else { "mixed: variance and SD" }
+    }
+
     /// Whether theta `i` was declared FIX.
     pub fn is_theta_fixed(&self, i: usize) -> bool {
         self.theta_fixed.get(i).copied().unwrap_or(false)
@@ -290,6 +325,7 @@ impl FitSummary {
             h.update(tag.as_bytes());
             for x in v.iter() { h.update(x.to_bits().to_le_bytes()); }
         }
+        for i in 0..self.sigma.len() { h.update([self.sigma_is_variance(i) as u8]); }
         h.update(self.ferx_version.as_deref().unwrap_or("").as_bytes());
         Some(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
     }
