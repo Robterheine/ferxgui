@@ -602,6 +602,12 @@ pub struct UiState {
     pub bookmark_dialog_focused: bool,
     /// Model awaiting a duplicate-rename dialog (index into workspace.models).
     pub pending_duplicate: Option<usize>,
+    /// Model whose description is being edited (index), and the text in the editor.
+    pub pending_description: Option<usize>,
+    pub description_buf: String,
+    /// Stem to select (and open in the editor) once the next directory scan has found it, e.g. a
+    /// model that was just duplicated.
+    pub select_after_scan: Option<String>,
     /// Same one-shot-focus purpose as `bookmark_dialog_focused`, for the
     /// duplicate dialog's text field.
     pub duplicate_dialog_focused: bool,
@@ -849,6 +855,9 @@ impl Default for UiState {
             pending_bookmark: None,
             bookmark_dialog_focused: false,
             pending_duplicate: None,
+            pending_description: None,
+            description_buf: String::new(),
+            select_after_scan: None,
             duplicate_dialog_focused: false,
             duplicate_stem_buf: String::new(),
             duplicate_description_buf: String::new(),
@@ -1492,6 +1501,15 @@ impl AppState {
                 self.ui.selected_model = selected_stem.and_then(|s| {
                     self.workspace.models.iter().position(|m| m.model.stem == s)
                 });
+                // A model that was just created (duplicate): select it and show its editor. If the
+                // scan has not found it yet, keep waiting for the next one.
+                if let Some(stem) = self.ui.select_after_scan.clone() {
+                    if let Some(i) = self.workspace.models.iter().position(|m| m.model.stem == stem) {
+                        self.ui.selected_model = Some(i);
+                        self.ui.active_model_pill = ModelPill::Editor;
+                        self.ui.select_after_scan = None;
+                    }
+                }
                 // Falls back to the persisted `meta.is_reference` flag when
                 // there's no in-session reference to re-anchor (e.g. right
                 // after startup) — without this, the reference model was

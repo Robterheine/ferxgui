@@ -58,6 +58,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     // Modal dialogs float over all panels.
     show_bookmark_dialog(ui.ctx(), state);
     show_duplicate_dialog(ui.ctx(), state);
+    show_description_dialog(ui.ctx(), state);
     show_delete_dialog(ui.ctx(), state);
     show_covariance_confirm_dialog(ui.ctx(), state);
     show_new_model_dialog(ui.ctx(), state);
@@ -507,6 +508,75 @@ fn interactive_col(
     });
 }
 
+/// Like `interactive_col`, and also reports a double-click on the cell.
+fn interactive_col_dbl(
+    tr: &mut egui_extras::TableRow<'_, '_>,
+    row_resp: &mut Option<egui::Response>,
+    row_left_clicked: &mut bool,
+    double_clicked: &mut bool,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    tr.col(|ui| {
+        add_contents(ui);
+        let hit = ui.interact(ui.max_rect(), ui.id().with("row_hit"), egui::Sense::click());
+        if hit.clicked() { *row_left_clicked = true; }
+        if hit.double_clicked() { *double_clicked = true; }
+        fold_response(row_resp, hit);
+    });
+}
+
+/// Open the description editor for model `idx`, starting from the description shown in the list.
+fn open_description_editor(state: &mut AppState, idx: usize) {
+    if let Some(m) = state.workspace.models.get(idx) {
+        state.ui.description_buf = m.description().to_string();
+        state.ui.pending_description = Some(idx);
+    }
+}
+
+/// Small dialog to edit a model's description (stored in the app's model notes, not in the .ferx file).
+fn show_description_dialog(ctx: &egui::Context, state: &mut AppState) {
+    let Some(idx) = state.ui.pending_description else { return };
+    let Some(stem) = state.workspace.models.get(idx).map(|m| m.model.stem.clone()) else {
+        state.ui.pending_description = None;
+        return;
+    };
+    let (mut save, mut cancel) = (false, false);
+    egui::Window::new("Edit description")
+        .collapsible(false).resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            ui.set_min_width(380.0);
+            let dark = ui.visuals().dark_mode;
+            ui.label(egui::RichText::new(format!("Description of  \"{stem}\"")).size(12.0).color(theme::fg2(dark)));
+            ui.add_space(6.0);
+            ui.add(egui::TextEdit::multiline(&mut state.ui.description_buf)
+                .desired_rows(4).desired_width(f32::INFINITY));
+            ui.label(egui::RichText::new(
+                "Shown in the model list. Leave it empty to fall back to the first comment line of the model file.")
+                .size(10.0).color(theme::fg3(dark)));
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() { cancel = true; }
+                ui.add_space(8.0);
+                if ui.add(egui::Button::new(egui::RichText::new("Save").color(egui::Color32::WHITE))
+                    .fill(theme::ACCENT)).clicked() { save = true; }
+            });
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) { cancel = true; }
+        });
+    if cancel { state.ui.pending_description = None; }
+    if save {
+        let text = state.ui.description_buf.clone();
+        set_description(state, idx, &text);
+        state.ui.pending_description = None;
+    }
+}
+
+/// Store `text` (trimmed) as model `idx`'s description and persist it with the model's notes.
+fn set_description(state: &mut AppState, idx: usize, text: &str) {
+    if let Some(m) = state.workspace.models.get_mut(idx) { m.meta.comment = text.trim().to_string(); }
+    save_meta_for(state, idx);
+}
+
 fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
     let dark = ui.visuals().dark_mode;
     // ── Zero states ───────────────────────────────────────────────────────────
@@ -541,6 +611,7 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
     let mut toggle_star: Option<usize> = None;
     let mut switch_to_output: Option<usize> = None;
     let mut ctx_action: Option<(usize, CtxAction)> = None;
+    let mut edit_description: Option<usize> = None;
 
     // `egui_extras::TableRow`'s own per-cell `Response` (and the row-level
     // union `TableRow::response()` built from it) only reliably reports
@@ -690,8 +761,9 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
                             fold_response(&mut row_resp, resp);
                         });
 
-                        // DESCRIPTION
-                        interactive_col(&mut tr, &mut row_resp, &mut row_left_clicked, |ui| {
+                        // DESCRIPTION (double-click to edit)
+                        let mut desc_dbl = false;
+                        interactive_col_dbl(&mut tr, &mut row_resp, &mut row_left_clicked, &mut desc_dbl, |ui| {
                             ui.add(
                                 egui::Label::new(
                                     egui::RichText::new(&row.description)
@@ -701,6 +773,7 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
                                 .truncate(),
                             );
                         });
+                        if desc_dbl { edit_description = Some(row.idx); }
 
                         // DATA — the model's own declared [data] path, blank if none.
                         interactive_col(&mut tr, &mut row_resp, &mut row_left_clicked, |ui| {
@@ -879,6 +952,10 @@ fn show_model_list(ui: &mut egui::Ui, state: &mut AppState) {
     if let Some((idx, action)) = ctx_action {
         apply_ctx_action(state, idx, action);
     }
+    if let Some(idx) = edit_description {
+        state.ui.selected_model = Some(idx);
+        open_description_editor(state, idx);
+    }
 
     // Keyboard: Space = toggle star, Enter = switch to Output pill.
     // Guarded by focus: these are list-row shortcuts and must not fire while
@@ -1003,6 +1080,10 @@ fn show_model_row_context_menu(
     // ── Model actions ─────────────────────────
     if ui.button("Duplicate as child…").clicked() {
         *ctx_action = Some((row_idx, CtxAction::Duplicate));
+        ui.close_menu();
+    }
+    if ui.button("Edit description…").clicked() {
+        *ctx_action = Some((row_idx, CtxAction::EditDescription));
         ui.close_menu();
     }
     let ref_label = if is_ref { "Clear Reference" } else { "Set as Reference" };
@@ -4413,6 +4494,7 @@ use crate::workers::run::{now_iso, now_unix};
 enum CtxAction {
     Run,
     Duplicate,
+    EditDescription,
     ToggleReference,
     ViewRunLog,
     CompareWith(String), // target model stem
@@ -4445,6 +4527,7 @@ fn apply_ctx_action(
                 state.ui.pending_duplicate = Some(idx);
             }
         }
+        CtxAction::EditDescription => open_description_editor(state, idx),
         CtxAction::ToggleReference => {
             state.ui.reference_model = if state.ui.reference_model == Some(idx) {
                 None
@@ -4731,6 +4814,8 @@ fn do_duplicate(state: &mut AppState, src_idx: usize) {
                     let _ = save_model_meta(app_dir, dir, &meta_map);
                 }
             }
+            // Select the new model and show its editor once the scan below has found it.
+            state.ui.select_after_scan = Some(new_stem.clone());
             state.ui.status_message = if set_child {
                 format!("Created {new_stem}.ferx (child of {src_stem})")
             } else {
@@ -5604,3 +5689,59 @@ mod delete_targets_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+#[cfg(test)]
+mod description_and_duplicate_tests {
+    use super::*;
+    use crate::workers::messages::WorkerMsg;
+
+    fn entries(dir: &std::path::Path, stems: &[&str]) -> Vec<crate::domain::ModelEntry> {
+        stems.iter().map(|s| {
+            let p = dir.join(format!("{s}.ferx"));
+            std::fs::write(&p, format!("# first comment of {s}\n[parameters]\n  theta T(1, 0, 10)\n")).unwrap();
+            crate::workers::scan::build_entry(p, &Default::default()).unwrap()
+        }).collect()
+    }
+
+    #[test]
+    fn editing_the_description_overrides_the_file_comment_and_clearing_restores_it() {
+        let d = std::env::temp_dir().join(format!("ferxgui_desc_{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let mut st = AppState::new();
+        st.workspace.models = entries(&d, &["a"]);
+        assert_eq!(st.workspace.models[0].description(), "first comment of a");
+        open_description_editor(&mut st, 0);
+        assert_eq!(st.ui.pending_description, Some(0));
+        assert_eq!(st.ui.description_buf, "first comment of a", "editor starts from what the list shows");
+        set_description(&mut st, 0, "  Base model, FOCEI  ");
+        assert_eq!(st.workspace.models[0].description(), "Base model, FOCEI");
+        set_description(&mut st, 0, "   ");
+        assert_eq!(st.workspace.models[0].description(), "first comment of a", "empty falls back to the file");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_duplicated_model_is_selected_and_opened_in_the_editor_once_the_scan_finds_it() {
+        let d = std::env::temp_dir().join(format!("ferxgui_dupsel_{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let mut st = AppState::new();
+        st.workspace.models = entries(&d, &["run001"]);
+        st.ui.selected_model = Some(0);
+        st.ui.active_model_pill = ModelPill::Output;
+        st.ui.select_after_scan = Some("run002".into());
+        // A scan that has not found the new file yet leaves the request pending.
+        st.worker_tx.send(WorkerMsg::ScanComplete(entries(&d, &["run001"]))).unwrap();
+        st.process_worker_messages();
+        assert_eq!(st.ui.select_after_scan.as_deref(), Some("run002"));
+        assert_eq!(st.ui.active_model_pill, ModelPill::Output);
+        // The next scan includes it: selected, editor shown, request cleared.
+        st.worker_tx.send(WorkerMsg::ScanComplete(entries(&d, &["run001", "run002"]))).unwrap();
+        st.process_worker_messages();
+        let sel = st.ui.selected_model.expect("a model is selected");
+        assert_eq!(st.workspace.models[sel].model.stem, "run002");
+        assert_eq!(st.ui.active_model_pill, ModelPill::Editor);
+        assert_eq!(st.ui.select_after_scan, None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
