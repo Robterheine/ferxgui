@@ -288,6 +288,11 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.10.10 (2026-11-07) — edit a model's description; duplicates open in the editor
+
+- **Edit a model's description from the model list:** right-click a model and choose **Edit description…**, or double-click its description cell. A small dialog starts from the description the list shows; Save stores it with the model's notes (the same *Comment* as in the Info tab), and leaving it empty falls back to the first comment line of the `.ferx` file. The model file itself is not changed.
+- **A duplicated model is opened right away:** after *Duplicate as child…* the new model is selected and shown in the **Editor** tab instead of the old one staying on screen. If the model being left has unsaved edits, the usual "Unsaved changes" prompt appears first.
+
 ### v0.10.9 (2026-11-06) — sigma on the model file's scale; variance and SD side by side
 
 - **Sigma is shown on the scale the model file declares.** ferx always returns the residual-error estimate as an SD, whatever the file says (checked on `~ 0.0001`, `~ 0.0001 (variance)` and `~ 0.01 (sd)`: all give 0.0105651), and records the declared scale as `sigma.init_as_sd`. A variance-declared sigma (the default; `(sd)` opts out) used to appear as an SD, and the Models tab compared a variance initial value with an SD estimate. It now appears as a variance, with the SE by the delta method (SE(σ²) = 2σ·SE(σ)); RSE% and the log-scale interval follow. Bundles that do not record the scale keep showing the SD.
