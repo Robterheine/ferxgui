@@ -1784,11 +1784,13 @@ fn save_editor(state: &mut AppState, idx: usize) {
         .then(|| crate::io::textdoc::sha256_hex(state.workspace.models[idx].model.source.as_bytes()));
     match crate::io::textdoc::save_checked(&path, buf.as_bytes(), expected.as_deref()) {
         Ok(true) => {
-            state.workspace.models[idx].model.source = buf;
+            refresh_parsed_from_source(&mut state.workspace.models[idx].model, buf);
             state.ui.editor_dirty = false;
             state.ui.editor_overwrite_ok = false;
             if let Some(a) = &state.workspace.app_dir { crate::io::textdoc::remove_draft(a, &path); }
             state.ui.status_message = format!("Saved {}", path.display());
+            // Re-read the folder so staleness and anything derived from the file is current.
+            state.trigger_scan();
         }
         Ok(false) => {
             state.ui.editor_overwrite_ok = true;
@@ -1798,6 +1800,14 @@ fn save_editor(state: &mut AppState, idx: usize) {
         }
         Err(e) => state.ui.status_message = format!("Save failed: {} ({e})", path.display()),
     }
+}
+
+/// Replace a model's source and everything parsed from it. The scan parses `[data]` and `[parameters]`
+/// once; without this, saving the editor left the Run tab on the previous `[data]` path until a rescan.
+fn refresh_parsed_from_source(model: &mut crate::domain::FerxModel, source: String) {
+    model.params = crate::io::ferx_file::parse_params(&source);
+    model.data_path = crate::io::ferx_file::parse_data_path(&source);
+    model.source = source;
 }
 
 /// What to do when the selected model no longer matches the one loaded in the editor.
@@ -1869,9 +1879,16 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
     // manual choice (or an auto-populated one) for a *different* model
     // silently carry over when switching to this one, and fit it against
     // the wrong dataset with no visible sign anything was wrong.
-    let model_declared_path = declared_data_path(state, &stem);
-    if let Some(declared) = &model_declared_path {
-        state.ui.run_data_path = Some(declared.clone());
+    let declared_decl = declared_data_decl(state, &stem);
+    let model_declared_path = declared_decl.clone().filter(|p| p.exists());
+    if declared_decl.is_some() {
+        // Declared: the run uses this dataset, or nothing when the file is missing.
+        state.ui.run_data_path = model_declared_path.clone();
+        state.ui.run_data_from_decl = true;
+    } else if state.ui.run_data_from_decl {
+        // The `[data]` block was removed: do not keep running on the path it used to name.
+        state.ui.run_data_path = None;
+        state.ui.run_data_from_decl = false;
     }
 
     // Estimation method is not user-editable here — the model's own
@@ -1924,6 +1941,16 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
                                 .truncate(),
                             )
                             .on_hover_text("Declared in this model's [data] block");
+                        } else if let Some(missing) = &declared_decl {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(format!("{}  (not found)", missing.display()))
+                                        .color(theme::ORANGE).size(12.0).monospace(),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text("Declared in this model's [data] block, but the file does not exist. \
+                                            Fix the path in the editor and save; no other dataset is substituted.");
                         } else {
                             let data_str = state
                                 .ui
@@ -2757,14 +2784,17 @@ fn resolve_data_path_for_run(state: &AppState, stem: &str) -> Option<std::path::
     // "Run now" action on a row that may not be the selected one), so
     // checking it before `stem`'s own declaration risked launching `stem`
     // against a different model's dataset.
-    declared_data_path(state, stem)
-        .or_else(|| {
-            state.run.run_history
-                .iter()
-                .rev()
-                .find(|r| r.model_stem == stem && r.data_path.as_ref().is_some_and(|p| p.exists()))
-                .and_then(|r| r.data_path.clone())
-        })
+    // A model that declares a `[data]` path runs on THAT dataset or not at all: if the file is
+    // missing (a typo in an edit, a moved file) falling back to an earlier run's dataset would run
+    // the fit on different data without saying so.
+    if let Some(decl) = declared_data_decl(state, stem) {
+        return decl.exists().then_some(decl);
+    }
+    state.run.run_history
+        .iter()
+        .rev()
+        .find(|r| r.model_stem == stem && r.data_path.as_ref().is_some_and(|p| p.exists()))
+        .and_then(|r| r.data_path.clone())
         .or_else(|| state.ui.run_data_path.clone())
 }
 
@@ -2775,12 +2805,13 @@ fn resolve_data_path_for_run(state: &AppState, stem: &str) -> Option<std::path::
 /// showed "Data file: — not set —" even though the model file itself
 /// already names its dataset, forcing a redundant manual re-selection of a
 /// file the model already declares.
-fn declared_data_path(state: &AppState, stem: &str) -> Option<std::path::PathBuf> {
+/// The model's declared `[data]` path resolved against the model's folder, whether or not the file
+/// exists; None when the model declares none.
+fn declared_data_decl(state: &AppState, stem: &str) -> Option<std::path::PathBuf> {
     let model = state.workspace.models.iter().find(|m| m.model.stem == stem)?;
     let declared = model.model.data_path.as_ref()?;
     let dir = model.model.path.parent()?;
-    let path = dir.join(declared);
-    path.exists().then_some(path)
+    Some(dir.join(declared))
 }
 
 #[cfg(test)]
@@ -5741,6 +5772,61 @@ mod description_and_duplicate_tests {
         assert_eq!(st.workspace.models[sel].model.stem, "run002");
         assert_eq!(st.ui.active_model_pill, ModelPill::Editor);
         assert_eq!(st.ui.select_after_scan, None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
+mod edited_data_path_tests {
+    use super::*;
+
+    fn model_in(dir: &std::path::Path, data_line: &str) -> crate::domain::ModelEntry {
+        let p = dir.join("m.ferx");
+        std::fs::write(&p, format!("# base\n[parameters]\n  theta T(1, 0, 10)\n{data_line}")).unwrap();
+        crate::workers::scan::build_entry(p, &Default::default()).unwrap()
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("ferxgui_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Saving the editor must update the parsed `[data]` path, or the Run tab keeps the old dataset.
+    #[test]
+    fn saving_the_editor_updates_the_declared_dataset() {
+        let d = scratch("editsave");
+        std::fs::write(d.join("old.csv"), "ID,TIME,DV\n").unwrap();
+        std::fs::write(d.join("new.csv"), "ID,TIME,DV\n").unwrap();
+        let mut st = AppState::new();
+        st.workspace.models = vec![model_in(&d, "[data]\n  path = old.csv\n")];
+        assert_eq!(resolve_data_path_for_run(&st, "m"), Some(d.join("old.csv")));
+        st.ui.editor_buffer = "# base\n[parameters]\n  theta T(1, 0, 10)\n[data]\n  path = new.csv\n".into();
+        save_editor(&mut st, 0);
+        assert_eq!(st.workspace.models[0].model.data_path.as_deref(), Some("new.csv"));
+        assert_eq!(resolve_data_path_for_run(&st, "m"), Some(d.join("new.csv")), "Run now uses the edited dataset");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A declared dataset that does not exist is never replaced by an earlier run's or another model's.
+    #[test]
+    fn a_missing_declared_dataset_is_not_replaced_by_another_one() {
+        let d = scratch("missingdecl");
+        std::fs::write(d.join("earlier.csv"), "ID,TIME,DV\n").unwrap();
+        let mut st = AppState::new();
+        st.workspace.models = vec![model_in(&d, "[data]\n  path = typo.csv\n")];
+        st.ui.run_data_path = Some(d.join("earlier.csv"));
+        st.run.run_history.push(crate::domain::RunRecord {
+            id: "m-1".into(), model_stem: "m".into(), tool: "ferx".into(), method: None,
+            status: crate::domain::JobStatus::Completed, started: String::new(), completed: None,
+            duration_secs: None, command: String::new(), directory: d.clone(),
+            data_path: Some(d.join("earlier.csv")), file_hashes: Default::default(),
+        });
+        assert_eq!(resolve_data_path_for_run(&st, "m"), None);
+        // Without a [data] block the old fallbacks still apply.
+        st.workspace.models = vec![model_in(&d, "")];
+        assert_eq!(resolve_data_path_for_run(&st, "m"), Some(d.join("earlier.csv")));
         let _ = std::fs::remove_dir_all(&d);
     }
 }

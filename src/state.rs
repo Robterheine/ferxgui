@@ -602,6 +602,9 @@ pub struct UiState {
     pub bookmark_dialog_focused: bool,
     /// Model awaiting a duplicate-rename dialog (index into workspace.models).
     pub pending_duplicate: Option<usize>,
+    /// `run_data_path` was set from the selected model's own `[data]` block (so it must be dropped,
+    /// not kept, when that block is edited away).
+    pub run_data_from_decl: bool,
     /// Model whose description is being edited (index), and the text in the editor.
     pub pending_description: Option<usize>,
     pub description_buf: String,
@@ -855,6 +858,7 @@ impl Default for UiState {
             pending_bookmark: None,
             bookmark_dialog_focused: false,
             pending_duplicate: None,
+            run_data_from_decl: false,
             pending_description: None,
             description_buf: String::new(),
             select_after_scan: None,
