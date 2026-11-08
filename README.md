@@ -288,6 +288,13 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.10.12 (2026-11-08) — editing `[data]` in the editor now reaches the Run tab
+
+- **Fixed: the Run tab kept the old dataset after you edited `[data]` in the model editor and saved.** The `[data]` path (and the parameter list) was parsed once when the folder was scanned, and saving the editor only replaced the displayed text, so "Run" and "Run now" used the previous dataset until a rescan. Saving now re-reads them and rescans the folder.
+- **Fixed: no silent substitution of another dataset.** If the declared `[data]` file does not exist (a typo, a moved file), the run used the dataset of an earlier run or whatever was selected before. A model that declares a `[data]` path now runs on that dataset or not at all: the Run tab shows the path in orange with "(not found)" and Run stays disabled.
+- **Fixed: removing the `[data]` block kept running on the path it used to name.** The old path is dropped; pick a file with Browse (or the previous-run fallback applies again).
+- The Run tab uses the saved file, not unsaved editor text (as for the method).
+
 ### v0.10.11 (2026-11-08) — builds cleanly on newer Rust
 
 - **No more "falling back to `f32`" build warnings.** On a recent Rust, `cargo build` printed dozens of future-incompatibility warnings (rust-lang issue 154024): plain float literals such as `1.0` passed to egui widths and radii were typed by a fallback that a future Rust release will turn into a hard error. All 68 literals are now written as `f32` (`1.0_f32`), so the program keeps building when that happens. No behaviour or numbers change. Checked with the nightly compiler (1.97), which now reports no warnings, tests included.
