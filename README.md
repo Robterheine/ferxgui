@@ -288,6 +288,10 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.10.11 (2026-11-08) — builds cleanly on newer Rust
+
+- **No more "falling back to `f32`" build warnings.** On a recent Rust, `cargo build` printed dozens of future-incompatibility warnings (rust-lang issue 154024): plain float literals such as `1.0` passed to egui widths and radii were typed by a fallback that a future Rust release will turn into a hard error. All 68 literals are now written as `f32` (`1.0_f32`), so the program keeps building when that happens. No behaviour or numbers change. Checked with the nightly compiler (1.97), which now reports no warnings, tests included.
+
 ### v0.10.10 (2026-11-07) — edit a model's description; duplicates open in the editor
 
 - **Edit a model's description from the model list:** right-click a model and choose **Edit description…**, or double-click its description cell. A small dialog starts from the description the list shows; Save stores it with the model's notes (the same *Comment* as in the Info tab), and leaving it empty falls back to the first comment line of the `.ferx` file. The model file itself is not changed.
