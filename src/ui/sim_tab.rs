@@ -683,7 +683,7 @@ fn show_plot_panel(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
                 if !y.is_finite() { continue; }
                 let hl = HLine::new(y)
                     .color(rl.color)
-                    .width(1.5)
+                    .width(1.5_f32)
                     .style(egui_plot::LineStyle::Dashed { length: 8.0 });
                 pui.hline(if rl.label.is_empty() { hl } else { hl.name(&rl.label) });
             }
@@ -700,7 +700,7 @@ fn show_plot_panel(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
                         .color(egui::Color32::from_rgba_unmultiplied(
                             theme::FG2.r(), theme::FG2.g(), theme::FG2.b(), 180,
                         ))
-                        .radius(3.0),
+                        .radius(3.0_f32),
                 );
             }
         });
@@ -735,7 +735,7 @@ fn draw_ribbon(
         spec.color.r(), spec.color.g(), spec.color.b(), (spec.alpha * 255.0) as u8,
     );
     // Thin same-color stroke drives the egui legend color.
-    let stroke = egui::Stroke::new(0.5, egui::Color32::from_rgba_unmultiplied(
+    let stroke = egui::Stroke::new(0.5_f32, egui::Color32::from_rgba_unmultiplied(
         spec.color.r(), spec.color.g(), spec.color.b(), 160,
     ));
     fn fmt_p(v: f32) -> String {
@@ -1337,7 +1337,7 @@ fn section<R>(
     egui::Frame::new()
         .fill(theme::card_fill(dark))
         .inner_margin(egui::Margin::same(0))
-        .stroke(egui::Stroke::new(1.0, border))
+        .stroke(egui::Stroke::new(1.0_f32, border))
         .corner_radius(egui::CornerRadius::same(5))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -1420,7 +1420,7 @@ fn wide_color_button(ui: &mut egui::Ui, color: &mut egui::Color32, width: f32) {
         } else {
             egui::Color32::from_gray(100)
         };
-        painter.rect_stroke(rect, 3.0, egui::Stroke::new(1.0, border), egui::StrokeKind::Middle);
+        painter.rect_stroke(rect, 3.0, egui::Stroke::new(1.0_f32, border), egui::StrokeKind::Middle);
     }
 
     // Open egui's built-in color picker popup on click

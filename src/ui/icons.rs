@@ -60,7 +60,7 @@ fn paint_pk_mark(
     // Baseline (x-axis).
     painter.line_segment(
         [egui::pos2(x0, y_bot), egui::pos2(x1, y_bot)],
-        egui::Stroke::new(1.0, axis),
+        egui::Stroke::new(1.0_f32, axis),
     );
 
     // Bateman curve: C(t) = e^-ke·t − e^-ka·t, normalised to the peak.
@@ -83,7 +83,7 @@ fn paint_pk_mark(
         if (c - cmax).abs() < 1e-6 { peak = p; }
         pts.push(p);
     }
-    painter.add(egui::Shape::line(pts, egui::Stroke::new(1.8, curve)));
+    painter.add(egui::Shape::line(pts, egui::Stroke::new(1.8_f32, curve)));
     painter.circle_filled(peak, 2.0, curve);
 }
 
@@ -97,7 +97,7 @@ pub fn paint_tab_icon(
     s: f32,
     color: egui::Color32,
 ) {
-    let st = egui::Stroke::new(1.5, color);
+    let st = egui::Stroke::new(1.5_f32, color);
     let cx = center.x;
     let cy = center.y;
     match tab {
@@ -208,7 +208,7 @@ fn vpc(painter: &egui::Painter, cx: f32, cy: f32, s: f32, st: egui::Stroke) {
         p(cx, cy,  s * 0.72, -s * 0.38),
     ], st);
     // percentile lines (thin)
-    let thin = egui::Stroke::new(1.0, st.color);
+    let thin = egui::Stroke::new(1.0_f32, st.color);
     poly(painter, vec![
         p(cx, cy, -s * 0.72, -s * 0.12),
         p(cx, cy, -s * 0.24, -s * 0.45),
@@ -241,7 +241,7 @@ fn uncertainty(painter: &egui::Painter, cx: f32, cy: f32, s: f32, color: egui::C
 // ── Simulate: one origin dot fanning out into several replicate traces ───────
 fn simulate(painter: &egui::Painter, cx: f32, cy: f32, s: f32, color: egui::Color32, st: egui::Stroke) {
     let origin = p(cx, cy, -s * 0.75, 0.0);
-    let thin = egui::Stroke::new(1.0, st.color);
+    let thin = egui::Stroke::new(1.0_f32, st.color);
     for end_dy in [-s * 0.55, 0.0, s * 0.55] {
         poly(painter, vec![
             origin,
@@ -261,7 +261,7 @@ fn simplot(painter: &egui::Painter, cx: f32, cy: f32, s: f32, st: egui::Stroke) 
         p(cx, cy,  s * 0.36,  -s * 0.52),
         p(cx, cy,  s * 0.72,  -s * 0.18),
     ], st);
-    let thin = egui::Stroke::new(1.0, st.color);
+    let thin = egui::Stroke::new(1.0_f32, st.color);
     poly(painter, vec![
         p(cx, cy, -s * 0.72,  s * 0.58),
         p(cx, cy, -s * 0.36, -s * 0.1),

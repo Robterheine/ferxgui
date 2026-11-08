@@ -881,8 +881,8 @@ fn show_vpc_plot(ui: &mut egui::Ui, vpc: &VpcResult, opts: &VpcOpts, dark: bool)
     let a8 = |a: f32| (a.clamp(0.0, 1.0) * 255.0) as u8;
     let pi_fill    = egui::Color32::from_rgba_unmultiplied(ir, ig, ib, a8(t.sim_pi_alpha));
     let med_fill   = egui::Color32::from_rgba_unmultiplied(ir, ig, ib, a8(t.sim_median_alpha));
-    let pi_stroke  = egui::Stroke::new(0.5, egui::Color32::from_rgba_unmultiplied(ir, ig, ib, 140));
-    let med_stroke = egui::Stroke::new(0.5, egui::Color32::from_rgba_unmultiplied(ir, ig, ib, 200));
+    let pi_stroke  = egui::Stroke::new(0.5_f32, egui::Color32::from_rgba_unmultiplied(ir, ig, ib, 140));
+    let med_stroke = egui::Stroke::new(0.5_f32, egui::Color32::from_rgba_unmultiplied(ir, ig, ib, 200));
     let [or_, og, ob] = opts.obs_color;
     let obs_col = egui::Color32::from_rgb((or_*255.) as u8, (og*255.) as u8, (ob*255.) as u8);
     let bin_sep_col = {
@@ -1017,18 +1017,18 @@ fn show_vpc_plot(ui: &mut egui::Ui, vpc: &VpcResult, opts: &VpcOpts, dark: bool)
                     // Bin-edge separators.
                     if t.bin_sep_show {
                         for edge in vpc.bins.iter().filter(|e| e.is_finite()) {
-                            plot_ui.vline(VLine::new(*edge).color(bin_sep_col).width(0.5));
+                            plot_ui.vline(VLine::new(*edge).color(bin_sep_col).width(0.5_f32));
                         }
                     }
                     // LOQ reference line(s) for censored VPC.
                     if is_censored {
                         if let Some(lloq) = vpc.lloq {
                             plot_ui.hline(HLine::new(lloq)
-                                .color(loq_col).width(1.0).name("LLOQ"));
+                                .color(loq_col).width(1.0_f32).name("LLOQ"));
                         }
                         if let Some(uloq) = vpc.uloq {
                             plot_ui.hline(HLine::new(uloq)
-                                .color(loq_col).width(1.0).name("ULOQ"));
+                                .color(loq_col).width(1.0_f32).name("ULOQ"));
                         }
                     }
                     // Simulated bands.
@@ -1172,7 +1172,7 @@ fn section(
     egui::Frame::new()
         .fill(theme::card_fill(dark))
         .inner_margin(egui::Margin::same(0))
-        .stroke(egui::Stroke::new(1.0, border))
+        .stroke(egui::Stroke::new(1.0_f32, border))
         .corner_radius(egui::CornerRadius::same(5))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());

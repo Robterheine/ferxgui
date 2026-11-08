@@ -586,7 +586,7 @@ fn show_distributions(
             if let Some(pts) = normal_pts {
                 p.line(Line::new(PlotPoints::new(pts))
                     .color(egui::Color32::from_rgba_unmultiplied(180, 180, 180, 220))
-                    .width(1.5)
+                    .width(1.5_f32)
                     .style(egui_plot::LineStyle::Dashed { length: 8.0 })
                     .name(if log_ci == crate::domain::stats::CiScale::Log { "Asymptotic (lognormal)" } else { "Asymptotic normal" }));
             }
@@ -595,7 +595,7 @@ fn show_distributions(
             if let Some(mu) = est {
                 p.vline(VLine::new(mu)
                     .color(theme::fg(dark))
-                    .width(2.0)
+                    .width(2.0_f32)
                     .name("Estimate"));
             }
 
@@ -603,21 +603,21 @@ fn show_distributions(
             if let Some((lo, hi)) = asym_ci {
                 let gray = egui::Color32::from_rgba_unmultiplied(150, 150, 150, 200);
                 p.vline(VLine::new(lo)
-                    .color(gray).width(1.2)
+                    .color(gray).width(1.2_f32)
                     .style(egui_plot::LineStyle::Dashed { length: 6.0 })
                     .name("Asym 95% CI"));
                 p.vline(VLine::new(hi)
-                    .color(gray).width(1.2)
+                    .color(gray).width(1.2_f32)
                     .style(egui_plot::LineStyle::Dashed { length: 6.0 }));
             }
 
             // SIR 95% CI (solid orange).
             if let Some((lo, hi)) = sir_ci {
                 p.vline(VLine::new(lo)
-                    .color(theme::ORANGE).width(1.8)
+                    .color(theme::ORANGE).width(1.8_f32)
                     .name("SIR 95% CI"));
                 p.vline(VLine::new(hi)
-                    .color(theme::ORANGE).width(1.8));
+                    .color(theme::ORANGE).width(1.8_f32));
             }
         });
 }

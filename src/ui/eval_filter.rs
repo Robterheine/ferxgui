@@ -401,7 +401,7 @@ fn legend_row(ui: &mut egui::Ui, g: &Grouping, var: &str, table: &VarTable, view
             };
             let (rect, resp) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::click());
             let fill = if shown { color } else { egui::Color32::TRANSPARENT };
-            ui.painter().circle(rect.center(), 4.5, fill, egui::Stroke::new(1.2, color));
+            ui.painter().circle(rect.center(), 4.5, fill, egui::Stroke::new(1.2_f32, color));
             let text = egui::RichText::new(label).size(11.0)
                 .color(if shown { theme::fg(dark) } else { theme::fg3(dark) });
             let lresp = ui.add(egui::Label::new(text).sense(if g.continuous { egui::Sense::hover() } else { egui::Sense::click() }));

@@ -1482,7 +1482,7 @@ fn show_detail_panel(ui: &mut egui::Ui, state: &mut AppState) {
                 let underline_y = rect.bottom() - 1.0;
                 ui.painter().line_segment(
                     [egui::pos2(rect.left() + 4.0, underline_y), egui::pos2(rect.right() - 4.0, underline_y)],
-                    egui::Stroke::new(2.0, theme::accent(dark)),
+                    egui::Stroke::new(2.0_f32, theme::accent(dark)),
                 );
             }
             if response.clicked() {
@@ -1583,7 +1583,7 @@ fn show_editor_pill(ui: &mut egui::Ui, state: &mut AppState) {
                         egui::pos2(sep_rect.left(), sep_rect.top()),
                         egui::pos2(sep_rect.left(), sep_rect.bottom()),
                     ],
-                    egui::Stroke::new(1.0, theme::BORDER),
+                    egui::Stroke::new(1.0_f32, theme::BORDER),
                 );
                 ui.add_space(4.0);
 
@@ -2157,7 +2157,7 @@ fn show_run_pill(ui: &mut egui::Ui, state: &mut AppState) {
                             egui::Button::new(
                                 egui::RichText::new("✕  Kill").size(13.0).color(theme::RED),
                             )
-                            .stroke(egui::Stroke::new(1.0, theme::RED))
+                            .stroke(egui::Stroke::new(1.0_f32, theme::RED))
                             .fill(theme::card_fill(dark))
                             .min_size(egui::vec2(76.0, 28.0)),
                         )
@@ -4052,7 +4052,7 @@ fn draw_init_final_cell(
                 egui::pos2(x, rect.bottom() - if is_center { 1.0 } else { 3.0 }),
             ],
             egui::Stroke::new(
-                if is_center { 1.5 } else { 0.5 },
+                if is_center { 1.5_f32 } else { 0.5_f32 },
                 if is_center {
                     egui::Color32::from_gray(180)
                 } else {
@@ -4084,7 +4084,7 @@ fn draw_init_final_cell(
         let wx = if log_ratio < 0.0 { rect.left() + 2.0 } else { rect.right() - 2.0 };
         p.line_segment(
             [egui::pos2(wx, rect.top()), egui::pos2(wx, rect.bottom())],
-            egui::Stroke::new(2.0, theme::RED),
+            egui::Stroke::new(2.0_f32, theme::RED),
         );
     }
 

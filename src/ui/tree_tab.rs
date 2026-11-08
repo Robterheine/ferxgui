@@ -294,7 +294,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                     let pill_rect = egui::Rect::from_center_size(mid, egui::vec2(fsize * 3.5, fsize * 1.5));
                     let pill_bg = if dark { egui::Color32::from_rgb(0x10,0x13,0x1c) } else { egui::Color32::from_gray(245) };
                     painter.rect_filled(pill_rect, 3.0, pill_bg);
-                    painter.rect_stroke(pill_rect, 3.0, egui::Stroke::new(0.8, edge_color), egui::StrokeKind::Middle);
+                    painter.rect_stroke(pill_rect, 3.0, egui::Stroke::new(0.8_f32, edge_color), egui::StrokeKind::Middle);
                     painter.text(mid, egui::Align2::CENTER_CENTER, &d_str,
                         egui::FontId::proportional(fsize), d_col);
                 }
@@ -336,12 +336,12 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
             painter.rect_filled(sr, 5.0 * zoom.clamp(0.3, 2.0), bg);
 
             // Border.
-            let bw  = if is_sel || is_hov { 2.0 } else { 1.0 };
+            let bw  = if is_sel || is_hov { 2.0_f32 } else { 1.0_f32 };
             let bc  = if is_sel { theme::ACCENT } else if is_hov { theme::fg2(dark) } else { theme::fg3(dark) };
             let bstyle = if !has_run {
                 // Dashed border for unrun models — approximate with dotted segments.
                 // egui doesn't have native dashed stroke, so we just use thinner border.
-                egui::Stroke::new(bw * 0.7, egui::Color32::from_rgba_unmultiplied(bc.r(), bc.g(), bc.b(), 120))
+                egui::Stroke::new(bw * 0.7_f32, egui::Color32::from_rgba_unmultiplied(bc.r(), bc.g(), bc.b(), 120))
             } else {
                 egui::Stroke::new(bw, bc)
             };

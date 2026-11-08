@@ -628,7 +628,7 @@ fn section(
     egui::Frame::new()
         .fill(theme::card_fill(dark))
         .inner_margin(egui::Margin::same(0))
-        .stroke(egui::Stroke::new(1.0, border))
+        .stroke(egui::Stroke::new(1.0_f32, border))
         .corner_radius(egui::CornerRadius::same(5))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());

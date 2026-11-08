@@ -789,7 +789,7 @@ fn show_plot_view(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
                 let name = if label.is_empty() { y_col.clone() } else { label.clone() };
                 p.points(
                     Points::new(PlotPoints::new(pts.clone()))
-                        .radius(2.5).color(col).name(name),
+                        .radius(2.5_f32).color(col).name(name),
                 );
             }
 
@@ -799,16 +799,16 @@ fn show_plot_view(ui: &mut egui::Ui, state: &mut AppState, dark: bool) {
                 let col = if dark { egui::Color32::from_gray(130) }
                           else    { egui::Color32::from_gray(160) };
                 p.line(Line::new(PlotPoints::new(vec![[lo, lo], [hi, hi]]))
-                    .color(col).width(1.5).name("Unity"));
+                    .color(col).width(1.5_f32).name("Unity"));
             }
 
             if loess_line.len() > 1 {
                 p.line(Line::new(PlotPoints::new(loess_line.clone()))
-                    .color(theme::ORANGE).width(2.0).name("LOESS"));
+                    .color(theme::ORANGE).width(2.0_f32).name("LOESS"));
             }
             if let Some(f) = &linear {
                 p.line(Line::new(PlotPoints::new(f.line(x_min, x_max).to_vec()))
-                    .color(LINEAR_COLOR).width(2.0).name(f.label()));
+                    .color(LINEAR_COLOR).width(2.0_f32).name(f.label()));
             }
         });
 }

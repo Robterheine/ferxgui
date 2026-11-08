@@ -685,25 +685,25 @@ pub(crate) fn scatter_grouped(
             })
             .show(ui, |p| {
                 for (label, color, shape, pts) in work {
-                    let pts = Points::new(PlotPoints::new(pts)).radius(2.4).color(color).shape(shape);
+                    let pts = Points::new(PlotPoints::new(pts)).radius(2.4_f32).color(color).shape(shape);
                     p.points(if label.is_empty() { pts } else { pts.name(label) });
                 }
                 // LOESS trendline(s).
                 for (color, line) in loess_lines {
-                    p.line(Line::new(PlotPoints::new(line)).color(color).width(2.0).name("LOESS"));
+                    p.line(Line::new(PlotPoints::new(line)).color(color).width(2.0_f32).name("LOESS"));
                 }
                 // Reference lines.
                 match kind {
                     PlotKind::Identity { lo, hi } => {
                         p.line(Line::new(PlotPoints::new(vec![[lo,lo],[hi,hi]]))
-                            .color(ref_color).width(1.2));
+                            .color(ref_color).width(1.2_f32));
                     }
                     PlotKind::Residual { x_lo: _, x_hi: _, y_pad: _, ref bands } => {
-                        p.hline(HLine::new(0.0).color(ref_color).width(1.2));
+                        p.hline(HLine::new(0.0).color(ref_color).width(1.2_f32));
                         let band_col = egui::Color32::from_rgba_unmultiplied(232, 149, 64, 160);
                         for &lvl in bands {
-                            p.hline(HLine::new(lvl).color(band_col).width(1.0));
-                            p.hline(HLine::new(-lvl).color(band_col).width(1.0));
+                            p.hline(HLine::new(lvl).color(band_col).width(1.0_f32));
+                            p.hline(HLine::new(-lvl).color(band_col).width(1.0_f32));
                         }
                     }
                 }
@@ -922,9 +922,9 @@ fn show_npde(ui: &mut egui::Ui, state: &mut AppState, model_idx: usize, dark: bo
                 .show_grid(true)
                 .label_formatter(|_, v| format!("theoretical={:.3}  npde={:.3}", v.x, v.y))
                 .show(ui, |p| {
-                    p.points(Points::new(PlotPoints::new(qq_pts.clone())).radius(2.2).color(pt_col));
+                    p.points(Points::new(PlotPoints::new(qq_pts.clone())).radius(2.2_f32).color(pt_col));
                     p.line(Line::new(PlotPoints::new(vec![[-qq_bound, -qq_bound], [qq_bound, qq_bound]]))
-                        .color(ref_col).width(1.2));
+                        .color(ref_col).width(1.2_f32));
                 });
         });
         ui.add_space(4.0);
@@ -1170,15 +1170,15 @@ fn show_individual_fits(ui: &mut egui::Ui, state: &mut AppState, _idx: usize, da
                         .show(ui, |p| {
                             if !obs_pts.is_empty() {
                                 p.points(Points::new(PlotPoints::new(obs_pts))
-                                    .radius(4.0).color(pt_col).name(format!("{} (obs)", tr.wrap("DV"))));
+                                    .radius(4.0_f32).color(pt_col).name(format!("{} (obs)", tr.wrap("DV"))));
                             }
                             if !ipred_s.is_empty() {
                                 p.line(Line::new(PlotPoints::new(ipred_s))
-                                    .color(ipred_col).width(2.0).name("IPRED"));
+                                    .color(ipred_col).width(2.0_f32).name("IPRED"));
                             }
                             if !pred_s.is_empty() {
                                 p.line(Line::new(PlotPoints::new(pred_s))
-                                    .color(pred_col).width(1.5).name("PRED"));
+                                    .color(pred_col).width(1.5_f32).name("PRED"));
                             }
                         });
                 });
@@ -1239,7 +1239,7 @@ fn show_iofv_waterfall(ui: &mut egui::Ui, state: &AppState, dark: bool) {
         let color = if above_mean { theme::ORANGE } else { theme::GREEN };
         Bar::new(i as f64, r.ofv_contribution)
             .fill(color)
-            .stroke(egui::Stroke::new(0.5, egui::Color32::from_rgba_unmultiplied(0,0,0,40)))
+            .stroke(egui::Stroke::new(0.5_f32, egui::Color32::from_rgba_unmultiplied(0,0,0,40)))
             .name(&r.id)
     }).collect();
 
@@ -1261,7 +1261,7 @@ fn show_iofv_waterfall(ui: &mut egui::Ui, state: &AppState, dark: bool) {
             // Mean iOFV reference line.
             p.hline(HLine::new(mean_iofv)
                 .color(egui::Color32::from_rgba_unmultiplied(200,200,200,180))
-                .width(1.2)
+                .width(1.2_f32)
                 .name(format!("Mean ({mean_iofv:.2})")));
         });
 
@@ -1630,9 +1630,9 @@ fn show_convergence(ui: &mut egui::Ui, state: &AppState, idx: usize, dark: bool)
         .show_grid(true)
         .label_formatter(|_, v| format!("iter={:.0}  OFV={:.4}", v.x, v.y))
         .show(ui, |p| {
-            p.line(Line::new(PlotPoints::new(ofv_pts)).color(blue).width(2.0).name("OFV"));
+            p.line(Line::new(PlotPoints::new(ofv_pts)).color(blue).width(2.0_f32).name("OFV"));
             for &x in &phase_lines {
-                p.vline(egui_plot::VLine::new(x).color(phase_col).width(1.0).style(egui_plot::LineStyle::Dashed { length: 8.0 }));
+                p.vline(egui_plot::VLine::new(x).color(phase_col).width(1.0_f32).style(egui_plot::LineStyle::Dashed { length: 8.0 }));
             }
         });
 
@@ -1646,9 +1646,9 @@ fn show_convergence(ui: &mut egui::Ui, state: &AppState, idx: usize, dark: bool)
             .show_grid(true)
             .label_formatter(move |_, v| format!("iter={:.0}  {metric_label}={:.4}", v.x, v.y))
             .show(ui, |p| {
-                p.line(Line::new(PlotPoints::new(metric_pts.clone())).color(metric_color).width(2.0).name(metric_label));
+                p.line(Line::new(PlotPoints::new(metric_pts.clone())).color(metric_color).width(2.0_f32).name(metric_label));
                 for &x in &phase_lines {
-                    p.vline(egui_plot::VLine::new(x).color(phase_col).width(1.0).style(egui_plot::LineStyle::Dashed { length: 8.0 }));
+                    p.vline(egui_plot::VLine::new(x).color(phase_col).width(1.0_f32).style(egui_plot::LineStyle::Dashed { length: 8.0 }));
                 }
             });
     }
@@ -2369,9 +2369,9 @@ fn show_conddist_distributions(
             p.bar_chart(BarChart::new(bars));
             if overlay.len() > 1 {
                 p.line(Line::new(PlotPoints::from(overlay))
-                    .color(theme::ORANGE).width(2.0).name("N(0, omega) expected"));
+                    .color(theme::ORANGE).width(2.0_f32).name("N(0, omega) expected"));
             }
-            p.vline(VLine::new(0.0).color(egui::Color32::from_gray(160)).width(1.0));
+            p.vline(VLine::new(0.0).color(egui::Color32::from_gray(160)).width(1.0_f32));
         });
 }
 
@@ -2415,17 +2415,17 @@ fn show_conddist_caterpillar(
         })
         .label_formatter(|_, v| format!("eta = {:.3}", v.x))
         .show(ui, |p| {
-            p.vline(VLine::new(0.0).color(egui::Color32::from_gray(160)).width(1.0));
+            p.vline(VLine::new(0.0).color(egui::Color32::from_gray(160)).width(1.0_f32));
             for (i, r) in rows.iter().enumerate() {
                 let y = i as f64;
                 let sd = if r.cond_sd.is_finite() { r.cond_sd } else { 0.0 };
                 if sd > 0.0 {
                     p.line(Line::new(PlotPoints::from(vec![
                         [r.cond_mean - sd, y], [r.cond_mean + sd, y],
-                    ])).color(col).width(1.2));
+                    ])).color(col).width(1.2_f32));
                 }
                 p.points(Points::new(PlotPoints::from(vec![[r.cond_mean, y]]))
-                    .radius(2.5).color(col));
+                    .radius(2.5_f32).color(col));
             }
         });
 }
@@ -2473,9 +2473,9 @@ fn show_conddist_mode_vs_mean(
         .y_axis_label(format!("{eta} (conditional mean)"))
         .show_grid(true)
         .show(ui, |p| {
-            p.points(Points::new(PlotPoints::new(pts)).radius(2.5).color(pt_col));
+            p.points(Points::new(PlotPoints::new(pts)).radius(2.5_f32).color(pt_col));
             p.line(Line::new(PlotPoints::new(vec![[lo, lo], [hi, hi]]))
-                .color(ref_col).width(1.2));
+                .color(ref_col).width(1.2_f32));
         });
 }
 

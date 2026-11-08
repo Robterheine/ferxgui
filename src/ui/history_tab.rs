@@ -52,7 +52,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                         egui::Button::new(
                             egui::RichText::new("Clear All").size(12.0).color(warn_color),
                         )
-                        .stroke(egui::Stroke::new(1.0, warn_color))
+                        .stroke(egui::Stroke::new(1.0_f32, warn_color))
                         .fill(egui::Color32::TRANSPARENT),
                     )
                     .on_hover_text("Remove all run history entries")
@@ -453,7 +453,7 @@ fn show_detail(
                         .add(
                             egui::Button::new(egui::RichText::new("Go to model →").size(11.0))
                                 .fill(egui::Color32::TRANSPARENT)
-                                .stroke(egui::Stroke::new(1.0, border)),
+                                .stroke(egui::Stroke::new(1.0_f32, border)),
                         )
                         .on_hover_text("Switch to Models tab and select this model")
                         .clicked()

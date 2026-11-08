@@ -92,7 +92,7 @@ pub mod theme {
         // of 3.0); WHITE on this background measures ~6.6, comfortably AA-normal.
         v.selection.stroke.color = eframe::egui::Color32::WHITE;
         v.hyperlink_color      = ACCENT;
-        v.window_stroke        = eframe::egui::Stroke::new(1.0, BORDER);
+        v.window_stroke        = eframe::egui::Stroke::new(1.0_f32, BORDER);
         v
     }
 
@@ -119,7 +119,7 @@ pub mod theme {
         v.selection.bg_fill    = accent;
         v.selection.stroke.color = eframe::egui::Color32::WHITE;
         v.hyperlink_color      = accent;
-        v.window_stroke        = eframe::egui::Stroke::new(1.0, eframe::egui::Color32::from_gray(210));
+        v.window_stroke        = eframe::egui::Stroke::new(1.0_f32, eframe::egui::Color32::from_gray(210));
         v
     }
 }
@@ -1373,7 +1373,7 @@ fn render_run_popup(ctx: &egui::Context, state: &mut AppState) {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.add(
                                 egui::Button::new(egui::RichText::new("Kill").size(11.0).color(theme::RED))
-                                    .stroke(egui::Stroke::new(1.0, theme::RED))
+                                    .stroke(egui::Stroke::new(1.0_f32, theme::RED))
                                     .fill(egui::Color32::TRANSPARENT)
                                     .min_size(egui::vec2(38.0, 18.0)),
                             ).on_hover_text(if cfg!(unix) { "Terminate immediately (SIGKILL)" } else { "Terminate immediately (force kill)" }).clicked() {
