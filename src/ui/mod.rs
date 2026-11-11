@@ -8,6 +8,7 @@ pub mod report;
 pub mod history_tab;
 pub mod icons;
 pub mod models_tab;
+pub mod recent_runs;
 pub mod sir_tab;
 pub mod tree_tab;
 pub mod vpc_tab;

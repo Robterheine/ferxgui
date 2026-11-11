@@ -419,6 +419,12 @@ pub fn orphan_exit_code(status_path: Option<&Path>, record: &RunRecord) -> i32 {
     })
 }
 
+/// The finished run's OFV, read from its bundle; `None` when the bundle is missing or unreadable.
+pub fn bundle_ofv(record: &RunRecord) -> Option<f64> {
+    let bundle = record.directory.join(format!("{}.fitrx", record.model_stem));
+    crate::io::fitrx::read_fit_summary(&bundle).ok().map(|f| f.ofv).filter(|o| o.is_finite())
+}
+
 fn classify_orphan(status: Option<i32>, bundle_ok: impl FnOnce() -> bool) -> i32 {
     match status {
         Some(0) if bundle_ok() => 0,
@@ -439,6 +445,9 @@ fn finish(mut record: RunRecord, exit_code: i32, manifest_path: &Path, tx: &Send
         EXIT_UNKNOWN => JobStatus::Unknown,
         _ => JobStatus::Failed,
     };
+    if record.status == JobStatus::Completed {
+        record.ofv = bundle_ofv(&record);
+    }
     RunManifest::remove(manifest_path);
     let _ = tx.send(WorkerMsg::RunFinished { exit_code, record: Box::new(record) });
 }
@@ -590,6 +599,21 @@ mod format_iso_timestamp_tests {
 
 #[cfg(test)]
 mod orphan_status_tests {
+    #[test]
+    fn bundle_ofv_reads_the_fit_and_is_none_without_one() {
+        use crate::domain::{JobStatus, RunRecord};
+        let mut r = RunRecord {
+            id: "r".into(), model_stem: "warfarin".into(), tool: "ferx".into(), method: None,
+            status: JobStatus::Completed, started: String::new(), completed: None, duration_secs: None,
+            command: String::new(), directory: crate::util::testsupport::fixture(""),
+            data_path: None, file_hashes: Default::default(), ofv: None, acknowledged: false,
+        };
+        let ofv = super::bundle_ofv(&r).expect("fixture bundle has a finite OFV");
+        assert!(ofv.is_finite());
+        r.model_stem = "no_such_model".into();
+        assert_eq!(super::bundle_ofv(&r), None);
+    }
+
     use super::*;
 
     #[test]
@@ -628,6 +652,7 @@ mod orphan_status_tests {
             id: "r".into(), model_stem: "m".into(), tool: "ferx".into(), method: None,
             status: JobStatus::Running, started: String::new(), completed: None, duration_secs: None,
             command: String::new(), directory: dir.clone(), data_path: None, file_hashes: Default::default(),
+            ofv: None, acknowledged: false,
         };
         let (tx, rx) = std::sync::mpsc::channel();
         let (cancel_tx, cancel_rx) = std::sync::mpsc::channel();

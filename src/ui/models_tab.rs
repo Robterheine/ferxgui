@@ -2836,6 +2836,8 @@ mod resolve_data_path_for_run_tests {
             directory: PathBuf::new(),
             data_path,
             file_hashes: HashMap::new(),
+            ofv: None,
+            acknowledged: false,
         }
     }
 
@@ -3220,6 +3222,8 @@ pub fn do_launch_queued(state: &mut AppState, queued: crate::domain::QueuedRun) 
         directory: cwd.clone(),
         data_path: Some(queued.data_path),
         file_hashes: HashMap::new(),
+        ofv: None,
+        acknowledged: false,
     };
 
     let (cancel_tx, cancel_rx) = std::sync::mpsc::channel::<CancelMode>();
@@ -5822,6 +5826,7 @@ mod edited_data_path_tests {
             status: crate::domain::JobStatus::Completed, started: String::new(), completed: None,
             duration_secs: None, command: String::new(), directory: d.clone(),
             data_path: Some(d.join("earlier.csv")), file_hashes: Default::default(),
+            ofv: None, acknowledged: false,
         });
         assert_eq!(resolve_data_path_for_run(&st, "m"), None);
         // Without a [data] block the old fallbacks still apply.

@@ -3,7 +3,7 @@ use egui_extras::{Column, TableBuilder};
 
 use crate::app::theme;
 use crate::domain::JobStatus;
-use crate::state::{AppState, HistorySortCol, Tab};
+use crate::state::{AppState, HistorySortCol};
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
@@ -104,7 +104,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         .collect();
 
     let mut clicked_row: Option<usize> = None; // index into indices[]
-    let mut navigate_to_stem: Option<String> = None;
+    let mut navigate_to: Option<(std::path::PathBuf, String)> = None;
     let mut rerun_stem: Option<String> = None;
 
     egui::ScrollArea::vertical()
@@ -116,6 +116,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                 .column(Column::exact(22.0))    // status dot
                 .column(Column::remainder().clip(true))  // model stem
+                .column(Column::exact(110.0).clip(true))  // project
                 .column(Column::exact(72.0))    // method
                 .column(Column::exact(90.0))    // OFV
                 .column(Column::exact(62.0))    // duration
@@ -125,6 +126,10 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                     header.col(|_ui| {});
 
                     col_header(&mut header, "Model",    HistorySortCol::Model,    sort_col, sort_asc, dark);
+                    header.col(|ui| {
+                        ui.label(egui::RichText::new("Project").size(11.0)
+                            .color(if dark { theme::FG3 } else { egui::Color32::from_gray(120) }));
+                    });
                     col_header(&mut header, "Method",   HistorySortCol::Method,   sort_col, sort_asc, dark);
                     col_header(&mut header, "OFV",      HistorySortCol::Ofv,      sort_col, sort_asc, dark);
                     col_header(&mut header, "Duration", HistorySortCol::Duration, sort_col, sort_asc, dark);
@@ -170,6 +175,14 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                                 if resp.clicked() {
                                     clicked_row = Some(view_idx);
                                 }
+                            });
+
+                            // Project.
+                            r.col(|ui| {
+                                let fg3 = if dark { theme::FG2 } else { egui::Color32::from_gray(80) };
+                                ui.add(egui::Label::new(
+                                    egui::RichText::new(&row.project).size(11.0).color(fg3),
+                                ).truncate());
                             });
 
                             // Method.
@@ -236,16 +249,16 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         if let Some(&hist_idx) = indices.get(view_idx) {
             if let Some(rec) = state.run.run_history.get(hist_idx) {
                 let rec = rec.clone(); // clone to end the borrow
-                show_detail(ui, &rec, dark, &mut navigate_to_stem, &mut rerun_stem, &mut state.ui.status_message);
+                show_detail(ui, &rec, dark, &mut navigate_to, &mut rerun_stem, &mut state.ui.status_message);
             }
         }
     }
 
     // ── Handle navigation / re-run requests ───────────────────────────────
-    if let Some(stem) = navigate_to_stem {
-        if let Some(idx) = state.workspace.models.iter().position(|m| m.model.stem == stem) {
-            state.ui.selected_model = Some(idx);
-            state.ui.active_tab = Tab::Models;
+    if let Some((dir, stem)) = navigate_to {
+        // Opens the run's own project, not whichever one happens to be open.
+        if let Err(msg) = crate::ui::recent_runs::open_run(state, &dir, &stem) {
+            state.ui.status_message = msg;
         }
     }
     if let Some(_stem) = rerun_stem {
@@ -295,6 +308,7 @@ fn col_header(
 
 struct RowData {
     stem:         String,
+    project:      String,
     method:       String,
     ofv_str:      String,
     ofv_val:      f64,   // for sorting
@@ -320,12 +334,19 @@ fn build_row(hist_idx: usize, state: &AppState) -> RowData {
         _                    => 2,
     };
 
-    // OFV: look up the live model entry by stem.
-    let ofv_val = state.workspace.models.iter()
-        .find(|m| m.model.stem == rec.model_stem)
-        .and_then(|m| m.fit.as_ref())
-        .map(|f| f.ofv)
-        .unwrap_or(f64::NAN);
+    // OFV: the value stored with the run. Older records have none; for those, fall back to the
+    // model of that name — but only when it is in the project that is open, since another
+    // project may have a model with the same name.
+    let ofv_val = rec.ofv.unwrap_or_else(|| {
+        if state.workspace.directory.as_deref() != Some(rec.directory.as_path()) {
+            return f64::NAN;
+        }
+        state.workspace.models.iter()
+            .find(|m| m.model.stem == rec.model_stem)
+            .and_then(|m| m.fit.as_ref())
+            .map(|f| f.ofv)
+            .unwrap_or(f64::NAN)
+    });
     let ofv_str = if ofv_val.is_finite() {
         format!("{:.2}", ofv_val)
     } else {
@@ -347,6 +368,7 @@ fn build_row(hist_idx: usize, state: &AppState) -> RowData {
 
     RowData {
         stem:         rec.model_stem.clone(),
+        project:      crate::ui::recent_runs::project_name(&rec.directory),
         method,
         ofv_str,
         ofv_val,
@@ -418,7 +440,7 @@ fn show_detail(
     ui: &mut egui::Ui,
     rec: &crate::domain::RunRecord,
     dark: bool,
-    navigate_to_stem: &mut Option<String>,
+    navigate_to: &mut Option<(std::path::PathBuf, String)>,
     _rerun_stem: &mut Option<String>,
     status_msg: &mut String,
 ) {
@@ -458,7 +480,7 @@ fn show_detail(
                         .on_hover_text("Switch to Models tab and select this model")
                         .clicked()
                     {
-                        *navigate_to_stem = Some(rec.model_stem.clone());
+                        *navigate_to = Some((rec.directory.clone(), rec.model_stem.clone()));
                     }
                 });
             });

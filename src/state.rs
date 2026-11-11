@@ -569,6 +569,9 @@ pub struct UiState {
     // ---- Run popup ----
     /// Whether the floating run-output window is visible.
     pub run_popup_open: bool,
+    /// Recent-runs panel (opened from the status bar) and its "show more" state.
+    pub runs_panel_open: bool,
+    pub runs_panel_expanded: bool,
     pub about_open: bool,
     /// Whether the floating Settings window is visible.
     pub settings_open: bool,
@@ -846,6 +849,8 @@ impl Default for UiState {
             eval_npde_x_col_2: "PRED".to_string(),
             eval_eta_cov_view: EtaCovView::default(),
             run_popup_open:        false,
+            runs_panel_open:       false,
+            runs_panel_expanded:   false,
             about_open:            false,
             settings_open:         false,
             run_popup_last_run_id: None,
@@ -1255,10 +1260,24 @@ pub struct RunState {
     /// Runs held back because validation found errors; the user decides
     /// ("Run anyway" / dismiss) from the Run controls.
     pub validate_blocked: HashMap<String, QueuedRun>,
+    /// Runs that ended since the Recent-runs panel was last opened (status-bar badge).
+    pub unseen_finished: usize,
 }
 
 impl RunState {
     const LOG_CAPACITY: usize = 5_000;
+    /// Oldest records beyond this many are dropped from `runs.json`.
+    pub const MAX_HISTORY: usize = 500;
+
+    /// Append a finished run, keeping the history bounded and counting it as unseen.
+    pub fn push_record(&mut self, record: crate::domain::RunRecord) {
+        self.run_history.push(record);
+        let excess = self.run_history.len().saturating_sub(Self::MAX_HISTORY);
+        if excess > 0 {
+            self.run_history.drain(..excess);
+        }
+        self.unseen_finished += 1;
+    }
 
     pub fn load(app_dir: Option<&PathBuf>) -> Self {
         let run_history = app_dir.map(|d| load_runs(d)).unwrap_or_default();
@@ -1269,6 +1288,7 @@ impl RunState {
             run_queue: VecDeque::new(),
             pending_validate: HashMap::new(),
             validate_blocked: HashMap::new(),
+            unseen_finished: 0,
         }
     }
 
@@ -1557,7 +1577,7 @@ impl AppState {
                 } else {
                     format!("Run failed (exit {exit_code}): {stem}")
                 };
-                self.run.run_history.push(record.clone());
+                self.run.push_record(record.clone());
                 self.run.active_runs.remove(&stem);
                 if let Some(warn) = self.run.save_history(self.workspace.app_dir.as_ref()) {
                     self.ui.status_message = warn;

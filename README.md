@@ -288,6 +288,12 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.10.13 (2026-11-11) — central Recent runs log
+
+- **New: a Recent runs panel, opened from the status bar.** It lists the last runs from *every* project in one place, live and finished: status (symbol and word), model, project folder, method, duration, OFV and end time. Running runs come first, then failures you have not looked at yet (they stay pinned until you open or dismiss them), then the rest newest first. Click a row to open that model, switching project if needed; right-click for "Open folder" and "Dismiss". "Show more" extends the list from 10 to 50 rows; "All history" opens the History tab. The status-bar button summarises it (`2 running · 1 new · 1 failed`).
+- **Fixed: the History tab showed the wrong OFV (or none) for runs from another project.** It looked the model up by name in the open project. The OFV is now stored with each run when it finishes (older runs show "—" unless they belong to the open project). The History tab also gained a Project column, and its "go to model" button now opens the run's own project instead of any same-named model in the open one.
+- Run history is capped at the last 500 runs. Times are UTC. The log is per computer (each machine keeps its own `~/.ferxgui/runs.json`).
+
 ### v0.10.12 (2026-11-08) — editing `[data]` in the editor now reaches the Run tab
 
 - **Fixed: the Run tab kept the old dataset after you edited `[data]` in the model editor and saved.** The `[data]` path (and the parameter list) was parsed once when the folder was scanned, and saving the editor only replaced the displayed text, so "Run" and "Run now" used the previous dataset until a rescan. Saving now re-reads them and rescans the folder.

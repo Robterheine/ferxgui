@@ -59,6 +59,10 @@ pub mod theme {
     pub fn fg3(dark: bool)           -> Color32 { if dark { FG3    } else { FG3_L } }
     /// Accent colour safe to use as *text* in either theme (see `ACCENT_LIGHT`).
     pub fn accent(dark: bool)        -> Color32 { if dark { ACCENT } else { ACCENT_LIGHT } }
+    /// Red safe to use as *text* in either theme (the bare `RED` is tuned for fills and dots).
+    pub fn danger_text(dark: bool)   -> Color32 {
+        if dark { Color32::from_rgb(0xf0, 0x70, 0x70) } else { Color32::from_rgb(0xb0, 0x2a, 0x2a) }
+    }
 
     // ── Theme application ─────────────────────────────────────────────────
 
@@ -164,6 +168,16 @@ mod theme_contrast_tests {
                 let r = contrast_ratio(c, s);
                 assert!(r >= AA_NON_TEXT, "{name} on {sname} is {r:.2}, below {AA_NON_TEXT}");
             }
+        }
+    }
+
+    /// The red used for status-bar *text* must pass AA on both themes' bars.
+    #[test]
+    fn danger_text_meets_aa_in_both_themes() {
+        use super::theme::*;
+        for (dark, surface) in [(true, BG), (true, BG2), (false, Color32::WHITE), (false, Color32::from_gray(248))] {
+            let r = contrast_ratio(danger_text(dark), surface);
+            assert!(r >= AA_NORMAL_TEXT, "danger_text(dark={dark}) is {r:.2}");
         }
     }
 
@@ -474,9 +488,10 @@ impl eframe::App for FerxApp {
         // (outermost first), then side panels, then central.
         render_menu_bar(ctx, &mut self.state);
         render_header(ctx, &mut self.state);
-        render_status_bar(ctx, &self.state);
+        render_status_bar(ctx, &mut self.state);
         render_sidebar(ctx, &mut self.state);
         render_body(ctx, &mut self.state);
+        crate::ui::recent_runs::show(ctx, &mut self.state);
         // Popups are separate OS windows whose passes run nested inside this one.
         // Hold them back for the first frame so `warm_popup_glyphs` has been
         // uploaded by this window's own pass before any popup can exist.
@@ -1827,20 +1842,29 @@ fn run_panel_status(state: &AppState) -> (egui::Color32, String, String, String)
 // Status bar  (22 px)
 // ---------------------------------------------------------------------------
 
-fn render_status_bar(ctx: &egui::Context, state: &AppState) {
+fn render_status_bar(ctx: &egui::Context, state: &mut AppState) {
     egui::TopBottomPanel::bottom("status_bar")
         .exact_height(22.0)
         .show(ctx, |ui| {
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                ui.add_space(6.0);
-                if !state.ui.status_message.is_empty() {
-                    let msg_fg = if ui.visuals().dark_mode { theme::FG2 } else { egui::Color32::from_gray(100) };
-                    ui.label(
-                        egui::RichText::new(&state.ui.status_message)
-                            .color(msg_fg)
-                            .size(11.0),
-                    );
-                }
+            // The run summary is laid out first (right-aligned) so a long status message
+            // is clipped by it instead of pushing it off screen.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(8.0);
+                crate::ui::recent_runs::status_button(ui, state);
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.add_space(6.0);
+                    if !state.ui.status_message.is_empty() {
+                        let msg_fg = if ui.visuals().dark_mode { theme::FG2 } else { egui::Color32::from_gray(100) };
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(&state.ui.status_message)
+                                    .color(msg_fg)
+                                    .size(11.0),
+                            )
+                            .truncate(),
+                        );
+                    }
+                });
             });
         });
 }
@@ -1898,6 +1922,8 @@ fn reconnect_orphaned_runs(state: &mut AppState) {
             directory:     manifest.directory.clone(),
             data_path:     None,
             file_hashes:   HashMap::new(),
+            ofv:           None,
+            acknowledged:  false,
         };
 
         if !alive {
@@ -1911,7 +1937,10 @@ fn reconnect_orphaned_runs(state: &mut AppState) {
                 _ => JobStatus::Failed,
             };
             done.completed = Some(crate::workers::run::now_iso());
-            state.run.run_history.push(done);
+            if done.status == JobStatus::Completed {
+                done.ofv = crate::workers::run::bundle_ofv(&done);
+            }
+            state.run.push_record(done);
             if let Some(sp) = &manifest.status_path { let _ = std::fs::remove_file(sp); }
             RunManifest::remove(&mfst_path);
             continue;

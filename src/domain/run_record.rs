@@ -25,6 +25,15 @@ pub struct RunRecord {
     /// SHA-256 of key output files, keyed by filename.
     #[serde(default)]
     pub file_hashes: HashMap<String, String>,
+    /// Final OFV, captured when the run ended (so the run log never has to look the
+    /// model up in whichever project happens to be open). `None` for failed runs and
+    /// for records written before this field existed.
+    #[serde(default)]
+    pub ofv: Option<f64>,
+    /// The user has seen (opened or dismissed) this run's outcome. Failed/unknown runs
+    /// stay pinned in the Recent-runs panel until this is set.
+    #[serde(default)]
+    pub acknowledged: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
