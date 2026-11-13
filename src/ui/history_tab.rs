@@ -105,6 +105,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
 
     let mut clicked_row: Option<usize> = None; // index into indices[]
     let mut navigate_to: Option<(std::path::PathBuf, String)> = None;
+    let mut double_clicked_row: Option<usize> = None; // index into indices[]
     let mut rerun_stem: Option<String> = None;
 
     egui::ScrollArea::vertical()
@@ -175,6 +176,9 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                                 if resp.clicked() {
                                     clicked_row = Some(view_idx);
                                 }
+                                if resp.double_clicked() {
+                                    double_clicked_row = Some(view_idx);
+                                }
                             });
 
                             // Project.
@@ -212,6 +216,15 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                     }
                 });
         });
+
+    // Double-click: go to the run's project and open the model in the editor.
+    if let Some(rec) = double_clicked_row
+        .and_then(|v| indices.get(v))
+        .and_then(|&i| state.run.run_history.get(i))
+    {
+        navigate_to = Some((rec.directory.clone(), rec.model_stem.clone()));
+        state.ui.open_editor_after_navigate = true;
+    }
 
     // Apply click to state (after borrow ends).
     if let Some(view_idx) = clicked_row {
@@ -257,8 +270,11 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     // ── Handle navigation / re-run requests ───────────────────────────────
     if let Some((dir, stem)) = navigate_to {
         // Opens the run's own project, not whichever one happens to be open.
-        if let Err(msg) = crate::ui::recent_runs::open_run(state, &dir, &stem) {
-            state.ui.status_message = msg;
+        let to_editor = std::mem::take(&mut state.ui.open_editor_after_navigate);
+        match crate::ui::recent_runs::open_run(state, &dir, &stem) {
+            Ok(()) if to_editor => state.ui.active_model_pill = crate::state::ModelPill::Editor,
+            Ok(()) => {}
+            Err(msg) => state.ui.status_message = msg,
         }
     }
     if let Some(_stem) = rerun_stem {

@@ -572,6 +572,8 @@ pub struct UiState {
     /// Recent-runs panel (opened from the status bar) and its "show more" state.
     pub runs_panel_open: bool,
     pub runs_panel_expanded: bool,
+    /// One-shot: the History tab's double-click wants the editor, not just the model selected.
+    pub open_editor_after_navigate: bool,
     pub about_open: bool,
     /// Whether the floating Settings window is visible.
     pub settings_open: bool,
@@ -851,6 +853,7 @@ impl Default for UiState {
             run_popup_open:        false,
             runs_panel_open:       false,
             runs_panel_expanded:   false,
+            open_editor_after_navigate: false,
             about_open:            false,
             settings_open:         false,
             run_popup_last_run_id: None,

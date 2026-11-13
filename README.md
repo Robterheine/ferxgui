@@ -288,6 +288,10 @@ CI runs on every push to `main` / `master` via GitHub Actions (`.github/workflow
 
 ## Changelog
 
+### v0.10.14 (2026-11-13) — double-click a run in History to open its model
+
+- **New: double-clicking a model in the History tab goes to that run's project and opens the model file in the Models tab editor.** It switches project first when the run belongs to another one; if that folder no longer exists, the status bar says so. A single click still selects the row.
+
 ### v0.10.13 (2026-11-11) — central Recent runs log
 
 - **New: a Recent runs panel, opened from the status bar.** It lists the last runs from *every* project in one place, live and finished: status (symbol and word), model, project folder, method, duration, OFV and end time. Running runs come first, then failures you have not looked at yet (they stay pinned until you open or dismiss them), then the rest newest first. Click a row to open that model, switching project if needed; right-click for "Open folder" and "Dismiss". "Show more" extends the list from 10 to 50 rows; "All history" opens the History tab. The status-bar button summarises it (`2 running · 1 new · 1 failed`).

@@ -1265,7 +1265,7 @@ dependencies = [
 
 [[package]]
 name = "ferxgui"
-version = "0.10.13"
+version = "0.10.14"
 dependencies = [
  "csv",
  "dirs",
